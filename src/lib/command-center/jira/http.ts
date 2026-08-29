@@ -21,12 +21,17 @@ const ISSUE_FIELDS =
   "summary,status,priority,assignee,duedate,labels,fixVersions,issuetype,issuelinks,project,created,updated,flagged";
 export const JIRA_PAGE_SIZE = 50;
 export const JIRA_MAX_ISSUES = 2000; // safety cap — §11 "handle large result sets safely"
+// V2.2.1 §4/§5 — every Jira request gets an explicit abort timeout. Without this, a hung
+// Jira instance would block the request until Vercel's own platform timeout kills the
+// function uncleanly; with it, the request fails fast into the *existing*
+// network-error/errorKind classification below (no new error path needed).
+const JIRA_FETCH_TIMEOUT_MS = 20_000;
 
 export type JiraFetchResult<T> =
   | { ok: true; data: T; recordsFetched: number }
   | { ok: false; error: string; errorKind: JiraErrorKind };
 
-export type FetchLike = (url: string, init?: { headers?: Record<string, string>; method?: string; body?: string }) => Promise<{
+export type FetchLike = (url: string, init?: { headers?: Record<string, string>; method?: string; body?: string; signal?: AbortSignal }) => Promise<{
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
@@ -98,6 +103,7 @@ export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraCo
   try {
     const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/project/search", { maxResults: "50" }), {
       headers: { Authorization: authHeader(config), Accept: "application/json" },
+      signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) return { ok: false, ...classifyHttpError(res.status) };
     let json: unknown;
@@ -127,7 +133,7 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
     while (issues.length < JIRA_MAX_ISSUES) {
       const res = await fetchImpl(
         buildUrl(config.baseUrl, "/rest/api/3/search", { jql, startAt: String(startAt), maxResults: String(JIRA_PAGE_SIZE), fields: ISSUE_FIELDS }),
-        { headers: { Authorization: authHeader(config), Accept: "application/json" } }
+        { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
       );
       if (!res.ok) return { ok: false, ...classifyHttpError(res.status) };
       let json: unknown;
@@ -168,6 +174,7 @@ export async function detectJiraSearchCapability(fetchImpl: FetchLike, config: J
       method: "POST",
       headers: { Authorization: authHeader(config), Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({ jql: "order by updated desc", maxResults: 0 }),
+      signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });
     if (res.status === 404) {
       return { capability: "UNSUPPORTED", detail: "This Jira instance does not expose /rest/api/3/search/jql — cursor-based pagination is unavailable here; classic startAt pagination remains in use." };
@@ -194,6 +201,7 @@ export async function fetchIssueChangelogWith(fetchImpl: FetchLike, config: Jira
   try {
     const res = await fetchImpl(buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/changelog`, { maxResults: "100" }), {
       headers: { Authorization: authHeader(config), Accept: "application/json" },
+      signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) return { ok: false, ...classifyHttpError(res.status) };
     let json: unknown;

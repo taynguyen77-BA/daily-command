@@ -2,10 +2,15 @@
 
 import { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
-import { answerFromRoute, classifyQuery, familyForIntent, type QueryIntent } from "@/lib/command-center/query-router";
+import { answerFromRoute, classifyQuery, familyForIntent, isArtifactIntent, type QueryIntent } from "@/lib/command-center/query-router";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
-import type { QueryAnswer } from "@/lib/command-center/types";
+import { buildDecisionBriefDraft, buildReleaseUpdateDraft, buildStakeholderUpdateDraft, buildStatusUpdateDraft, buildTodaysUpdateDraft } from "@/lib/command-center/communicate";
+import { computeReleaseHealth } from "@/lib/command-center/release-health";
+import { commandCenterStore } from "@/lib/command-center/store";
+import { commandUsageKey, USAGE_KEYS } from "@/lib/command-center/usage";
+import type { ArtifactDraft, QueryAnswer } from "@/lib/command-center/types";
 import { useCommandCenter } from "./use-command-center";
+import { ArtifactEditor } from "./ArtifactEditor";
 import { ConfidenceTag, Panel, TrustLabel } from "./ui";
 
 const EXAMPLES = [
@@ -28,6 +33,8 @@ export function CommandBar() {
   const [result, setResult] = useState<QueryAnswer | null>(null);
   const [lastQuery, setLastQuery] = useState("");
   const [intent, setIntent] = useState<QueryIntent | null>(null);
+  const [artifactDraft, setArtifactDraft] = useState<ArtifactDraft | null>(null);
+  const [artifactNote, setArtifactNote] = useState<string | null>(null);
 
   const personalReview = useMemo(
     () => (proactive && personalFocus ? buildPersonalDeliveryReviewFacts(state.personalPlan, personalFocus.candidates, proactive.actionEffectiveness, filteredData, 7, today) : undefined),
@@ -38,6 +45,10 @@ export function CommandBar() {
     if (!q.trim()) return;
     setLoading(true);
     setLastQuery(q);
+    setResult(null);
+    setArtifactDraft(null);
+    setArtifactNote(null);
+    commandCenterStore.bumpUsage(USAGE_KEYS.COMMAND_BAR_USED);
     const route = classifyQuery(q, filteredData);
     setIntent(route.intent);
     if (route.intent === "unrecognized") {
@@ -52,6 +63,14 @@ export function CommandBar() {
       setLoading(false);
       return;
     }
+
+    if (isArtifactIntent(route.intent)) {
+      commandCenterStore.bumpUsage(commandUsageKey(route.intent));
+      await runArtifactIntent(route.intent, route.target);
+      setLoading(false);
+      return;
+    }
+
     const { facts, evidence, recommendedAction } = answerFromRoute(
       route,
       filteredData,
@@ -65,6 +84,55 @@ export function CommandBar() {
     const answer = await getAIProvider().answerQuery(q, facts, evidence, recommendedAction);
     setResult(answer);
     setLoading(false);
+  }
+
+  // V2.2 §10 — a distinct, non-narrated outcome: builds the artifact directly from
+  // communicate.ts (no answerQuery/AI narration) and opens the Artifact Editor.
+  async function runArtifactIntent(artifactIntent: QueryIntent, target: string | undefined) {
+    if (!proactive) {
+      setArtifactNote("Proactive intelligence is not available yet.");
+      return;
+    }
+    if (artifactIntent === "create-status-update") {
+      setArtifactDraft(buildStatusUpdateDraft(filteredData, derived, proactive, personalFocus ?? null, today, "Command Bar"));
+      return;
+    }
+    if (artifactIntent === "summarize-today") {
+      setArtifactDraft(buildTodaysUpdateDraft(filteredData, proactive, personalFocus ?? null, today));
+      return;
+    }
+    if (artifactIntent === "create-stakeholder-update") {
+      const item = proactive.attentionQueue[0];
+      if (!item) {
+        setArtifactNote("Nothing currently needs attention to draft a stakeholder update from.");
+        return;
+      }
+      setArtifactDraft(buildStakeholderUpdateDraft({ kind: "attention", item }, target ? `Command Bar: draft update for ${target}` : "Command Bar"));
+      return;
+    }
+    if (artifactIntent === "create-release-update") {
+      const version = target ?? filteredData.workItems.find((w) => w.fixVersion)?.fixVersion;
+      if (!version) {
+        setArtifactNote("No release/fix version found in the current data.");
+        return;
+      }
+      setArtifactDraft(buildReleaseUpdateDraft(computeReleaseHealth(filteredData, version, today), filteredData, "Command Bar"));
+      return;
+    }
+    if (artifactIntent === "create-decision-brief") {
+      const item = proactive.decisionRadar[0];
+      if (!item) {
+        setArtifactNote("No decision currently needs review to draft a brief from.");
+        return;
+      }
+      const attentionItem = proactive.attentionQueue.find((a) => a.sourceRef?.type === "decision" && a.sourceRef.id === item.decisionId);
+      if (!attentionItem) {
+        setArtifactNote("No matching attention item found for this decision.");
+        return;
+      }
+      const options = await getAIProvider().generateDecisionOptions(attentionItem.what, [attentionItem.why, attentionItem.impact], attentionItem.evidence);
+      setArtifactDraft(buildDecisionBriefDraft(attentionItem, options, "Command Bar"));
+    }
   }
 
   return (
@@ -104,6 +172,8 @@ export function CommandBar() {
           ))}
         </div>
       )}
+
+      {artifactNote && <p className="mt-3 border-t border-border pt-3 text-sm text-text3">{artifactNote}</p>}
 
       {result && (
         <div className="mt-3 space-y-2 border-t border-border pt-3 text-sm">
@@ -145,6 +215,8 @@ export function CommandBar() {
           )}
         </div>
       )}
+
+      {artifactDraft && <ArtifactEditor draft={artifactDraft} onClose={() => setArtifactDraft(null)} />}
     </Panel>
   );
 }

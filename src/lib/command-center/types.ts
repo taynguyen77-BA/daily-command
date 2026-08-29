@@ -1262,4 +1262,58 @@ export interface DataHealth {
   remediation?: DataHealthRemediationItem[];
 }
 
+// ===== V2.2 — Evidence -> Delivery Artifact (the COMMUNICATE layer) =====
+// Additive to every prior version. An Artifact is a rendering/assembly of facts the
+// deterministic engines already computed (see communicate.ts) plus, optionally, AI-drafted
+// wording and user edits — never a new source of truth. §5 "never merge these silently":
+// every section is a list of typed segments so CALCULATED/EVIDENCE/AI_DRAFT/USER_INPUT/
+// UNKNOWN are always visually and structurally distinct, never fused into one blob.
+
+export type ArtifactType = "STATUS_UPDATE" | "STAKEHOLDER_UPDATE" | "RELEASE_UPDATE" | "DECISION_BRIEF";
+
+export type ArtifactSegmentKind = "CALCULATED" | "EVIDENCE" | "AI_DRAFT" | "USER_INPUT" | "UNKNOWN";
+
+export interface ArtifactSegment {
+  kind: ArtifactSegmentKind;
+  text: string;
+  evidenceIds?: string[]; // ids into ArtifactDraft.evidence — backs the Evidence Drawer (§14)
+}
+
+export interface ArtifactSection {
+  heading: string;
+  segments: ArtifactSegment[];
+}
+
+/** Points a saved artifact back at the live inputs it can be rebuilt from, for the §17
+ *  staleness check. Only the cheap-to-rebuild-from-live-data source kinds are covered
+ *  (rebuilding a Decision Brief would require a fresh AI call, which staleness detection
+ *  must never trigger on its own) — anything else is simply reported as "not checkable"
+ *  rather than faked (see communicate.ts rebuildDraftFromSourceRef). */
+export type ArtifactSourceRef =
+  | { type: "status" }
+  | { type: "todays-update" }
+  | { type: "attention"; itemId: string }
+  | { type: "release"; fixVersion: string };
+
+/** A freshly-assembled, not-yet-saved artifact. Pure output of communicate.ts — no AI call
+ *  has necessarily happened yet (AI_DRAFT segments are absent until the user asks). */
+export interface ArtifactDraft {
+  type: ArtifactType;
+  sourceContext: string; // e.g. "Control Tower", "Decision Radar: <title>", "Meeting Mode"
+  sections: ArtifactSection[];
+  evidence: Evidence[];
+  evidenceVersion: string; // from ai/ai-cache.ts's makeEvidenceVersion — staleness basis (§17)
+  sourceRef?: ArtifactSourceRef;
+}
+
+/** A saved artifact (§16 Artifact History). `editedText` is the user's own edited plain
+ *  text once they've touched the textarea — first-class, never overwritten silently. */
+export interface ArtifactRecord extends ArtifactDraft {
+  id: string;
+  createdAt: string; // ISO
+  aiDraftText?: string;
+  aiDraftMode?: "mock" | "claude";
+  editedText?: string;
+}
+
 export const DATA_SCHEMA_VERSION = 5;

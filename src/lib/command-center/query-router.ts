@@ -50,6 +50,15 @@ export type QueryIntent =
   | "where-spending-time"
   | "whats-blocking-focus"
   | "what-should-i-defer"
+  // V2.2 §10 — Command Bar artifact intents. Deliberately NOT narrated through
+  // answerFromRoute/answerQuery (see isArtifactIntent below) — these open the Artifact
+  // Editor with a communicate.ts-built draft instead of an AI-narrated answer, so Command
+  // Bar stays a deterministic router, never a chatbot.
+  | "create-status-update"
+  | "create-stakeholder-update"
+  | "create-release-update"
+  | "create-decision-brief"
+  | "summarize-today"
   | "unrecognized";
 
 export interface RoutedQuery {
@@ -62,7 +71,11 @@ export interface RoutedQuery {
 // query/handler keeps working); they're grouped into the 7 command families the spec asks
 // for, purely for labeling/discoverability in the UI. This is a dispatch-surface label,
 // not a new routing layer — classifyQuery()/answerFromRoute() below are unchanged.
-export type QueryFamily = "STATUS" | "PRIORITY" | "DECISION" | "ACTION" | "DELIVERY" | "PERSONAL" | "MEMORY";
+// V2.2 §10 adds ARTIFACT — the 5 "create/draft/prepare/summarize an artifact" intents.
+// Distinct from every other family: those are all narrated through answerFromRoute/
+// answerQuery, these open the Artifact Editor directly (see CommandBar.tsx) and never
+// produce an AI-narrated inline answer.
+export type QueryFamily = "STATUS" | "PRIORITY" | "DECISION" | "ACTION" | "DELIVERY" | "PERSONAL" | "MEMORY" | "ARTIFACT";
 
 const QUERY_FAMILY: Record<Exclude<QueryIntent, "unrecognized">, QueryFamily> = {
   "changed-today": "STATUS",
@@ -104,7 +117,19 @@ const QUERY_FAMILY: Record<Exclude<QueryIntent, "unrecognized">, QueryFamily> = 
   "did-yesterday-help": "MEMORY",
   "what-did-i-work-on": "MEMORY",
   "what-did-i-skip": "MEMORY",
+
+  "create-status-update": "ARTIFACT",
+  "create-stakeholder-update": "ARTIFACT",
+  "create-release-update": "ARTIFACT",
+  "create-decision-brief": "ARTIFACT",
+  "summarize-today": "ARTIFACT",
 };
+
+/** V2.2 §10 — true for the 5 artifact-creation intents; CommandBar.tsx uses this to route
+ *  to the Artifact Editor instead of calling answerFromRoute/answerQuery. */
+export function isArtifactIntent(intent: QueryIntent): boolean {
+  return intent === "create-status-update" || intent === "create-stakeholder-update" || intent === "create-release-update" || intent === "create-decision-brief" || intent === "summarize-today";
+}
 
 export function familyForIntent(intent: QueryIntent): QueryFamily | undefined {
   return intent === "unrecognized" ? undefined : QUERY_FAMILY[intent];
@@ -120,6 +145,24 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   const clientNames = data.clients.map((c) => c.name);
   const projectNames = data.projects.map((p) => p.name);
   const versions = availableFixVersions(data);
+
+  // V2.2 §10 — checked first, same reasoning as the V1.4 block below: these must win over
+  // the generic patterns (a plain "risk"/"decision" match would otherwise shadow them).
+  if (/create status update|status update/.test(q)) {
+    return { intent: "create-status-update" };
+  }
+  if (/draft stakeholder update|prepare stakeholder update|stakeholder update|draft update for/.test(q)) {
+    return { intent: "create-stakeholder-update", target: findTarget(q, [...clientNames, ...projectNames]) };
+  }
+  if (/prepare release update|draft release update|release update/.test(q)) {
+    return { intent: "create-release-update", target: findTarget(q, versions) };
+  }
+  if (/prepare decision brief|draft decision brief|decision brief/.test(q)) {
+    return { intent: "create-decision-brief" };
+  }
+  if (/summarize today.?s delivery|summarize today|daily summary/.test(q)) {
+    return { intent: "summarize-today" };
+  }
 
   // V1.4 §29 — checked first, since several overlap generic V1.3 keywords ("risk", "what
   // should i do") and need to win over the broader existing patterns below.

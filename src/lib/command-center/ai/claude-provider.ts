@@ -11,6 +11,7 @@
 
 import type {
   Action,
+  ArtifactType,
   ChangeEvent,
   DailyGuidanceResult,
   DecisionConflictAssessment,
@@ -34,6 +35,7 @@ import { actionOutcomePrompt } from "./prompts/action-outcome";
 import { actionPlanPrompt } from "./prompts/action-plan";
 import { changeAnalysisPrompt } from "./prompts/change-analysis";
 import { communicationPrompt } from "./prompts/communication";
+import { communicationArtifactPrompt } from "./prompts/communication-artifact";
 import { dailyGuidancePrompt } from "./prompts/daily-guidance";
 import { decisionConflictPrompt } from "./prompts/decision-conflict";
 import { decisionOptionsPrompt } from "./prompts/decision-options";
@@ -46,10 +48,11 @@ import { queryAnswerPrompt } from "./prompts/query-answer";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
-import { MockAIProvider, type AIProvider } from "./provider";
+import { MockAIProvider, type AIProvider, type CommunicationArtifactResult } from "./provider";
 import { recordAiCall } from "./trace";
 import {
   assessmentResponseSchema,
+  communicationArtifactResponseSchema,
   dailyGuidanceResponseSchema,
   decisionOptionsResponseSchema,
   outcomeInterpretationResponseSchema,
@@ -61,6 +64,7 @@ import {
   trendResponseSchema,
   type AITask,
   type AssessmentResponse,
+  type CommunicationArtifactResponse,
   type DailyGuidanceResponse,
   type DecisionOptionsResponse,
   type OutcomeInterpretationResponse,
@@ -125,6 +129,10 @@ export class ClaudeProvider implements AIProvider {
 
   private async callDailyGuidance(task: AITask, prompt: string): Promise<CallResult<DailyGuidanceResponse>> {
     return this.call(task, prompt, dailyGuidanceResponseSchema);
+  }
+
+  private async callCommunicationArtifact(task: AITask, prompt: string): Promise<CallResult<CommunicationArtifactResponse>> {
+    return this.call(task, prompt, communicationArtifactResponseSchema);
   }
 
   private async call<T>(task: AITask, prompt: string, schema: { safeParse: (v: unknown) => { success: boolean; data?: T } }): Promise<CallResult<T>> {
@@ -335,6 +343,12 @@ export class ClaudeProvider implements AIProvider {
       };
     }
     return this.mock.generateDailyGuidance(topFocusFacts, watchFacts, planFacts, recentOutcomeFacts, evidenceStrings);
+  }
+
+  async generateCommunicationArtifact(type: ArtifactType, facts: string[], evidenceStrings: string[]): Promise<CommunicationArtifactResult> {
+    const r = await this.callCommunicationArtifact("generateCommunicationArtifact", communicationArtifactPrompt(type, facts, evidenceStrings));
+    if (r.ok) return { text: r.data.text, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
+    return this.mock.generateCommunicationArtifact(type, facts, evidenceStrings);
   }
 }
 

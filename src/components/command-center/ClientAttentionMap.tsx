@@ -20,6 +20,7 @@ export function ClientAttentionMap({ rows }: { rows: ClientAttentionRow[] }) {
       <SectionHeading title="Client Attention Map" subtitle="Which client needs you first." />
       <Panel className="overflow-x-auto p-0">
         <table className="w-full min-w-[560px] text-sm">
+          <caption className="sr-only">Client Attention Map — confidence, trend, top risk, open decisions, and critical dependencies per client.</caption>
           <thead>
             <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-text3">
               <th scope="col" className="px-4 py-2">Client</th>

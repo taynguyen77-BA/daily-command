@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   aiRequestSchema,
   assessmentResponseSchema,
+  communicationArtifactResponseSchema,
   dailyGuidanceResponseSchema,
   decisionOptionsResponseSchema,
   outcomeInterpretationResponseSchema,
@@ -30,6 +31,7 @@ const PROJECT_STORY_TASKS = new Set(["generateProjectStory"]);
 const DECISION_OPTIONS_TASKS = new Set(["generateDecisionOptions"]);
 const OUTCOME_INTERPRETATION_TASKS = new Set(["interpretOutcome"]);
 const DAILY_GUIDANCE_TASKS = new Set(["generateDailyGuidance"]);
+const COMMUNICATION_ARTIFACT_TASKS = new Set(["generateCommunicationArtifact"]);
 // V1.5 §8-10 — a 2-4 option decision matrix is verbose; give it more room than the other,
 // single-paragraph task shapes.
 const LARGE_OUTPUT_TASKS = new Set(["generateDecisionOptions"]);
@@ -74,7 +76,10 @@ export async function POST(req: Request) {
   const { task, prompt } = parsedRequest.data;
 
   try {
-    const client = new Anthropic({ apiKey });
+    // V2.2.1 §4 — an explicit, sane timeout so a slow/hung model call fails fast into the
+    // existing catch-block error handling below rather than running until Vercel's own
+    // platform function timeout kills it uncleanly (the SDK's own default is 10 minutes).
+    const client = new Anthropic({ apiKey, timeout: 25_000 });
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: LARGE_OUTPUT_TASKS.has(task) ? 1536 : 512,
@@ -112,7 +117,9 @@ export async function POST(req: Request) {
                     ? outcomeInterpretationResponseSchema
                     : DAILY_GUIDANCE_TASKS.has(task)
                       ? dailyGuidanceResponseSchema
-                      : textResponseSchema;
+                      : COMMUNICATION_ARTIFACT_TASKS.has(task)
+                        ? communicationArtifactResponseSchema
+                        : textResponseSchema;
     const validated = schema.safeParse(json);
     if (!validated.success) {
       return NextResponse.json({ ok: false, error: "Model response failed schema validation." }, { status: 502 });

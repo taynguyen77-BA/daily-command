@@ -104,6 +104,28 @@ import { buildBeforeYouTrustSummary } from "../src/lib/command-center/trust-diag
 import { getCacheStats, resetCacheStats } from "../src/lib/command-center/ai/ai-cache";
 import { getAiTraceSummary } from "../src/lib/command-center/ai/trace";
 
+// V2.2 — Evidence -> Delivery Artifact (the COMMUNICATE layer)
+import {
+  buildDecisionBriefDraft,
+  buildMeetingModeBrief,
+  buildNeedsFromOthers,
+  buildReleaseUpdateDraft,
+  buildStakeholderUpdateDraft,
+  buildStatusUpdateDraft,
+  buildTodaysUpdateDraft,
+  isArtifactStale,
+  rebuildDraftFromSourceRef,
+  renderArtifactText,
+  renderMeetingModeText,
+  renderNeedsFromOthersText,
+  summarizeArtifactTrust,
+} from "../src/lib/command-center/communicate";
+import { artifactUsageKey, commandUsageKey, computeUsageSummary } from "../src/lib/command-center/usage";
+import { isArtifactIntent } from "../src/lib/command-center/query-router";
+import { communicationArtifactResponseSchema } from "../src/lib/command-center/ai/schemas";
+import type { WhyShouldICareContent } from "../src/lib/command-center/why-should-i-care";
+import type { DecisionOptionsResult, Project } from "../src/lib/command-center/types";
+
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
@@ -3580,6 +3602,376 @@ function pfc(overrides: Partial<PersonalFocusCandidate> = {}): PersonalFocusCand
   const zeroProactive = computeProactiveIntelligence(zeroData, zeroDerived, [], null, {}, "manual", TODAY);
   ok("V2.1 Action effectiveness consistency", zeroProactive.actionEffectivenessToday.length === 0, "a dataset with zero actions completed today produces an empty actionEffectivenessToday, not a crash or a fabricated count");
   ok("V2.1 Action effectiveness consistency", zeroProactive.outcomeScorecard.actionsCompleted === 0 && zeroProactive.outcomeScorecard.actionsEffective === 0, "the scorecard reports zero/zero rather than falling back to lifetime history when nothing was completed today");
+}
+
+// ===== V2.2 — Evidence -> Delivery Artifact =====
+
+const v22Clients: Client[] = [{ id: "v22-c1", name: "JPMC" }];
+const v22Projects: Project[] = [{ id: "v22-p1", name: "Core Banking", clientId: "v22-c1", status: "at-risk" }];
+const v22Blocked = makeItem({
+  id: "v22-w1",
+  key: "V22-1",
+  title: "Ledger sync",
+  projectId: "v22-p1",
+  clientId: "v22-c1",
+  status: "Blocked",
+  blocked: true,
+  blockerReason: "Waiting on API contract",
+  priority: "P1",
+  owner: undefined,
+  fixVersion: "R-2026.1",
+});
+const v22Normal = makeItem({
+  id: "v22-w2",
+  key: "V22-2",
+  title: "Reporting UI",
+  projectId: "v22-p1",
+  clientId: "v22-c1",
+  status: "In Progress",
+  priority: "P2",
+  owner: "Alice",
+  fixVersion: "R-2026.1",
+});
+const v22Dep: Dependency = { id: "v22-dep1", workItemId: "v22-w2", description: "API contract from Platform", dependsOnTeam: "Platform", status: "unresolved", raisedDate: TODAY };
+const v22Data: CommandCenterData = { ...emptyData(), clients: v22Clients, projects: v22Projects, workItems: [v22Blocked, v22Normal], dependencies: [v22Dep] };
+const v22Derived = deriveData(v22Data, null, TODAY);
+const v22Proactive = computeProactiveIntelligence(v22Data, v22Derived, [], null, {}, "manual", TODAY);
+const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, TODAY);
+
+// ----- Artifact composition -----
+{
+  const statusDraft = buildStatusUpdateDraft(v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY, "Control Tower");
+  ok("V2.2 Artifact composition", statusDraft.type === "STATUS_UPDATE", "buildStatusUpdateDraft produces a STATUS_UPDATE artifact");
+  ok(
+    "V2.2 Artifact composition",
+    statusDraft.sections.map((s) => s.heading).join(",") === "Overall,What changed,Top risks,Decisions needed,Actions,Next",
+    "the Daily Status Update has exactly the §4.1 section headings, in order"
+  );
+  ok("V2.2 Artifact composition", statusDraft.evidenceVersion.length > 0, "a fresh draft always carries a non-empty evidenceVersion");
+  ok("V2.2 Artifact composition", statusDraft.sourceRef?.type === "status", "buildStatusUpdateDraft tags a rebuildable sourceRef for staleness checking");
+
+  const statusDraftAgain = buildStatusUpdateDraft(v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY, "Control Tower");
+  ok("V2.2 Artifact composition", statusDraft.evidenceVersion === statusDraftAgain.evidenceVersion, "identical inputs produce an identical evidenceVersion — deterministic, not random");
+
+  // A real "what changed" event (not just an unrelated new item) must move evidenceVersion:
+  // simulate a previous snapshot where v22Blocked wasn't yet blocked.
+  const previousDataForChange: CommandCenterData = { ...v22Data, workItems: [{ ...v22Blocked, status: "In Progress", blocked: false, blockerReason: undefined }, v22Normal] };
+  const previousSnapshotForChange = toSnapshot(previousDataForChange, "2026-06-14");
+  const derived2 = deriveData(v22Data, previousSnapshotForChange, TODAY);
+  const proactive2 = computeProactiveIntelligence(v22Data, derived2, [previousSnapshotForChange], previousSnapshotForChange, {}, "manual", TODAY);
+  const personalFocus2 = computePersonalFocus(v22Data, proactive2, undefined, TODAY);
+  const statusDraft2 = buildStatusUpdateDraft(v22Data, derived2, proactive2, personalFocus2, TODAY, "Control Tower");
+  ok("V2.2 Artifact composition", statusDraft.evidenceVersion !== statusDraft2.evidenceVersion, "a real change in the underlying data (a detected status change) changes evidenceVersion — the staleness basis actually tracks facts");
+
+  const todaysUpdate = buildTodaysUpdateDraft(v22Data, v22Proactive, v22PersonalFocus, TODAY);
+  ok(
+    "V2.2 Artifact composition",
+    todaysUpdate.sections.map((s) => s.heading).join(",") === "Today,Watch,Don't forget,Decisions,Actions,Delivery",
+    "§11 'Create Today's Update' uses the TODAY/WATCH/DON'T FORGET/DECISIONS/ACTIONS/DELIVERY layout"
+  );
+  ok("V2.2 Artifact composition", todaysUpdate.sourceRef?.type === "todays-update", "Today's Update carries its own distinct sourceRef kind");
+
+  const emptyDraft = buildStatusUpdateDraft(emptyData(), deriveData(emptyData(), null, TODAY), computeProactiveIntelligence(emptyData(), deriveData(emptyData(), null, TODAY), [], null, {}, "manual", TODAY), null, TODAY, "Control Tower");
+  ok("V2.2 Artifact composition", emptyDraft.sections.every((s) => s.segments.length > 0), "an empty dataset never produces an empty section — every section falls back to an honest 'nothing' statement, never a crash");
+}
+
+// ----- Stakeholder Update: fact preservation (§9) -----
+{
+  const attItem: AttentionItem = {
+    id: "v22-att-1",
+    category: "RISK",
+    severity: "HIGH",
+    what: "Ledger sync at risk",
+    why: "Blocked on API contract from Platform",
+    impact: "Release R-2026.1 may slip",
+    nowWhat: "Escalate to Platform team lead",
+    evidence: ["Blocked since 2026-06-10", "P1 priority"],
+    lifecycle: "ACTIVE",
+    firstSeenDate: TODAY,
+    lastSeenDate: TODAY,
+  };
+  const stakeholderDraft = buildStakeholderUpdateDraft({ kind: "attention", item: attItem }, "Attention Queue");
+  ok(
+    "V2.2 Stakeholder Update",
+    stakeholderDraft.sections.map((s) => s.heading).join(",") === "Subject,Current situation,Impact,What we need,Next step",
+    "the Stakeholder Update has exactly the §4.2 section headings"
+  );
+  ok("V2.2 Stakeholder Update", stakeholderDraft.sections.find((s) => s.heading === "Current situation")?.segments[0].text === attItem.why, "'Current situation' preserves the attention item's WHY verbatim, never rephrased");
+  ok("V2.2 Stakeholder Update", stakeholderDraft.evidence.map((e) => e.content).join("|") === attItem.evidence.join("|"), "the artifact's evidence is exactly the source item's evidence — no invented facts");
+  ok("V2.2 Stakeholder Update", stakeholderDraft.sourceRef?.type === "attention" && stakeholderDraft.sourceRef.itemId === attItem.id, "the attention-sourced draft tags a rebuildable sourceRef");
+
+  const wsicContent: WhyShouldICareContent = {
+    fact: ["Status: UNDER_REVIEW", "No decision date recorded"],
+    signal: "Decision Radar flags this for review.",
+    impact: { currentCondition: "Decision is under review.", unresolvedSignal: "If no intervention occurs, this decision is expected to remain unreviewed.", affectedEntities: [], evidence: [], confidence: 0.7, insufficientEvidence: false },
+    unknown: ["No review date is set for this decision."],
+    nextMove: "Review, keep, or mark this decision superseded.",
+    evidence: [],
+  };
+  const wsicDraft = buildStakeholderUpdateDraft({ kind: "why-should-i-care", content: wsicContent, subjectTitle: "Choose vendor" }, "Decision: Choose vendor");
+  const wsicUnknownSection = wsicDraft.sections.find((s) => s.heading === "Unknown");
+  ok("V2.2 Stakeholder Update", !!wsicUnknownSection && wsicUnknownSection.segments[0].kind === "UNKNOWN" && wsicUnknownSection.segments[0].text === wsicContent.unknown[0], "Why Should I Care's UNKNOWN facts are preserved verbatim as UNKNOWN-kind segments, never silently dropped or reworded");
+  const currentSituationText = wsicDraft.sections.find((s) => s.heading === "Current situation")!.segments.map((s) => s.text);
+  ok("V2.2 Stakeholder Update", wsicContent.fact.every((f) => currentSituationText.includes(f)), "every FACT string from Why Should I Care appears verbatim in the artifact — the AI may draft wording separately, but it never replaces these facts");
+  ok("V2.2 Stakeholder Update", wsicDraft.sourceRef === undefined, "a Why-Should-I-Care-sourced draft has no cheap rebuild path — staleness must be reported 'unavailable', never faked");
+}
+
+// ----- Release Update -----
+{
+  const release = computeReleaseHealth(v22Data, "R-2026.1", TODAY);
+  const releaseDraft = buildReleaseUpdateDraft(release, v22Data, "Release Health");
+  ok(
+    "V2.2 Release Update",
+    releaseDraft.sections.map((s) => s.heading).join(",") === "Release,Confidence,Readiness,Key blockers,Open dependencies,Decisions,Next actions",
+    "the Release Update has exactly the §4.3 section headings"
+  );
+  ok("V2.2 Release Update", releaseDraft.sections.find((s) => s.heading === "Release")?.segments[0].text === "R-2026.1", "the Release section names the exact fix version");
+  const openDepsText = releaseDraft.sections.find((s) => s.heading === "Open dependencies")!.segments.map((s) => s.text).join(" ");
+  ok("V2.2 Release Update", openDepsText.includes(v22Dep.description), "an unresolved dependency on a work item in this release appears in Open Dependencies");
+  ok("V2.2 Release Update", releaseDraft.sourceRef?.type === "release" && releaseDraft.sourceRef.fixVersion === "R-2026.1", "the release draft tags a rebuildable sourceRef");
+}
+
+// ----- Decision Brief — the system never decides (§4) -----
+{
+  const decItem: AttentionItem = {
+    id: "v22-att-dec",
+    category: "DECISION",
+    severity: "MEDIUM",
+    what: "Choose vendor for reconciliation service",
+    why: "Decision has been open for 12 days without review",
+    impact: "Delays downstream integration work",
+    nowWhat: "Review and confirm or supersede",
+    evidence: ["Opened 2026-06-03", "No owner assigned"],
+    lifecycle: "ACTIVE",
+    firstSeenDate: TODAY,
+    lastSeenDate: TODAY,
+  };
+  const decisionOptions: DecisionOptionsResult = {
+    summary: "Two viable vendors identified.",
+    options: [
+      { id: "A", label: "Vendor A", rationale: "Lower cost", upside: "Cheaper", downside: "Slower support", dependencies: [], risks: [], evidence: [], confidence: 0.6 },
+      { id: "B", label: "Vendor B", rationale: "Faster integration", upside: "Faster", downside: "Higher cost", dependencies: [], risks: [], evidence: [], confidence: 0.55 },
+    ],
+    recommendedOptionId: "A",
+    tradeoffs: "Vendor A trades support speed for cost; Vendor B trades cost for speed.",
+    confidence: 0.6,
+  };
+  const briefDraft = buildDecisionBriefDraft(decItem, decisionOptions, "Decision Radar");
+  ok(
+    "V2.2 Decision Brief",
+    briefDraft.sections.map((s) => s.heading).join(",") === "Decision,Why now,Options,Trade-offs,Evidence,Recommended human decision",
+    "the Decision Brief has exactly the §4.4 section headings"
+  );
+  const briefSummary = summarizeArtifactTrust(briefDraft.sections);
+  ok("V2.2 Decision Brief", briefSummary.userInputCount === 1, "'Recommended human decision' is the only USER_INPUT segment — left for the human, never pre-filled by AI");
+  ok("V2.2 Decision Brief", briefSummary.aiDraftCount === decisionOptions.options.length + 1, "Options + Trade-offs are labeled AI_DRAFT (they came from generateDecisionOptions) — one segment per option plus the trade-offs line");
+  ok(
+    "V2.2 Decision Brief",
+    briefDraft.sections.find((s) => s.heading === "Recommended human decision")!.segments[0].text.toLowerCase().includes("not yet decided"),
+    "the human-decision section is explicitly a placeholder, never a fabricated recommendation presented as the decision"
+  );
+}
+
+// ----- Needs From Others (§13) — never guess owner/deadline -----
+{
+  const rows = buildNeedsFromOthers(v22Data, v22Proactive);
+  ok("V2.2 Needs From Others", rows.length > 0, "an unowned P1 work item and an unowned dependency produce at least one row");
+  const unknownRow = rows.find((r) => r.isUnknownPerson);
+  ok("V2.2 Needs From Others", !!unknownRow && unknownRow.person === "UNKNOWN" && unknownRow.by === "UNKNOWN", "when no owner is available, person/by literally read UNKNOWN rather than a guess");
+  ok("V2.2 Needs From Others", renderNeedsFromOthersText(rows).includes("No owner/deadline is available in the source data."), "the rendered text explains the UNKNOWN, matching the spec's worked example");
+
+  const noneRows = buildNeedsFromOthers(emptyData(), computeProactiveIntelligence(emptyData(), deriveData(emptyData(), null, TODAY), [], null, {}, "manual", TODAY));
+  ok("V2.2 Needs From Others", noneRows.length === 0, "an empty dataset produces zero rows, not a crash or a fabricated need");
+  ok("V2.2 Needs From Others", renderNeedsFromOthersText(noneRows) === "NEEDS FROM OTHERS\n(none currently)", "zero rows render an honest 'none currently' rather than an empty string");
+}
+
+// ----- Meeting Mode -----
+{
+  const brief = buildMeetingModeBrief(v22Data, v22Derived, v22Proactive, TODAY);
+  ok("V2.2 Meeting Mode", brief.questions.length === 5, "Meeting Mode surfaces exactly the 5 evidence-backed questions (the 6th, 'what should I say', is a separate deterministic summary field)");
+  const blockedQ = brief.questions.find((q) => q.question === "What is blocked?");
+  ok("V2.2 Meeting Mode", !!blockedQ && blockedQ.items.some((i) => i.includes("V22-1")), "the blocked work item appears under 'What is blocked?'");
+  ok("V2.2 Meeting Mode", brief.whatShouldISay.length > 0, "'What should I say?' is a non-empty deterministic summary, not an AI call");
+  ok("V2.2 Meeting Mode", renderMeetingModeText(brief).startsWith("MEETING MODE"), "the copyable meeting summary is well-formed plain text");
+
+  const emptyBrief = buildMeetingModeBrief(emptyData(), deriveData(emptyData(), null, TODAY), computeProactiveIntelligence(emptyData(), deriveData(emptyData(), null, TODAY), [], null, {}, "manual", TODAY), TODAY);
+  ok("V2.2 Meeting Mode", emptyBrief.questions.every((q) => q.items.length > 0), "an empty dataset still renders an honest 'nothing' answer for every question, never a blank/crashed section");
+}
+
+// ----- Trust model / Copy Safety (§5, §15) -----
+{
+  const statusDraft = buildStatusUpdateDraft(v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY, "Control Tower");
+  const summary = summarizeArtifactTrust(statusDraft.sections);
+  const totalSegments = statusDraft.sections.reduce((n, s) => n + s.segments.length, 0);
+  ok("V2.2 Trust model", summary.calculatedCount + summary.evidenceCount + summary.aiDraftCount + summary.userInputCount + summary.unknownCount === totalSegments, "summarizeArtifactTrust's counts add up to the total segment count — nothing double-counted or missed");
+  ok("V2.2 Trust model", summary.aiDraftCount === 0, "a freshly-built draft (no AI wording generated yet) has zero AI_DRAFT segments");
+
+  const text = renderArtifactText(statusDraft.sections, "Suggested wording.");
+  ok("V2.2 Trust model", text.includes("SUGGESTED WORDING (AI DRAFT)"), "renderArtifactText clearly labels AI-drafted wording as a separate block, never merges it into the facts silently");
+}
+
+// ----- Staleness (§17) -----
+{
+  const statusDraft = buildStatusUpdateDraft(v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY, "Control Tower");
+  ok("V2.2 Staleness", !isArtifactStale(statusDraft.evidenceVersion, statusDraft.evidenceVersion), "identical evidenceVersion is never reported stale");
+  ok("V2.2 Staleness", isArtifactStale(statusDraft.evidenceVersion, "some-other-version"), "a changed evidenceVersion is reported stale");
+
+  const rebuilt = rebuildDraftFromSourceRef(statusDraft.sourceRef, "Control Tower", v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY);
+  ok("V2.2 Staleness", !!rebuilt && rebuilt.evidenceVersion === statusDraft.evidenceVersion, "rebuilding from the same sourceRef against unchanged data reproduces the identical evidenceVersion");
+
+  ok("V2.2 Staleness", rebuildDraftFromSourceRef(undefined, "x", v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY) === null, "no sourceRef (e.g. a Decision Brief or Why-Should-I-Care draft) is honestly reported as not rebuildable, never faked");
+  ok("V2.2 Staleness", rebuildDraftFromSourceRef({ type: "attention", itemId: "does-not-exist" }, "x", v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY) === null, "a sourceRef pointing at an attention item that's no longer present rebuilds to null rather than fabricating stale content");
+  ok("V2.2 Staleness", rebuildDraftFromSourceRef({ type: "release", fixVersion: "DOES-NOT-EXIST" }, "x", v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY) === null, "a sourceRef pointing at a release no longer present in the data rebuilds to null");
+}
+
+// ----- AI: COMMUNICATION_ARTIFACT (§8) -----
+{
+  ok("V2.2 AI schema", communicationArtifactResponseSchema.safeParse({ text: "Draft wording.", confidence: 0.6 }).success, "a valid COMMUNICATION_ARTIFACT payload is accepted");
+  ok("V2.2 AI schema", !communicationArtifactResponseSchema.safeParse({ text: "Draft wording." }).success, "a payload missing confidence is rejected");
+  ok("V2.2 AI schema", !communicationArtifactResponseSchema.safeParse({ confidence: 0.6 }).success, "a payload missing text is rejected");
+  ok("V2.2 AI schema", aiRequestSchema.safeParse({ task: "generateCommunicationArtifact", prompt: "..." }).success, "'generateCommunicationArtifact' is a recognized AITask");
+
+  const mock = new MockAIProvider();
+  const mockResult = await mock.generateCommunicationArtifact("STATUS_UPDATE", ["Trajectory: ON TRACK."], ["evidence 1"]);
+  ok("V2.2 AI mock", mockResult.text.length > 0 && mockResult.confidence > 0, "MockAIProvider.generateCommunicationArtifact returns usable text built from the given facts, offline");
+  const mockEmpty = await mock.generateCommunicationArtifact("STATUS_UPDATE", [], []);
+  ok("V2.2 AI mock", mockEmpty.insufficientEvidence === true, "with zero facts, the mock honestly reports insufficientEvidence rather than fabricating a draft");
+
+  const claude2 = new ClaudeProvider();
+  let artifactThrew = false;
+  try {
+    await claude2.generateCommunicationArtifact("STATUS_UPDATE", ["fact"], []);
+  } catch {
+    artifactThrew = true;
+  }
+  ok("V2.2 AI Claude fallback", !artifactThrew, "ClaudeProvider.generateCommunicationArtifact never throws even when the server is unreachable");
+  ok("V2.2 AI Claude fallback", claude2.mode === "mock", "mode reports 'mock' after the failed call, same fallback discipline as every other provider method");
+
+  // §21 — reuse the existing evaluator, not a new one.
+  const evalResult = evaluateAiResponse({
+    task: "generateCommunicationArtifact",
+    response: mockResult,
+    schemaValid: true,
+    narrativeText: mockResult.text,
+    inputFacts: ["Trajectory: ON TRACK."],
+    inputEvidence: ["evidence 1"],
+    confidence: mockResult.confidence,
+  });
+  ok("V2.2 AI evaluation", evalResult.findings.length > 0, "evaluateAiResponse (ai/evaluation.ts, no new evaluator) runs cleanly against a COMMUNICATION_ARTIFACT response");
+}
+
+// ----- Command Bar artifact intents (§10) -----
+{
+  ok("V2.2 Command Bar", classifyQuery("create status update", v22Data).intent === "create-status-update", "'create status update' routes to create-status-update");
+  ok("V2.2 Command Bar", classifyQuery("draft stakeholder update for JPMC", v22Data).intent === "create-stakeholder-update", "'draft stakeholder update for JPMC' routes to create-stakeholder-update");
+  ok("V2.2 Command Bar", classifyQuery("draft stakeholder update for JPMC", v22Data).target === "JPMC", "the client name is extracted as the target, reusing the existing findTarget helper");
+  ok("V2.2 Command Bar", classifyQuery("prepare release update", v22Data).intent === "create-release-update", "'prepare release update' routes to create-release-update");
+  ok("V2.2 Command Bar", classifyQuery("please give me a quick release update", v22Data).intent === "create-release-update", "a near-miss phrasing containing 'release update' still routes correctly");
+  ok("V2.2 Command Bar", classifyQuery("prepare decision brief", v22Data).intent === "create-decision-brief", "'prepare decision brief' routes to create-decision-brief");
+  ok("V2.2 Command Bar", classifyQuery("summarize today's delivery", v22Data).intent === "summarize-today", "\"summarize today's delivery\" routes to summarize-today");
+  ok("V2.2 Command Bar", classifyQuery("give me the daily summary", v22Data).intent === "summarize-today", "'daily summary' phrasing also routes to summarize-today");
+  ok("V2.2 Command Bar", classifyQuery("asdkjhasdkjh nonsense query", v22Data).intent === "unrecognized", "an unrelated/nonsense query is never misrouted to an artifact intent");
+
+  for (const intent of ["create-status-update", "create-stakeholder-update", "create-release-update", "create-decision-brief", "summarize-today"] as const) {
+    ok("V2.2 Command Bar", isArtifactIntent(intent), `isArtifactIntent('${intent}') is true`);
+    ok("V2.2 Command Bar", familyForIntent(intent) === "ARTIFACT", `familyForIntent('${intent}') is the ARTIFACT family, distinct from every AI-narrated family`);
+  }
+  ok("V2.2 Command Bar", !isArtifactIntent("blocking"), "an existing narrated intent is never misclassified as an artifact intent");
+}
+
+// ----- Store: Artifact History (§16) and Usage Observability (§22-23) -----
+{
+  commandCenterStore.resetAll();
+  const draftForHistory = buildStatusUpdateDraft(v22Data, v22Derived, v22Proactive, v22PersonalFocus, TODAY, "Control Tower");
+
+  const id1 = commandCenterStore.saveArtifact(draftForHistory, { editedText: "edited body" });
+  ok("V2.2 Artifact History (store)", commandCenterStore.getSnapshot().artifacts.length === 1, "saveArtifact appends one record");
+  ok("V2.2 Artifact History (store)", commandCenterStore.getSnapshot().artifacts[0].editedText === "edited body", "the saved record keeps the user's edited text");
+
+  commandCenterStore.updateArtifact(id1, { editedText: "changed body" });
+  ok("V2.2 Artifact History (store)", commandCenterStore.getSnapshot().artifacts[0].editedText === "changed body", "updateArtifact patches an existing record in place");
+
+  commandCenterStore.deleteArtifact(id1);
+  ok("V2.2 Artifact History (store)", commandCenterStore.getSnapshot().artifacts.length === 0, "deleteArtifact removes the record");
+
+  commandCenterStore.resetAll();
+  for (let i = 0; i < 35; i++) commandCenterStore.saveArtifact(draftForHistory);
+  ok("V2.2 Artifact History (store)", commandCenterStore.getSnapshot().artifacts.length === 30, "Artifact History is bounded to 30 records — oldest evicted first, same discipline as snapshotHistory/memoryEvents");
+
+  commandCenterStore.resetAll();
+  commandCenterStore.bumpUsage("surface:test-key");
+  commandCenterStore.bumpUsage("surface:test-key");
+  commandCenterStore.bumpUsage(artifactUsageKey("STATUS_UPDATE"));
+  commandCenterStore.bumpUsage(commandUsageKey("create-status-update"));
+  const usageSnapshot = commandCenterStore.getSnapshot().usageCounters;
+  ok("V2.2 Usage (store)", usageSnapshot["surface:test-key"] === 2, "bumpUsage increments an existing counter");
+  const usageSummary = computeUsageSummary(usageSnapshot);
+  ok("V2.2 Usage (store)", usageSummary.mostUsedArtifactType?.label === "Status Update", "computeUsageSummary surfaces the most-used artifact type from the bounded counter map");
+  ok("V2.2 Usage (store)", usageSummary.unusedSurfaces.length > 0, "a surface never bumped this session correctly shows up as unused, never fabricated as used");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- parseStoredState corruption safety (artifacts + usageCounters) -----
+{
+  const corrupted = parseStoredState(JSON.stringify({ artifacts: "not-an-array", usageCounters: { good: 5, bad1: "not-a-number", bad2: -1 } }));
+  ok("V2.2 Corruption safety", Array.isArray(corrupted.artifacts) && corrupted.artifacts.length === 0, "a non-array 'artifacts' field falls back to an empty array rather than crashing");
+  ok("V2.2 Corruption safety", corrupted.usageCounters.good === 5, "a valid counter entry survives parseStoredState");
+  ok("V2.2 Corruption safety", corrupted.usageCounters.bad1 === undefined && corrupted.usageCounters.bad2 === undefined, "a non-numeric or negative counter entry is dropped, never trusted as-is");
+
+  const mixedArtifacts = parseStoredState(
+    JSON.stringify({
+      artifacts: [
+        { id: "malformed-missing-fields" },
+        { id: "v22-ok", type: "STATUS_UPDATE", createdAt: TODAY, sections: [], evidence: [], evidenceVersion: "v1" },
+      ],
+    })
+  );
+  ok("V2.2 Corruption safety", mixedArtifacts.artifacts.length === 1 && mixedArtifacts.artifacts[0].id === "v22-ok", "a malformed artifact entry is dropped while a well-formed sibling entry is kept — never a crash, never a fabricated field");
+}
+
+// ===== V2.2.1 — Production Completion & Deployment Readiness =====
+
+// ----- §14/§21 — LOOP_STALLED must not duplicate on every close/sync while a loop remains
+// stalled (previously it did, risking crowding out real signal in the bounded 200-event
+// memory log for any pilot with a genuinely long-stuck loop). -----
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const projectId = commandCenterStore.getSnapshot().data.projects[0]?.id ?? "p-1";
+  commandCenterStore.addDecision({ projectId, title: "V2.2.1 loop-dedup test decision", status: "DECIDED", description: "test decision with no follow-up action — deterministically STALLED" });
+
+  await commandCenterStore.closeDay();
+  const afterFirst = commandCenterStore.getSnapshot().memoryEvents.filter((e) => e.kind === "LOOP_STALLED" && e.title.includes("V2.2.1 loop-dedup test decision"));
+  ok("V2.2.1 Memory event dedup", afterFirst.length === 1, "closing the day once logs exactly one LOOP_STALLED event for the newly-stalled loop");
+
+  await commandCenterStore.closeDay();
+  const afterSecond = commandCenterStore.getSnapshot().memoryEvents.filter((e) => e.kind === "LOOP_STALLED" && e.title.includes("V2.2.1 loop-dedup test decision"));
+  ok("V2.2.1 Memory event dedup", afterSecond.length === 1, "closing the day again while the SAME loop remains stalled does not add a duplicate LOOP_STALLED event");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- §4/§5 — Jira fetch calls carry an explicit abort timeout, so a hung Jira instance
+// fails fast into the existing network-error classification instead of hanging until the
+// platform kills the function. -----
+{
+  ok("V2.2.1 Jira timeout", typeof AbortSignal.timeout === "function", "the runtime supports AbortSignal.timeout, which jira/http.ts now attaches to every real fetch call");
+  const httpSource = fs.readFileSync(path.join(process.cwd(), "src/lib/command-center/jira/http.ts"), "utf8");
+  const timeoutCallSites = (httpSource.match(/signal: AbortSignal\.timeout\(JIRA_FETCH_TIMEOUT_MS\)/g) ?? []).length;
+  ok("V2.2.1 Jira timeout", timeoutCallSites === 4, `all 4 real Jira fetch call sites (projects, issues page, changelog, capability probe) attach the timeout signal (found ${timeoutCallSites})`);
+}
+
+// ----- §4 — jira/status and jira/conformance GET routes must be force-dynamic. Without it,
+// Next.js statically optimizes a parameter-less GET handler and serves ONE response frozen
+// at `next build` time for the route's entire production lifetime — meaning a user who
+// configures Jira credentials AFTER deploying would see "not configured" forever, and the
+// "Run Conformance Check" button would silently replay a build-time-frozen report. -----
+{
+  for (const routeFile of ["src/app/api/command-center/jira/status/route.ts", "src/app/api/command-center/jira/conformance/route.ts"]) {
+    const source = fs.readFileSync(path.join(process.cwd(), routeFile), "utf8");
+    ok("V2.2.1 Route dynamic rendering", /export const dynamic = "force-dynamic"/.test(source), `${routeFile} declares force-dynamic — without it this parameter-less GET route would be statically frozen at build time`);
+  }
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

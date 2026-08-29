@@ -49,6 +49,9 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
   generateDecisionOptions: entry("generateDecisionOptions"),
   interpretOutcome: entry("interpretOutcome"),
   generateDailyGuidance: entry("generateDailyGuidance"),
+  // V2.2 §8 — artifact drafts are keyed by evidenceVersion like every other cached call;
+  // duration matches the other narrative-drafting tasks above.
+  generateCommunicationArtifact: entry("generateCommunicationArtifact"),
 };
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {

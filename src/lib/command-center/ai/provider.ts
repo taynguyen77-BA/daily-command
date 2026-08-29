@@ -13,6 +13,7 @@
 
 import type {
   Action,
+  ArtifactType,
   ChangeEvent,
   DailyGuidanceResult,
   DecisionConflictAssessment,
@@ -36,6 +37,7 @@ import { actionOutcomePrompt } from "./prompts/action-outcome";
 import { actionPlanPrompt } from "./prompts/action-plan";
 import { changeAnalysisPrompt } from "./prompts/change-analysis";
 import { communicationPrompt } from "./prompts/communication";
+import { communicationArtifactPrompt } from "./prompts/communication-artifact";
 import { dailyGuidancePrompt } from "./prompts/daily-guidance";
 import { decisionConflictPrompt } from "./prompts/decision-conflict";
 import { decisionOptionsPrompt } from "./prompts/decision-options";
@@ -79,6 +81,15 @@ export interface AIProvider {
   interpretOutcome(subjectTitle: string, observedChangeFacts: string[], evidenceStrings: string[]): Promise<OutcomeInterpretation>;
   // V1.6 §38-40 — Daily Guidance. On-demand only (§59), never called per-item.
   generateDailyGuidance(topFocusFacts: string[], watchFacts: string[], planFacts: string[], recentOutcomeFacts: string[], evidenceStrings: string[]): Promise<DailyGuidanceResult>;
+  // V2.2 §8 — COMMUNICATION_ARTIFACT. Drafts wording for a whole delivery-artifact section
+  // (see communicate.ts) — strictly on-demand from the Artifact Editor, never automatic.
+  generateCommunicationArtifact(type: ArtifactType, facts: string[], evidenceStrings: string[]): Promise<CommunicationArtifactResult>;
+}
+
+export interface CommunicationArtifactResult {
+  text: string;
+  confidence: number;
+  insufficientEvidence?: boolean;
 }
 
 /**
@@ -306,5 +317,14 @@ export class MockAIProvider implements AIProvider {
       evidenceReferences: evidenceStrings.slice(0, 5),
       confidence: 0.65,
     };
+  }
+
+  async generateCommunicationArtifact(type: ArtifactType, facts: string[], evidenceStrings: string[]): Promise<CommunicationArtifactResult> {
+    void communicationArtifactPrompt(type, facts, evidenceStrings);
+    if (facts.length === 0) {
+      return { text: "Insufficient evidence to draft this artifact.", confidence: 0.4, insufficientEvidence: true };
+    }
+    const label = type.replace(/_/g, " ").toLowerCase();
+    return { text: `${label.charAt(0).toUpperCase()}${label.slice(1)}: ${facts.slice(0, 4).join(" ")}`, confidence: 0.6 };
   }
 }

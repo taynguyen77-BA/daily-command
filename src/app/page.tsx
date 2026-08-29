@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { EmptyState, Panel, RiskBadge, SectionHeading } from "@/components/command-center/ui";
@@ -28,6 +28,7 @@ import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/mem
 import { computeFreshness } from "@/lib/command-center/freshness";
 import { computeDataHealth } from "@/lib/command-center/data-health";
 import { buildBeforeYouTrustSummary } from "@/lib/command-center/trust-diagnostic";
+import { USAGE_KEYS } from "@/lib/command-center/usage";
 import { AttentionSeverityBadge, FocusCategoryBadge, HeatBadge, LoopHealthBadge } from "@/components/command-center/ui";
 import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 
@@ -38,6 +39,11 @@ export default function CommandCenterPage() {
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
   const [closingDay, setClosingDay] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("operations");
+
+  useEffect(() => {
+    if (state.loaded) store.bumpUsage(USAGE_KEYS.MORNING_BRIEF_OPENED);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.loaded]);
 
   if (!state.loaded) {
     return (

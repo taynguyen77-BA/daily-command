@@ -1,10 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import { deriveDontForget } from "@/lib/command-center/personal-focus";
 import { reviewStatusFor } from "@/lib/command-center/decision-radar";
 import { getTodayIso } from "@/lib/command-center/store";
+import { buildTodaysUpdateDraft } from "@/lib/command-center/communicate";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { CommandCenterData, DataSourceType, HealthTrend, PersonalFocusResult } from "@/lib/command-center/types";
+import { ArtifactEditor } from "./ArtifactEditor";
 import { DecisionReviewStatusBadge, Panel, TrustLabel } from "./ui";
 
 /**
@@ -46,6 +49,7 @@ export function MorningBrief({
   const expectedOutcomes = data.decisions.filter((d) => d.expectedOutcome && (d.status === "IMPLEMENTING" || d.status === "VALIDATING" || d.status === "DECIDED")).slice(0, 3);
   const dontForget = personalFocus ? deriveDontForget(personalFocus) : [];
   const today = getTodayIso();
+  const [creatingUpdate, setCreatingUpdate] = useState(false);
   const upcomingReviews = data.decisions
     .map((d) => ({ decision: d, status: reviewStatusFor(d, today) }))
     .filter((r) => r.status === "REVIEW_DUE" || r.status === "REVIEW_SOON" || r.status === "REVIEW_OVERDUE")
@@ -53,9 +57,19 @@ export function MorningBrief({
 
   return (
     <Panel className="p-5">
-      <div className="mb-2 flex items-center gap-2">
-        <TrustLabel kind="calculated" />
-        <span className="text-xs uppercase tracking-wide text-text3">Your delivery morning</span>
+      <div className="mb-2 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <TrustLabel kind="calculated" />
+          <span className="text-xs uppercase tracking-wide text-text3">Your delivery morning</span>
+        </div>
+        {proactive && (
+          <button
+            onClick={() => setCreatingUpdate(true)}
+            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+          >
+            Create Today&apos;s Update
+          </button>
+        )}
       </div>
       {dataSource === "jira" && (
         <p className="mb-3 text-xs text-text3">
@@ -252,6 +266,9 @@ export function MorningBrief({
           )}
         </div>
       </div>
+      {creatingUpdate && proactive && (
+        <ArtifactEditor draft={buildTodaysUpdateDraft(data, proactive, personalFocus ?? null, today)} onClose={() => setCreatingUpdate(false)} />
+      )}
     </Panel>
   );
 }

@@ -32,10 +32,15 @@ export function WhyShouldICareDrawer({
   content,
   askClaude,
   triggerLabel = "Why should I care?",
+  onCreateUpdate,
 }: {
   content: WhyShouldICareContent;
   askClaude?: AskClaudeConfig;
   triggerLabel?: string;
+  // V2.2 §9 — "Create Update" preserves exactly these FACT/SIGNAL/IMPACT/UNKNOWN/NEXT MOVE
+  // strings; only wired where a caller can supply a subject title (see communicate.ts's
+  // buildStakeholderUpdateDraft "why-should-i-care" branch).
+  onCreateUpdate?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [ai, setAi] = useState<AiRecommendationState | null>(null);
@@ -109,6 +114,14 @@ export function WhyShouldICareDrawer({
                   <li key={e.id}>- {e.content}</li>
                 ))}
               </ul>
+            </section>
+          )}
+
+          {onCreateUpdate && (
+            <section className="border-t border-border pt-2">
+              <button onClick={onCreateUpdate} className="text-xs font-medium text-accent2 hover:underline">
+                Create Update
+              </button>
             </section>
           )}
 

@@ -17,8 +17,10 @@ function GapCard({ gap }: { gap: Gap }) {
       <p className="font-display text-sm text-text">{gap.title}</p>
       <p className="mt-1 text-xs text-text2">{gap.why}</p>
       <div className="mt-2 rounded-md border border-border bg-surface2 p-2">
+        {/* V2.2.1 — gap.recommendedAction comes from detectGaps(), a deterministic checklist
+            (this panel's own subtitle says so) — never an AI call. */}
         <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-text3">
-          <TrustLabel kind="ai-recommendation" /> Recommended action
+          <TrustLabel kind="calculated" /> Recommended action
         </p>
         <p className="mt-1 text-xs text-text2">{gap.recommendedAction}</p>
       </div>

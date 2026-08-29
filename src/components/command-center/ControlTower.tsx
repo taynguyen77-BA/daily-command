@@ -5,9 +5,13 @@
 // conflicts > ineffective actions > important comms > everything else. Every tile is
 // TrustLabel="calculated"; nothing here is AI-narrated.
 
+import { useState } from "react";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { Freshness } from "@/lib/command-center/types";
 import { FRESHNESS_LABEL } from "@/lib/command-center/freshness";
+import { buildStatusUpdateDraft } from "@/lib/command-center/communicate";
+import { useCommandCenter } from "./use-command-center";
+import { ArtifactEditor } from "./ArtifactEditor";
 import { DriftBadge, HeatBadge, Panel, TrajectoryBadge, TrustLabel } from "./ui";
 
 function Tile({ label, children }: { label: string; children: React.ReactNode }) {
@@ -36,12 +40,22 @@ export function ControlTower({
   const topDependency = proactive.dependencyRadar[0];
   const topDecision = proactive.decisionRadar[0];
   const topIneffectiveAction = proactive.attentionQueue.find((a) => a.category === "ACTION");
+  const { filteredData, derived, personalFocus, today } = useCommandCenter();
+  const [creatingUpdate, setCreatingUpdate] = useState(false);
 
   return (
     <Panel className="p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <TrustLabel kind="calculated" />
-        <span className="text-xs text-text3">Control tower</span>
+      <div className="mb-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <TrustLabel kind="calculated" />
+          <span className="text-xs text-text3">Control tower</span>
+        </div>
+        <button
+          onClick={() => setCreatingUpdate(true)}
+          className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+        >
+          Create Status Update
+        </button>
       </div>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
         <Tile label="Delivery confidence">
@@ -88,6 +102,12 @@ export function ControlTower({
           <DriftBadge level={proactive.drift.level} />
           <span>{proactive.attentionQueue.find((a) => a.category === "DRIFT")?.why ?? "Delivery is drifting from its previous trajectory."}</span>
         </div>
+      )}
+      {creatingUpdate && (
+        <ArtifactEditor
+          draft={buildStatusUpdateDraft(filteredData, derived, proactive, personalFocus, today, "Control Tower")}
+          onClose={() => setCreatingUpdate(false)}
+        />
       )}
     </Panel>
   );

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 import { useCommandCenter } from "./use-command-center";
-import { ConfidenceTag, SeverityBadge } from "./ui";
+import { AiProviderIndicator, ConfidenceTag, SeverityBadge, TrustLabel } from "./ui";
 
 export function TakeActionPanel({
   item,
@@ -17,6 +17,7 @@ export function TakeActionPanel({
 }) {
   const { store } = useCommandCenter();
   const [message, setMessage] = useState<string>("");
+  const [messageMode, setMessageMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [savedActionId, setSavedActionId] = useState<string | null>(null);
@@ -36,15 +37,20 @@ export function TakeActionPanel({
 
   useEffect(() => {
     setMessage("");
+    setMessageMode(null);
     setCopied(false);
     setSavedActionId(null);
     setHandled(false);
     if (!item) return;
     setLoading(true);
     const why = result?.reasoning ?? "This item needs attention.";
-    getAIProvider()
+    const provider = getAIProvider();
+    provider
       .generateCommunication(item, item.owner ? "the item owner" : "the relevant team", why)
-      .then((m) => setMessage(m))
+      .then((m) => {
+        setMessage(m);
+        setMessageMode(provider.mode);
+      })
       .finally(() => setLoading(false));
   }, [item, result]);
 
@@ -88,7 +94,9 @@ export function TakeActionPanel({
         )}
 
         <section className="mb-4">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Recommended next step</h3>
+          <h3 className="mb-1 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-text3">
+            <TrustLabel kind="calculated" /> Recommended next step
+          </h3>
           <p className="text-sm text-text2">{recommendedStep}</p>
         </section>
 
@@ -98,7 +106,10 @@ export function TakeActionPanel({
         </section>
 
         <section className="mb-4">
-          <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Suggested communication</h3>
+          <h3 className="mb-1 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-text3">
+            <TrustLabel kind="ai-recommendation" /> Suggested communication
+            {messageMode && <AiProviderIndicator state={messageMode === "mock" ? "MOCK_FALLBACK" : "REAL_CLAUDE"} />}
+          </h3>
           {loading ? (
             <p className="text-sm text-text3">Drafting…</p>
           ) : (

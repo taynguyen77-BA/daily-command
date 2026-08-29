@@ -8,7 +8,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { commandCenterStore } from "@/lib/command-center/store";
+import { buildDecisionBriefDraft } from "@/lib/command-center/communicate";
 import { useCommandCenter } from "./use-command-center";
+import { ArtifactEditor } from "./ArtifactEditor";
 import type { AttentionItem, CommandCenterData, DecisionOption, DecisionOptionsResult } from "@/lib/command-center/types";
 import { ConfidenceTag, Panel, TrustLabel } from "./ui";
 
@@ -62,6 +64,7 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
   const [selected, setSelected] = useState<DecisionOption | null>(null);
   const [expectedOutcome, setExpectedOutcome] = useState("");
   const [showEvidence, setShowEvidence] = useState(false);
+  const [creatingBrief, setCreatingBrief] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   const entity = useMemo(() => resolveEntity(item, filteredData), [item, filteredData]);
@@ -175,6 +178,7 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
               <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text3">Decision matrix</p>
               <div className="overflow-x-auto rounded-md border border-border">
                 <table className="w-full min-w-[500px] text-xs">
+                  <caption className="sr-only">Decision matrix — delivery impact, risk, dependency impact, and trade-off per option.</caption>
                   <thead>
                     <tr className="border-b border-border bg-surface2 text-left text-text3">
                       <th scope="col" className="px-3 py-2">Option</th>
@@ -214,8 +218,11 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
                 ))}
               </ul>
             )}
-            <div>
+            <div className="flex items-center justify-between">
               <ConfidenceTag confidence={result.confidence} />
+              <button onClick={() => setCreatingBrief(true)} className="text-xs font-medium text-accent2 hover:underline">
+                Create Decision Brief
+              </button>
             </div>
           </div>
         )}
@@ -256,6 +263,9 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
           Close
         </button>
       </div>
+      {creatingBrief && result && (
+        <ArtifactEditor draft={buildDecisionBriefDraft(item, result, "Decision Radar")} onClose={() => setCreatingBrief(false)} />
+      )}
     </div>
   );
 }

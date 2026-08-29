@@ -12,10 +12,12 @@ import { commandCenterStore, getTodayIso } from "@/lib/command-center/store";
 import { projectDecisionImpact } from "@/lib/command-center/impact-projection";
 import { reviewStatusFor } from "@/lib/command-center/decision-radar";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
+import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
 import type { Decision, DecisionConflictAssessment, DecisionConflictCandidate, DecisionEffectivenessClass, DecisionEffectivenessResult, DecisionRadarItem } from "@/lib/command-center/types";
 import { AiProviderIndicator, AttentionSeverityBadge, ConfidenceTag, DecisionEffectivenessBadge, DecisionReviewStatusBadge, Panel, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 import { AskClaudeAbout } from "./AskClaudeAbout";
+import { ArtifactEditor } from "./ArtifactEditor";
 
 const OUTCOME_CLASSES: DecisionEffectivenessClass[] = ["EFFECTIVE", "PARTIALLY_EFFECTIVE", "INEFFECTIVE", "UNKNOWN"];
 
@@ -74,6 +76,7 @@ export function DecisionCard({
 }) {
   const [open, setOpen] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
+  const [creatingUpdate, setCreatingUpdate] = useState(false);
   const reviewStatus = useMemo(() => reviewStatusFor(decision, getTodayIso()), [decision]);
 
   const content = useMemo(
@@ -128,8 +131,14 @@ export function DecisionCard({
         )}
       </div>
 
-      <WhyShouldICareDrawer content={content} />
+      <WhyShouldICareDrawer content={content} onCreateUpdate={() => setCreatingUpdate(true)} />
       <AskClaudeAbout subject={decision.title} entityId={decision.id} facts={content.fact} evidence={content.evidence} />
+      {creatingUpdate && (
+        <ArtifactEditor
+          draft={buildStakeholderUpdateDraft({ kind: "why-should-i-care", content, subjectTitle: decision.title }, `Decision: ${decision.title}`)}
+          onClose={() => setCreatingUpdate(false)}
+        />
+      )}
 
       {conflict && (
         <div className="mt-3 rounded-md border border-orange/30 bg-orange/10 p-3">

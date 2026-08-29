@@ -7,13 +7,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useCommandCenter } from "./use-command-center";
+import { getAIProvider } from "@/lib/command-center/ai";
 import type { EodEntry } from "@/lib/command-center/store";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
-import { LoopHealthBadge, TrustLabel } from "./ui";
+import { AiProviderIndicator, LoopHealthBadge, TrustLabel } from "./ui";
 
 export function CloseDayModal({ onClose }: { onClose: () => void }) {
   const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, store } = useCommandCenter();
   const [entry, setEntry] = useState<EodEntry | null>(null);
+  const [entryMode, setEntryMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -58,6 +60,7 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
     setLoading(true);
     const result = await store.closeDay();
     setEntry(result);
+    setEntryMode(getAIProvider().mode);
     setLoading(false);
   }
 
@@ -227,9 +230,15 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
             {loading ? "Generating…" : "Generate Tomorrow's Starting Point"}
           </button>
         ) : (
-          <pre className="mt-5 whitespace-pre-wrap rounded-md border border-border bg-surface2 p-3 font-sans text-sm text-text2">
-            {entry.summary}
-          </pre>
+          <div className="mt-5">
+            <p className="mb-1 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-text3">
+              <TrustLabel kind="ai-recommendation" /> Tomorrow&apos;s starting point
+              {entryMode && <AiProviderIndicator state={entryMode === "mock" ? "MOCK_FALLBACK" : "REAL_CLAUDE"} />}
+            </p>
+            <pre className="whitespace-pre-wrap rounded-md border border-border bg-surface2 p-3 font-sans text-sm text-text2">
+              {entry.summary}
+            </pre>
+          </div>
         )}
 
         <button onClick={onClose} className="mt-4 w-full rounded-md border border-border px-4 py-2 text-sm text-text2 hover:text-text">

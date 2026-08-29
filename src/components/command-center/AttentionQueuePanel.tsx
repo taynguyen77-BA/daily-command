@@ -11,12 +11,15 @@ import { AttentionSeverityBadge, CategoryBadge, LifecycleBadge, Panel, SectionHe
 import { commandCenterStore } from "@/lib/command-center/store";
 import { DecisionAssistant } from "./DecisionAssistant";
 import { AskClaudeAbout } from "./AskClaudeAbout";
+import { ArtifactEditor } from "./ArtifactEditor";
 import { makeEvidence } from "@/lib/command-center/evidence";
+import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
 
 export function AttentionItemCard({ item, showViewLink = false }: { item: AttentionItem; showViewLink?: boolean }) {
   const [open, setOpen] = useState(false);
   const [snoozing, setSnoozing] = useState(false);
   const [assisting, setAssisting] = useState(false);
+  const [creatingUpdate, setCreatingUpdate] = useState(false);
   const facts = useMemo(() => [item.what, item.why, item.impact, item.nowWhat], [item]);
   const evidence = useMemo(() => item.evidence.map((e) => makeEvidence(e, "manual", item.id)), [item]);
 
@@ -73,6 +76,9 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         <button onClick={() => setAssisting(true)} className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent2">
           What should I do?
         </button>
+        <button onClick={() => setCreatingUpdate(true)} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+          Create Stakeholder Update
+        </button>
         {item.lifecycle !== "ACKNOWLEDGED" && item.lifecycle !== "SNOOZED" && (
           <button onClick={() => commandCenterStore.acknowledgeAttentionItem(item.id)} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
             Acknowledge
@@ -104,6 +110,9 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         )}
       </div>
       {assisting && <DecisionAssistant item={item} onClose={() => setAssisting(false)} />}
+      {creatingUpdate && (
+        <ArtifactEditor draft={buildStakeholderUpdateDraft({ kind: "attention", item }, "Attention Queue")} onClose={() => setCreatingUpdate(false)} />
+      )}
     </Panel>
   );
 }

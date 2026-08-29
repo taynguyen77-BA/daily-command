@@ -29,8 +29,13 @@ export function CommunicationCard({ comm }: { comm: Communication }) {
       </p>
 
       <div className="mt-2 rounded-md border border-border bg-surface2 p-2">
+        {/* V2.2.1 — Communication.suggestedMessage is either the demo seed or whatever text
+            the user's own import/paste provided (see demo-data.ts / import.ts) — it never
+            passes through an AI call, so "user input" is the honest label here, not
+            "AI recommendation". The genuinely AI-drafted variant lives in TakeActionPanel
+            (getAIProvider().generateCommunication), labeled separately there. */}
         <p className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-text3">
-          <TrustLabel kind="ai-recommendation" /> Suggested message
+          <TrustLabel kind="user-input" /> Suggested message
         </p>
         <p className="mt-1 text-xs text-text2">{comm.suggestedMessage}</p>
       </div>

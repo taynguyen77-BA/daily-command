@@ -66,8 +66,11 @@ export function PriorityCard({
       </div>
 
       <div className="mt-3 rounded-md border border-border bg-surface2 p-3">
+        {/* V2.2.1 — recommendedAction() below is a plain deterministic template (blocked?
+            no owner?), never an AI call; labeling it "calculated" (not "ai-recommendation")
+            matches what it actually is. */}
         <p className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-text3">
-          <TrustLabel kind="ai-recommendation" /> Recommended action
+          <TrustLabel kind="calculated" /> Recommended action
         </p>
         <p className="mt-1 text-sm text-text2">{recommendedAction(item)}</p>
       </div>

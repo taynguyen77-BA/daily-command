@@ -12,7 +12,10 @@ import { getCacheStats } from "@/lib/command-center/ai/ai-cache";
 import { getTodayIso } from "@/lib/command-center/store";
 import { computeTrustDiagnostic, type TrustDiagnosticStatus } from "@/lib/command-center/trust-diagnostic";
 import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadinessStatus, type PilotCheckItem } from "@/lib/command-center/jira/pilot-checklist";
-import type { JiraConformanceReport } from "@/lib/command-center/types";
+import { isArtifactStale, rebuildDraftFromSourceRef } from "@/lib/command-center/communicate";
+import { computeUsageSummary } from "@/lib/command-center/usage";
+import { ArtifactEditor } from "@/components/command-center/ArtifactEditor";
+import type { ArtifactDraft, ArtifactRecord, JiraConformanceReport } from "@/lib/command-center/types";
 
 const PILOT_STATUS_STYLE: Record<PilotReadinessStatus, string> = {
   NOT_TESTED: "text-text3",
@@ -41,6 +44,54 @@ function PilotChecklistRow({ item }: { item: PilotCheckItem }) {
   );
 }
 
+// V2.2 §16-17 — one row of Artifact History. "Reopen" rebuilds a fresh draft from the
+// record's sourceRef (when the source kind supports it — see rebuildDraftFromSourceRef)
+// and compares evidenceVersion to detect staleness (§17); it never silently swaps the
+// saved content — the editor shows a banner and the user explicitly chooses to refresh.
+function ArtifactHistoryRow({
+  record,
+  onReopen,
+  onDelete,
+}: {
+  record: ArtifactRecord;
+  onReopen: (draft: ArtifactDraft, staleness: "fresh" | "stale" | "unavailable") => void;
+  onDelete: () => void;
+}) {
+  const { filteredData, derived, proactive, personalFocus, today } = useCommandCenter();
+
+  function reopen() {
+    if (!proactive) {
+      onReopen(record, "unavailable");
+      return;
+    }
+    const fresh = rebuildDraftFromSourceRef(record.sourceRef, record.sourceContext, filteredData, derived, proactive, personalFocus, today);
+    if (!fresh) {
+      onReopen(record, "unavailable");
+      return;
+    }
+    onReopen(record, isArtifactStale(record.evidenceVersion, fresh.evidenceVersion) ? "stale" : "fresh");
+  }
+
+  return (
+    <div className="flex items-center justify-between rounded-md border border-border bg-surface2 p-3 text-xs">
+      <div>
+        <p className="font-medium text-text">
+          {record.type.replace(/_/g, " ")} — {record.sourceContext}
+        </p>
+        <p className="text-text3">{new Date(record.createdAt).toLocaleString()}</p>
+      </div>
+      <div className="flex gap-2">
+        <button onClick={reopen} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-text">
+          Reopen
+        </button>
+        <button onClick={onDelete} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+}
+
 const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
   good: "text-green",
   warn: "text-yellow",
@@ -60,7 +111,7 @@ const JIRA_ERROR_HELP: Record<string, string> = {
 };
 
 export default function DataSettingsPage() {
-  const { state, store } = useCommandCenter();
+  const { state, store, filteredData, derived, proactive, personalFocus, today } = useCommandCenter();
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
@@ -72,6 +123,7 @@ export default function DataSettingsPage() {
   const [emailDraft, setEmailDraft] = useState(state.personalIdentity?.email ?? "");
   const [pendingFirstSync, setPendingFirstSync] = useState(false);
   const [pendingFullSync, setPendingFullSync] = useState(false);
+  const [reopening, setReopening] = useState<{ record: ArtifactRecord; draft: ArtifactDraft; staleness: "fresh" | "stale" | "unavailable"; nonce: number } | null>(null);
 
   useEffect(() => {
     checkClaudeAvailability().then(setClaudeAvailable);
@@ -691,6 +743,60 @@ export default function DataSettingsPage() {
           </div>
         )}
       </Panel>
+
+      <Panel className="p-5">
+        <SectionHeading title="Artifact History" subtitle="Local, bounded (last 30) — an artifact is a rendering, never a second source of truth (§16)." />
+        {state.artifacts.length === 0 ? (
+          <p className="text-sm text-text3">No artifacts saved yet — use a &quot;Create Update&quot; action anywhere in the Command Center.</p>
+        ) : (
+          <div className="space-y-2">
+            {[...state.artifacts].reverse().map((record) => (
+              <ArtifactHistoryRow
+                key={record.id}
+                record={record}
+                onDelete={() => store.deleteArtifact(record.id)}
+                onReopen={(draft, staleness) => setReopening({ record, draft, staleness, nonce: Date.now() })}
+              />
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel className="p-5">
+        <SectionHeading title="Your Usage" subtitle="Local usage data only — not a product analytics backend, and not statistically significant." />
+        {(() => {
+          const usage = computeUsageSummary(state.usageCounters);
+          return (
+            <div className="space-y-1 text-sm text-text2">
+              <p>Most used: <span className="text-text">{usage.mostUsedSurface ? `${usage.mostUsedSurface.label} (${usage.mostUsedSurface.count})` : "Not enough data yet"}</span></p>
+              <p>Most used artifact: <span className="text-text">{usage.mostUsedArtifactType ? `${usage.mostUsedArtifactType.label} (${usage.mostUsedArtifactType.count})` : "Not enough data yet"}</span></p>
+              <p>Most used command: <span className="text-text">{usage.mostUsedCommand ? `${usage.mostUsedCommand.label} (${usage.mostUsedCommand.count})` : "Not enough data yet"}</span></p>
+              <p>Unused: <span className="text-text">{usage.unusedSurfaces.length > 0 ? usage.unusedSurfaces.join(", ") : "None — every surface has been used"}</span></p>
+            </div>
+          );
+        })()}
+      </Panel>
+
+      {reopening && (
+        <ArtifactEditor
+          key={reopening.nonce}
+          draft={reopening.draft}
+          recordId={reopening.record.id}
+          initialAiDraft={reopening.record.aiDraftText}
+          initialEditedText={reopening.record.editedText}
+          staleness={{
+            status: reopening.staleness,
+            onRefresh:
+              reopening.staleness === "stale" && proactive
+                ? () => {
+                    const fresh = rebuildDraftFromSourceRef(reopening.record.sourceRef, reopening.record.sourceContext, filteredData, derived, proactive, personalFocus, today);
+                    if (fresh) setReopening({ record: reopening.record, draft: fresh, staleness: "fresh", nonce: Date.now() });
+                  }
+                : undefined,
+          }}
+          onClose={() => setReopening(null)}
+        />
+      )}
     </div>
   );
 }

@@ -114,8 +114,19 @@ export const dailyGuidanceResponseSchema = z.object({
 });
 export type DailyGuidanceResponse = z.infer<typeof dailyGuidanceResponseSchema>;
 
+// V2.2 §8 — COMMUNICATION_ARTIFACT. A distinct task from generateCommunication: that one
+// drafts a single-recipient follow-up ask about one work item; this drafts a whole
+// artifact-section narrative from many already-assembled facts/evidence, with `type`
+// controlling tone (see ai/prompts/communication-artifact.ts).
+export const communicationArtifactResponseSchema = z.object({
+  text: z.string().min(1).max(4000),
+  confidence: z.number().min(0).max(1),
+  insufficientEvidence: z.boolean().optional(),
+});
+export type CommunicationArtifactResponse = z.infer<typeof communicationArtifactResponseSchema>;
+
 // Request payloads the server route accepts — one variant per AIProvider task
-// (V1.1 §6, extended by V1.2 §20, V1.3 §26, V1.5 §40-41, V1.6 §38-39).
+// (V1.1 §6, extended by V1.2 §20, V1.3 §26, V1.5 §40-41, V1.6 §38-39, V2.2 §8).
 export const aiTaskSchema = z.enum([
   "analyzePriorities",
   "detectRisks",
@@ -136,6 +147,8 @@ export const aiTaskSchema = z.enum([
   "interpretOutcome",
   // V1.6 §38-39
   "generateDailyGuidance",
+  // V2.2 §8
+  "generateCommunicationArtifact",
 ]);
 export type AITask = z.infer<typeof aiTaskSchema>;
 

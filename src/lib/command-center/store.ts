@@ -21,9 +21,12 @@ import { computeReleaseDrift } from "./release-drift";
 import { deriveMemoryEvents } from "./memory-events";
 import { detectRisks } from "./risk-detection";
 import { dedupeRisks } from "./selectors";
+import { USAGE_KEYS } from "./usage";
 import type {
   Action,
   ActionOutcomeStatus,
+  ArtifactDraft,
+  ArtifactRecord,
   AttentionItem,
   AttentionItemState,
   AttentionLifecycle,
@@ -51,6 +54,12 @@ const STORAGE_KEY = "command-center:v1";
 const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for trend/pattern/weekly-review, bounded
 const MAX_MEMORY_EVENTS = 200;
 const MAX_PERSONAL_PLAN_ITEMS = 400; // bounded personal-plan history, same philosophy as above
+// V2.2 §16 — Artifact History, NOT a second memory architecture: same bounded-array/
+// oldest-evicted-first pattern as snapshotHistory/memoryEvents above, just for a different
+// record shape. §22-23 — usage counters are a fixed, small key space (surface names,
+// ArtifactType values, QueryIntent values); this cap is a defensive backstop only.
+const MAX_ARTIFACTS = 30;
+const MAX_USAGE_COUNTER_KEYS = 200;
 
 export interface EodEntry {
   date: string;
@@ -86,6 +95,10 @@ export interface StoreState {
   // V1.6 §13-14 — minimal personal planning metadata. References existing Decision/Action/
   // Attention/Risk/Dependency/WorkItem records via sourceType+sourceId; never a copy (§12).
   personalPlan: PersonalPlanItem[];
+  // V2.2 §16 — Artifact History. Bounded to MAX_ARTIFACTS, oldest evicted first.
+  artifacts: ArtifactRecord[];
+  // V2.2 §22-23 — local, deterministic usage counters. Never credentials/payloads/prompts.
+  usageCounters: Record<string, number>;
 }
 
 function initialJiraSync(): JiraSyncState {
@@ -108,6 +121,8 @@ function initialState(): StoreState {
     ownerName: undefined,
     personalIdentity: undefined,
     personalPlan: [],
+    artifacts: [],
+    usageCounters: {},
   };
 }
 
@@ -142,6 +157,25 @@ function asPlainObject<T>(v: unknown, fallback: T): T {
   return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as T) : fallback;
 }
 
+// V2.2 §16 — a corrupted/malformed entry in `artifacts` must never crash the app; it's
+// simply dropped, same discipline as every other bounded array parsed above.
+function isArtifactRecordShape(v: unknown): v is ArtifactRecord {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Partial<ArtifactRecord>;
+  return typeof r.id === "string" && typeof r.type === "string" && typeof r.createdAt === "string" && Array.isArray(r.sections) && typeof r.evidenceVersion === "string";
+}
+
+// V2.2 §22-23 — usage counters are always non-negative finite numbers keyed by a plain
+// string; anything else in the stored object is dropped rather than trusted.
+function asUsageCounters(v: unknown): Record<string, number> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) out[key] = value;
+  }
+  return out;
+}
+
 export function parseStoredState(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
@@ -171,6 +205,8 @@ export function parseStoredState(raw: string): StoreState {
           ? (parsed.personalIdentity as PersonalIdentity)
           : undefined,
       personalPlan: Array.isArray(parsed.personalPlan) ? parsed.personalPlan : [],
+      artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts.filter(isArtifactRecordShape) : [],
+      usageCounters: asUsageCounters(parsed.usageCounters),
     };
   } catch {
     return initialState();
@@ -440,6 +476,7 @@ export class CommandCenterStore {
       impact: "Awaiting outcome confirmation.",
       evidence: [],
     });
+    this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
   }
   deferAction(id: string) {
     this.updateAction(id, { status: "deferred" });
@@ -485,6 +522,7 @@ export class CommandCenterStore {
       impact: note ?? `Classified ${outcomeStatus}.`,
       evidence: note ? [note] : [],
     });
+    this.bumpUsage(USAGE_KEYS.OUTCOME_CAPTURED);
   }
 
   addAction(action: Omit<Action, "id" | "createdAt" | "status">) {
@@ -561,6 +599,7 @@ export class CommandCenterStore {
       impact: input.expectedOutcome,
       evidence: selected?.evidence ?? [],
     });
+    this.bumpUsage(USAGE_KEYS.DECISION_CONFIRMED);
     return id;
   }
 
@@ -612,8 +651,16 @@ export class CommandCenterStore {
     );
     const decisionRadar = computeDecisionRadar(dataAfter, this.state.isDemo ? "demo" : "manual", today, { riskEscalations, dependencyRadar, releaseDrift, ineffectiveActionWorkItemIds: ineffectiveWorkItemIds });
     const loops = computeDeliveryLoops(dataAfter, decisionRadar, actionEffectiveness, today);
+    // V2.2.1 §14/§21 — the previous version logged a fresh LOOP_STALLED event on EVERY
+    // close/sync while a loop remained stalled (no check against events already logged for
+    // that loop), so one long-stuck loop could silently fill the bounded 200-slot memory
+    // log with near-identical repeats and crowd out real signal. Only log it once per loop
+    // — the event id embeds loop.id, so this is a simple prefix check against history
+    // already gathered, same "meaningful transitions only" discipline as RE_ESCALATED above.
     for (const loop of loops) {
       if (loop.health !== "STALLED") continue;
+      const alreadyLogged = this.state.memoryEvents.some((e) => e.kind === "LOOP_STALLED" && e.id.startsWith(`memory-event-loop-stalled-${loop.id}-`));
+      if (alreadyLogged) continue;
       events.push({
         id: `memory-event-loop-stalled-${loop.id}-${Date.now()}`,
         date: today,
@@ -770,6 +817,7 @@ export class CommandCenterStore {
    *  never alter Jira status, Risk status, or auto-advance Decision status (§18). */
   startFocusItem(id: string, today: string) {
     this.setFocusStatus(id, "in-progress", "FOCUS_STARTED", today);
+    this.bumpUsage(USAGE_KEYS.FOCUS_STARTED);
   }
   completeFocusItem(id: string, today: string, note?: string) {
     if (note) this.updatePersonalPlanItem(id, { note });
@@ -789,6 +837,38 @@ export class CommandCenterStore {
    *  emitted at most once per day (call sites are responsible for the once-per-day check). */
   recordDailyFocusReviewed(today: string) {
     this.appendMemoryEvent({ kind: "DAILY_FOCUS_REVIEWED", title: "Daily focus reviewed", impact: `Reviewed on ${today}.`, evidence: [] });
+  }
+
+  // ===== V2.2 — Delivery Artifacts (§16) =====
+
+  /** Saves a freshly-built or edited artifact draft to bounded local history. Never touches
+   *  `data` — an artifact is a rendering, not a new source of truth. */
+  saveArtifact(draft: ArtifactDraft, extra?: { aiDraftText?: string; aiDraftMode?: "mock" | "claude"; editedText?: string }): string {
+    const id = `artifact-${Date.now()}`;
+    const record: ArtifactRecord = { ...draft, id, createdAt: new Date().toISOString(), ...extra };
+    const artifacts = [...this.state.artifacts, record].slice(-MAX_ARTIFACTS);
+    this.set({ ...this.state, artifacts });
+    return id;
+  }
+
+  updateArtifact(id: string, patch: Partial<Pick<ArtifactRecord, "aiDraftText" | "aiDraftMode" | "editedText" | "sections" | "evidence" | "evidenceVersion">>) {
+    const artifacts = this.state.artifacts.map((a) => (a.id === id ? { ...a, ...patch } : a));
+    this.set({ ...this.state, artifacts });
+  }
+
+  deleteArtifact(id: string) {
+    this.set({ ...this.state, artifacts: this.state.artifacts.filter((a) => a.id !== id) });
+  }
+
+  // ===== V2.2 — Usage Observability (§22-23) =====
+
+  /** Local-only, deterministic counters — never analytics infrastructure, never tracks
+   *  credentials/payloads/prompts (§22). No-op once the defensive distinct-key cap is hit,
+   *  rather than growing unboundedly on an unexpected key. */
+  bumpUsage(key: string) {
+    const current = this.state.usageCounters[key] ?? 0;
+    if (current === 0 && Object.keys(this.state.usageCounters).length >= MAX_USAGE_COUNTER_KEYS) return;
+    this.set({ ...this.state, usageCounters: { ...this.state.usageCounters, [key]: current + 1 } });
   }
 
   async closeDay(): Promise<EodEntry> {

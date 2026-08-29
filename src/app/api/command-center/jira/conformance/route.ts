@@ -8,6 +8,11 @@ import { getJiraConfig } from "@/lib/server/jira-client";
 import { runJiraConformance } from "@/lib/command-center/jira/conformance";
 
 export const runtime = "nodejs";
+// V2.2.1 §4 — same reasoning as jira/status/route.ts: without this, Next.js would statically
+// optimize this GET handler and serve a single frozen conformance report (likely computed at
+// build time, before any real Jira credentials exist) forever, defeating the entire point of
+// the on-demand "Run Conformance Check" button.
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   const config = getJiraConfig();
