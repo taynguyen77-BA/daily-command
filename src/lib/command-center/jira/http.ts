@@ -144,7 +144,16 @@ export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: strin
     clauses.push(`project in (${options.projectKeys.map((k) => `"${k}"`).join(",")})`);
   }
   if (options.sinceIso) clauses.push(`updated >= "${options.sinceIso}"`);
-  return clauses.length > 0 ? `${clauses.join(" AND ")} order by updated desc` : "order by updated desc";
+  // V2.2.4 — Jira's search/jql endpoint rejects a fully unbounded query (no WHERE clause at
+  // all, `order by` only) with 400 "Unbounded JQL queries are not allowed here." This hits a
+  // first full sync with no JIRA_PROJECT_KEYS configured — exactly the common case, since
+  // that variable is optional and most operators never set it. `project is not EMPTY` is
+  // Atlassian's own documented pattern for "I genuinely want every issue, but the API
+  // requires SOME restriction": every real issue belongs to a project, so this excludes
+  // nothing — it only satisfies the syntactic requirement, never narrows the actual sync
+  // scope.
+  if (clauses.length === 0) clauses.push("project is not EMPTY");
+  return `${clauses.join(" AND ")} order by updated desc`;
 }
 
 export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<JiraFetchResult<JiraProject[]>> {
@@ -285,7 +294,10 @@ export async function detectJiraSearchCapability(fetchImpl: FetchLike, config: J
     const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
       method: "POST",
       headers: { Authorization: authHeader(config), Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ jql: "order by updated desc", maxResults: 0 }),
+      // V2.2.4 — matches buildIssuesJql's own bounded-query workaround; a bare "order by"
+      // JQL here would itself be rejected as unbounded (400), which previously made this
+      // probe misreport a genuinely working instance as UNKNOWN instead of SUPPORTED.
+      body: JSON.stringify({ jql: "project is not EMPTY order by updated desc", maxResults: 0 }),
       signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });
     if (res.status === 404) {

@@ -781,7 +781,7 @@ function makeJiraIssue(overrides: Partial<JiraIssue["fields"]> & { key?: string 
   // Incremental sync JQL
   ok("Incremental sync", buildIssuesJql({ sinceIso: "2026-08-01" }).includes('updated >= "2026-08-01"'), "sinceIso produces an 'updated >=' JQL clause");
   ok("Incremental sync", buildIssuesJql({ projectKeys: ["JPMC", "WF"] }).includes('project in ("JPMC","WF")'), "projectKeys produces a 'project in (...)' JQL clause");
-  ok("Incremental sync", buildIssuesJql({}) === "order by updated desc", "no options -> a full, unscoped sync JQL");
+  ok("Incremental sync", buildIssuesJql({}) === "project is not EMPTY order by updated desc", "no options -> a full, unscoped sync JQL that still satisfies Jira's bounded-query requirement (see V2.2.4)");
 
   // Rate limiting / error classification
   const rateLimited: FetchLike = async () => ({ ok: false, status: 429, json: async () => ({}) });
@@ -4130,6 +4130,38 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   }
 
   ok("V2.2.3 Jira error surfacing", classifyHttpError(400).error.includes("400"), "classifyHttpError(400) gives a specific 'malformed request' message rather than a generic unrecognized-status message");
+}
+
+// ===== V2.2.4 — real production bug fix #3: after fixing the 400 on the "flagged" field,
+// real sync started failing with a DIFFERENT 400: "Unbounded JQL queries are not allowed
+// here. Please add a search restriction to your query." Root cause: /rest/api/3/search/jql
+// rejects a JQL with no WHERE clause at all (`order by ...` alone) — exactly what
+// buildIssuesJql produced for a first sync with no JIRA_PROJECT_KEYS configured (the common
+// case, since that variable is optional). =====
+{
+  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({}) === "project is not EMPTY order by updated desc", "no scope and no incremental cursor still produces a JQL with a real WHERE clause — never a bare 'order by' that Jira's endpoint rejects as unbounded");
+  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({ projectKeys: ["JPMC"] }) === 'project in ("JPMC") order by updated desc', "a real project scope is used as-is — the bounded-query workaround only applies when there's genuinely no other restriction");
+  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({ sinceIso: "2026-08-01" }) === 'updated >= "2026-08-01" order by updated desc', "an incremental sinceIso is already a real bounding clause — the workaround clause is not redundantly added");
+  ok("V2.2.4 Jira bounded JQL", !buildIssuesJql({}).startsWith("order by"), "the unbounded case never starts with a bare ORDER BY");
+
+  // End-to-end: a fetch that would reject an unbounded JQL with exactly the real-world
+  // message must now succeed, because the JQL we send is no longer unbounded.
+  const boundedConfig: JiraConnectionConfig = { baseUrl: "https://acme.atlassian.net", email: "ba@acme.com", apiToken: "x" };
+  let sentJql: string | undefined;
+  const strictInstanceFetch: FetchLike = async (url, init) => {
+    if (url.includes("/search/jql")) {
+      const body = JSON.parse((init as { body?: string })?.body ?? "{}") as { jql?: string };
+      sentJql = body.jql;
+      if (!body.jql || body.jql.trim().toLowerCase().startsWith("order by")) {
+        return { ok: false, status: 400, json: async () => ({ errorMessages: ["Unbounded JQL queries are not allowed here. Please add a search restriction to your query."] }) };
+      }
+      return { ok: true, status: 200, json: async () => ({ issues: [], isLast: true }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  const result = await fetchJiraIssuesWith(strictInstanceFetch, boundedConfig, {});
+  ok("V2.2.4 Jira bounded JQL", result.ok, `a first full sync against an instance that enforces bounded JQL now succeeds (got ${result.ok ? "ok" : "error: " + (result as { error?: string }).error})`);
+  ok("V2.2.4 Jira bounded JQL", sentJql === "project is not EMPTY order by updated desc", "the exact JQL sent to a real instance matches the bounded-query workaround");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
