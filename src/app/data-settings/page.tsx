@@ -7,16 +7,39 @@ import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/compon
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured } from "@/lib/command-center/datasource/jira-source";
 import { computeDataHealth } from "@/lib/command-center/data-health";
-import { getRecentAiTrace } from "@/lib/command-center/ai/trace";
+import { getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
+import { getCacheStats } from "@/lib/command-center/ai/ai-cache";
+import { getTodayIso } from "@/lib/command-center/store";
 import { computeTrustDiagnostic, type TrustDiagnosticStatus } from "@/lib/command-center/trust-diagnostic";
-import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotCheckStatus } from "@/lib/command-center/jira/pilot-checklist";
+import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadinessStatus, type PilotCheckItem } from "@/lib/command-center/jira/pilot-checklist";
 import type { JiraConformanceReport } from "@/lib/command-center/types";
 
-const PILOT_STATUS_STYLE: Record<PilotCheckStatus, string> = {
-  PASS: "text-green",
-  FAIL: "text-red",
+const PILOT_STATUS_STYLE: Record<PilotReadinessStatus, string> = {
   NOT_TESTED: "text-text3",
+  READY_TO_TEST: "text-accent2",
+  TESTING: "text-yellow",
+  PASSED: "text-green",
+  BLOCKED: "text-orange",
+  FAILED: "text-red",
 };
+
+/** V2.1 §5 — one checklist item rendered as WHAT / WHY IT MATTERS / STATUS / EVIDENCE /
+ *  NEXT ACTION, per the spec's worked example. Shared by both the Live Pilot Checklist and
+ *  the Real Jira Data Protection checklist so they read identically. */
+function PilotChecklistRow({ item }: { item: PilotCheckItem }) {
+  return (
+    <div className="rounded-md border border-border bg-surface2 p-3 text-xs">
+      <div className="mb-1 flex items-center gap-2">
+        <span className="font-medium text-text">{item.label}</span>
+        <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${PILOT_STATUS_STYLE[item.status]}`}>{item.status.replace(/_/g, " ")}</span>
+      </div>
+      <p className="text-text2">{item.what}</p>
+      <p className="mt-1 text-text3">Why it matters: {item.whyItMatters}</p>
+      <p className="mt-1 text-text2">Evidence: {item.detail}</p>
+      {item.nextAction !== "None." && item.nextAction !== "None — this is a structural guarantee, verified by the credential-safety static scan." && <p className="mt-1 text-accent2">→ {item.nextAction}</p>}
+    </div>
+  );
+}
 
 const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
   good: "text-green",
@@ -47,6 +70,8 @@ export default function DataSettingsPage() {
   const [conformanceLoading, setConformanceLoading] = useState(false);
   const [aiTraceTick, setAiTraceTick] = useState(0);
   const [emailDraft, setEmailDraft] = useState(state.personalIdentity?.email ?? "");
+  const [pendingFirstSync, setPendingFirstSync] = useState(false);
+  const [pendingFullSync, setPendingFullSync] = useState(false);
 
   useEffect(() => {
     checkClaudeAvailability().then(setClaudeAvailable);
@@ -57,16 +82,23 @@ export default function DataSettingsPage() {
   // this component doesn't own.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const aiTrace = useMemo(() => getRecentAiTrace(), [aiTraceTick]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const aiTraceSummary = useMemo(() => getAiTraceSummary(getTodayIso()), [aiTraceTick]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cacheStats = useMemo(() => getCacheStats(), [aiTraceTick]);
   const dataHealth = useMemo(() => computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt), [state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt]);
   const trustDiagnostic = useMemo(
     () => computeTrustDiagnostic({ dataHealth, dataSource: state.dataSource, jiraSync: state.jiraSync, claudeAvailable, latestAiProviderState: aiTrace[0]?.providerState }),
     [dataHealth, state.dataSource, state.jiraSync, claudeAvailable, aiTrace]
   );
   const pilotChecklist = useMemo(
-    () => buildLivePilotChecklist({ jiraConfigured: !!jiraStatus?.configured, conformance, sync: state.jiraSync, dataHealth }),
-    [jiraStatus, conformance, state.jiraSync, dataHealth]
+    () => buildLivePilotChecklist({ jiraConfigured: !!jiraStatus?.configured, conformance, conformanceRunning: conformanceLoading, sync: state.jiraSync, dataHealth }),
+    [jiraStatus, conformance, conformanceLoading, state.jiraSync, dataHealth]
   );
-  const dataProtectionChecklist = useMemo(() => buildDataProtectionChecklist(conformance), [conformance]);
+  const dataProtectionChecklist = useMemo(
+    () => buildDataProtectionChecklist(conformance, !!jiraStatus?.configured, conformanceLoading),
+    [conformance, jiraStatus, conformanceLoading]
+  );
   const [expandedRemediation, setExpandedRemediation] = useState<number | null>(null);
 
   async function runConformance() {
@@ -90,6 +122,18 @@ export default function DataSettingsPage() {
     ["Actions", state.data.actions.length],
     ["Communications", state.data.communications.length],
   ];
+
+  // V2.1 §8 — gate the FIRST sync against a real Jira instance behind an explicit
+  // confirmation; every sync after that (lastSyncStatus no longer "never") proceeds
+  // directly, since the underlying read-only guarantee doesn't change between syncs.
+  function requestSync(full: boolean) {
+    if (state.jiraSync.lastSyncStatus === "never") {
+      setPendingFullSync(full);
+      setPendingFirstSync(true);
+      return;
+    }
+    runSync(full);
+  }
 
   async function runSync(full: boolean) {
     setSyncing(true);
@@ -232,30 +276,63 @@ export default function DataSettingsPage() {
                 </p>
               )}
 
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  onClick={() => runSync(false)}
-                  disabled={syncing}
-                  className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
-                >
-                  {syncing ? "Syncing…" : "Sync Jira"}
-                </button>
-                <button
-                  onClick={() => runSync(true)}
-                  disabled={syncing}
-                  className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-accent hover:text-text disabled:opacity-60"
-                >
-                  Full re-sync
-                </button>
-                {state.dataSource === "jira" && (
+              {/* V2.1 §8 — Live Pilot Safety: before the FIRST sync against this Jira
+                  instance, require an explicit read-only confirmation. Subsequent syncs
+                  (once lastSyncStatus is no longer "never") proceed directly — the
+                  guarantee itself never changes (syncJira() is unconditionally read-only),
+                  this only makes it visible and requires acknowledgment once. */}
+              {pendingFirstSync ? (
+                <div className="mt-3 rounded-md border border-accent/30 bg-accent/5 p-3 text-xs">
+                  <p className="font-medium text-text">You are about to connect this Command Center to Jira.</p>
+                  <p className="mt-2 text-text2">What will happen:</p>
+                  <ul className="mt-1 list-inside list-disc space-y-0.5 text-text2">
+                    <li>Read Jira projects and issues</li>
+                    <li>Normalize them into the local project state</li>
+                    <li>No Jira data will be modified</li>
+                    <li>No Jira issues will be created or updated</li>
+                    <li>Existing local data will be preserved if sync fails</li>
+                  </ul>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      onClick={() => {
+                        setPendingFirstSync(false);
+                        runSync(pendingFullSync);
+                      }}
+                      className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2"
+                    >
+                      Yes, connect to Jira
+                    </button>
+                    <button onClick={() => setPendingFirstSync(false)} className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:text-text">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 flex flex-wrap gap-2">
                   <button
-                    onClick={() => store.disconnectJira()}
-                    className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-red hover:text-red"
+                    onClick={() => requestSync(false)}
+                    disabled={syncing}
+                    className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
                   >
-                    Disconnect
+                    {syncing ? "Syncing…" : "Sync Jira"}
                   </button>
-                )}
-              </div>
+                  <button
+                    onClick={() => requestSync(true)}
+                    disabled={syncing}
+                    className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-accent hover:text-text disabled:opacity-60"
+                  >
+                    Full re-sync
+                  </button>
+                  {state.dataSource === "jira" && (
+                    <button
+                      onClick={() => store.disconnectJira()}
+                      className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-red hover:text-red"
+                    >
+                      Disconnect
+                    </button>
+                  )}
+                </div>
+              )}
               {syncMessage && <p className="mt-2 text-xs text-text3">{syncMessage}</p>}
 
               {sync.lastSyncStatus === "success" && (
@@ -290,8 +367,12 @@ export default function DataSettingsPage() {
         {conformance && (
           <div className="mt-3 space-y-3 text-sm">
             <p className="text-xs">
-              <span className={`rounded border px-1.5 py-0.5 font-mono font-semibold ${conformance.source === "live" ? "border-green/40 text-green" : "border-border text-text2"}`}>
-                {conformance.modeLabel ?? (conformance.source === "live" ? "LIVE JIRA MODE" : "FIXTURE MODE")}
+              <span
+                className={`rounded border px-1.5 py-0.5 font-mono font-semibold ${
+                  conformance.source === "live" ? "border-green/40 text-green" : conformance.source === "live-failed" ? "border-red/40 text-red" : "border-border text-text2"
+                }`}
+              >
+                {conformance.modeLabel ?? (conformance.source === "live" ? "LIVE JIRA MODE" : conformance.source === "live-failed" ? "LIVE ATTEMPT FAILED" : "FIXTURE MODE")}
               </span>
               <span className="ml-2 text-text3">Generated {new Date(conformance.generatedAt).toLocaleTimeString()}</span>
               {conformance.durationMs !== undefined && <span className="ml-2 text-text3">· {conformance.durationMs}ms</span>}
@@ -338,6 +419,7 @@ export default function DataSettingsPage() {
               <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Field quality (code capability)</p>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[400px] text-xs">
+                  <caption className="sr-only">Field quality — per-field support level and detail, a property of this app&apos;s connector code, not of any one sync&apos;s data.</caption>
                   <thead>
                     <tr className="border-b border-border text-left text-text3">
                       <th scope="col" className="py-1 pr-3 font-semibold">Field</th>
@@ -362,6 +444,7 @@ export default function DataSettingsPage() {
                 <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Data contract (this sample, {conformance.dataContract.sampleSize} issue(s))</p>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[400px] text-xs">
+                    <caption className="sr-only">Data contract — per-field support level observed on this {conformance.dataContract.sampleSize}-issue sample.</caption>
                     <thead>
                       <tr className="border-b border-border text-left text-text3">
                         <th scope="col" className="py-1 pr-3 font-semibold">Field</th>
@@ -390,6 +473,7 @@ export default function DataSettingsPage() {
                     <div key={f.field} className="overflow-x-auto">
                       <p className="text-xs font-medium text-text2">{f.field}</p>
                       <table className="w-full min-w-[400px] text-xs">
+                        <caption className="sr-only">Mapping drift for the {f.field} field — observed values, occurrence counts, and mapping confidence.</caption>
                         <thead>
                           <tr className="border-b border-border text-left text-text3">
                             <th scope="col" className="py-1 pr-3 font-semibold">Observed value</th>
@@ -419,6 +503,7 @@ export default function DataSettingsPage() {
                 <p className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Real data shape discovery — non-EXPECTED observations</p>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[400px] text-xs">
+                    <caption className="sr-only">Real data shape discovery — field values that were AMBIGUOUS, a NEW_VARIATION, UNSUPPORTED, or a BUG, excluding EXPECTED observations.</caption>
                     <thead>
                       <tr className="border-b border-border text-left text-text3">
                         <th scope="col" className="py-1 pr-3 font-semibold">Field</th>
@@ -512,23 +597,19 @@ export default function DataSettingsPage() {
       </Panel>
 
       <Panel className="p-5">
-        <SectionHeading title="Live Pilot Checklist" subtitle="Ready for the first real Jira pilot? Every item defaults to NOT TESTED until genuinely exercised — never fabricated." />
-        <div className="space-y-1.5">
+        <SectionHeading title="Pilot Readiness" subtitle="A checklist, not a score. Every item defaults to NOT TESTED until genuinely exercised — never fabricated." />
+        <div className="space-y-2">
           {pilotChecklist.map((c) => (
-            <p key={c.id} className="text-xs">
-              <span className={`font-semibold ${PILOT_STATUS_STYLE[c.status]}`}>{c.status.replace(/_/g, " ")}</span> <span className="text-text2">{c.label}</span> — <span className="text-text3">{c.detail}</span>
-            </p>
+            <PilotChecklistRow key={c.id} item={c} />
           ))}
         </div>
       </Panel>
 
       <Panel className="p-5">
         <SectionHeading title="Real Jira Data Protection" subtitle="Read-only remains the rule — no write-back. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           {dataProtectionChecklist.map((c) => (
-            <p key={c.id} className="text-xs">
-              <span className={`font-semibold ${PILOT_STATUS_STYLE[c.status]}`}>{c.status.replace(/_/g, " ")}</span> <span className="text-text2">{c.label}</span> — <span className="text-text3">{c.detail}</span>
-            </p>
+            <PilotChecklistRow key={c.id} item={c} />
           ))}
         </div>
       </Panel>
@@ -566,6 +647,34 @@ export default function DataSettingsPage() {
             </button>
           }
         />
+        {/* V2.1 §13-14 — richer session diagnostics, still reusing existing trace/cache
+            infrastructure (no new monitoring system). "Evaluation: PASS/WARN/FAIL" is
+            deliberately NOT shown here — evaluateAiResponse() needs the original
+            facts/evidence, which the trace never stores by design (privacy/size), so a
+            live per-call evaluation count can't be honestly computed from trace alone
+            without an invasive signature change across every provider method. */}
+        <div className="mb-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
+          <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
+            <p className="text-text3">Provider</p>
+            <p className="font-display text-text">{claudeAvailable ? "Configured" : "Not configured"}</p>
+          </div>
+          <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
+            <p className="text-text3">Calls today</p>
+            <p className="font-display text-text">{aiTraceSummary.callsToday}</p>
+          </div>
+          <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
+            <p className="text-text3">Cache hits</p>
+            <p className="font-display text-text">{cacheStats.hits}</p>
+          </div>
+          <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
+            <p className="text-text3">Cache misses</p>
+            <p className="font-display text-text">{cacheStats.misses}</p>
+          </div>
+          <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
+            <p className="text-text3">Failed validation</p>
+            <p className={`font-display ${aiTraceSummary.failedValidationCount > 0 ? "text-red" : "text-text"}`}>{aiTraceSummary.failedValidationCount}</p>
+          </div>
+        </div>
         {aiTrace.length === 0 ? (
           <p className="text-sm text-text3">No AI calls recorded yet this session — ask the Command Bar a question or open a Focus Session to generate one.</p>
         ) : (

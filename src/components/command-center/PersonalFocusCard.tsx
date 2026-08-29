@@ -62,6 +62,55 @@ export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: Pers
         <span>Estimated focus: {candidate.estimatedMinutes} min (heuristic)</span>
       </div>
 
+      {/* V2.1 §11 — Personal Focus Trust Boundary. Shown for DO_NOW/DO_TODAY items so the
+          evidence boundary behind the ranking is explicit, not just implied by the badge.
+          Pure presentation over candidate.factors/ownerAmbiguous/dueDate — no new ranking
+          logic, nothing computed here that personal-focus.ts didn't already compute. */}
+      {(candidate.category === "DO_NOW" || candidate.category === "DO_TODAY") && (
+        <div className="mt-2 rounded-md border border-border bg-surface2 p-2 text-xs">
+          <p className="mb-1 flex items-center gap-1 font-semibold uppercase tracking-wide text-text3">
+            <TrustLabel kind="calculated" /> Why this is here
+          </p>
+          <dl className="space-y-0.5 text-text2">
+            <div>
+              <dt className="inline text-text3">Priority basis: </dt>
+              <dd className="inline">{candidate.factors.find((f) => f.name === "Severity / urgency")?.detail ?? `Severity: ${candidate.severity}`}</dd>
+            </div>
+            <div>
+              <dt className="inline text-text3">Ownership: </dt>
+              <dd className="inline">
+                {candidate.ownerAmbiguous
+                  ? "OWNER UNCLEAR"
+                  : candidate.ownershipExplicit
+                    ? `Explicitly assigned to you${candidate.ownerLabel ? ` (${candidate.ownerLabel})` : ""}`
+                    : candidate.ownerLabel
+                      ? `Explicitly assigned to ${candidate.ownerLabel}, not you`
+                      : "Not explicitly recorded"}
+              </dd>
+            </div>
+            <div>
+              <dt className="inline text-text3">Deadline: </dt>
+              <dd className="inline">{candidate.dueDate ? `Due ${candidate.dueDate}` : "No explicit deadline recorded"}</dd>
+            </div>
+            {candidate.factors.find((f) => f.name === "Dependency danger")?.available && (
+              <div>
+                <dt className="inline text-text3">Dependency: </dt>
+                <dd className="inline">{candidate.factors.find((f) => f.name === "Dependency danger")?.detail}</dd>
+              </div>
+            )}
+            <div>
+              <dt className="inline text-text3">Trust: </dt>
+              <dd className="inline">CALCULATED</dd>
+            </div>
+          </dl>
+          {candidate.ownerAmbiguous && (
+            <p className="mt-2 rounded border border-yellow/30 bg-yellow/10 px-2 py-1 text-yellow">
+              This item is intentionally not ranked as DO_NOW because related records have conflicting owners.
+            </p>
+          )}
+        </div>
+      )}
+
       <WhyShouldICareDrawer content={content} triggerLabel="Why is this on my list?" />
       <p className="mt-1 text-xs text-text2">{candidate.whyOnMyList}</p>
 

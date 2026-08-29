@@ -100,6 +100,9 @@ import { projectRiskImpact, projectDecisionImpact, projectActionImpact, projectL
 import { deriveDontForget } from "../src/lib/command-center/personal-focus";
 import { reviewStatusFor } from "../src/lib/command-center/decision-radar";
 import { buildLivePilotChecklist, buildDataProtectionChecklist } from "../src/lib/command-center/jira/pilot-checklist";
+import { buildBeforeYouTrustSummary } from "../src/lib/command-center/trust-diagnostic";
+import { getCacheStats, resetCacheStats } from "../src/lib/command-center/ai/ai-cache";
+import { getAiTraceSummary } from "../src/lib/command-center/ai/trace";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -3175,40 +3178,58 @@ function pfc(overrides: Partial<PersonalFocusCandidate> = {}): PersonalFocusCand
   ok("V2.0 Decision review status", reviewStatusFor({ reviewDate: soonDate }, TODAY) === "REVIEW_SOON", "a review date 2 days out is REVIEW_SOON");
 }
 
-// ===== V2.0 §13-14 — Live Pilot Checklist / Data Protection checklist =====
+// ===== V2.0 §13-14, upgraded V2.1 §5 — Pilot Readiness / Data Protection checklist =====
+// V2.1 widens the 3-state PASS/FAIL/NOT_TESTED model to the spec's 6-state operator
+// workflow (NOT_TESTED/READY_TO_TEST/TESTING/PASSED/BLOCKED/FAILED) — still a checklist,
+// never a score.
 {
   const neverSyncedState: import("../src/lib/command-center/types").JiraSyncState = { lastSyncStatus: "never" };
   const emptyHealth = computeDataHealth(emptyData(), "demo", undefined);
 
   const notConfiguredChecklist = buildLivePilotChecklist({ jiraConfigured: false, conformance: null, sync: neverSyncedState, dataHealth: emptyHealth });
-  ok("V2.0 Pilot checklist", notConfiguredChecklist.every((c) => c.status === "NOT_TESTED"), "with Jira unconfigured and no conformance run, every checklist item is NOT_TESTED — nothing is ever fabricated as PASS");
-  ok("V2.0 Pilot checklist", notConfiguredChecklist.length >= 13, `the checklist covers at least the 13 named spec items (got ${notConfiguredChecklist.length})`);
+  ok("V2.1 Pilot readiness", notConfiguredChecklist.every((c) => c.status === "NOT_TESTED"), "with Jira unconfigured and no conformance run, every checklist item is NOT_TESTED — nothing is ever fabricated as PASSED");
+  ok("V2.1 Pilot readiness", notConfiguredChecklist.length >= 13, `the checklist covers at least the 13 named spec items (got ${notConfiguredChecklist.length})`);
+  ok("V2.1 Pilot readiness", notConfiguredChecklist.every((c) => c.what.length > 0 && c.whyItMatters.length > 0 && c.nextAction.length > 0), "every item carries a non-empty WHAT / WHY IT MATTERS / NEXT ACTION, per the spec's worked example");
 
   const fixtureModeReport = await runJiraConformance(); // source: "fixtures"
   const fixtureChecklist = buildLivePilotChecklist({ jiraConfigured: true, conformance: fixtureModeReport, sync: neverSyncedState, dataHealth: emptyHealth });
-  ok("V2.0 Pilot checklist", fixtureChecklist.find((c) => c.id === "project-discovery")?.status === "NOT_TESTED", "a FIXTURE-mode conformance run never counts as live pilot validation — project discovery stays NOT_TESTED");
-  ok("V2.0 Pilot checklist", fixtureChecklist.find((c) => c.id === "issue-retrieval")?.status === "NOT_TESTED", "issue retrieval also stays NOT_TESTED under fixture-mode conformance");
+  ok("V2.1 Pilot readiness", fixtureChecklist.find((c) => c.id === "project-discovery")?.status === "READY_TO_TEST", "credentials configured but only a FIXTURE-mode run exists — project discovery is READY_TO_TEST (fixtures prove the code path, not the real instance), never PASSED");
+  ok("V2.1 Pilot readiness", fixtureChecklist.find((c) => c.id === "issue-retrieval")?.status === "READY_TO_TEST", "issue retrieval is likewise READY_TO_TEST under fixture-mode conformance, not PASSED and not NOT_TESTED");
+
+  const testingChecklist = buildLivePilotChecklist({ jiraConfigured: true, conformance: fixtureModeReport, conformanceRunning: true, sync: neverSyncedState, dataHealth: emptyHealth });
+  ok("V2.1 Pilot readiness", testingChecklist.find((c) => c.id === "project-discovery")?.status === "TESTING", "while a conformance run is in flight, live-only items report TESTING regardless of any previous result");
 
   const liveStyleReport = await runJiraConformance({ fetchImpl: fixtureFetch(), config: FIXTURE_CONFIG }); // source: "live"
   const liveChecklist = buildLivePilotChecklist({ jiraConfigured: true, conformance: liveStyleReport, sync: neverSyncedState, dataHealth: emptyHealth });
-  ok("V2.0 Pilot checklist", liveChecklist.find((c) => c.id === "project-discovery")?.status === "PASS", "a genuinely LIVE-source conformance run resolves project discovery from the real check result");
+  ok("V2.1 Pilot readiness", liveChecklist.find((c) => c.id === "project-discovery")?.status === "PASSED", "a genuinely LIVE-source conformance run resolves project discovery to PASSED from the real check result");
+
+  const liveFailedReport = await runJiraConformance({ fetchImpl: fixtureFetch({ httpStatus: 401 }), config: FIXTURE_CONFIG }); // source: "live-failed"
+  const blockedChecklist = buildLivePilotChecklist({ jiraConfigured: true, conformance: liveFailedReport, sync: neverSyncedState, dataHealth: emptyHealth });
+  ok("V2.1 Pilot readiness", blockedChecklist.find((c) => c.id === "project-discovery")?.status === "BLOCKED", "a genuinely failed live attempt marks project discovery BLOCKED — distinct from FAILED (which means it ran and failed a check) and from READY_TO_TEST (which implies nothing was attempted)");
 
   const successSync: import("../src/lib/command-center/types").JiraSyncState = { lastSyncStatus: "success", durationMs: 4200 };
   const successChecklist = buildLivePilotChecklist({ jiraConfigured: true, conformance: null, sync: successSync, dataHealth: emptyHealth });
-  ok("V2.0 Pilot checklist", successChecklist.find((c) => c.id === "connectivity")?.status === "PASS", "a completed successful sync marks connectivity PASS");
-  ok("V2.0 Pilot checklist", successChecklist.find((c) => c.id === "sync-duration")?.status === "PASS", "a recorded sync duration marks that checklist item PASS");
-  ok("V2.0 Pilot checklist", successChecklist.find((c) => c.id === "previous-data-preservation")?.status === "NOT_TESTED", "previous-data preservation stays NOT_TESTED when no sync has ever FAILED — it can only be proven by an actual failure");
+  ok("V2.1 Pilot readiness", successChecklist.find((c) => c.id === "connectivity")?.status === "PASSED", "a completed successful sync marks connectivity PASSED");
+  ok("V2.1 Pilot readiness", successChecklist.find((c) => c.id === "sync-duration")?.status === "PASSED", "a recorded sync duration marks that checklist item PASSED");
+  ok("V2.1 Pilot readiness", successChecklist.find((c) => c.id === "previous-data-preservation")?.status === "READY_TO_TEST", "previous-data preservation is READY_TO_TEST (credentials configured, but no failure has ever occurred to prove it) — it can only be proven by an actual failure");
 
   const failedSyncPreserved: import("../src/lib/command-center/types").JiraSyncState = { lastSyncStatus: "failed", lastSyncError: "network down", previousDataPreserved: true };
   const failedChecklist = buildLivePilotChecklist({ jiraConfigured: true, conformance: null, sync: failedSyncPreserved, dataHealth: emptyHealth });
-  ok("V2.0 Pilot checklist", failedChecklist.find((c) => c.id === "connectivity")?.status === "FAIL", "a failed sync marks connectivity FAIL, not silently NOT_TESTED");
-  ok("V2.0 Pilot checklist", failedChecklist.find((c) => c.id === "previous-data-preservation")?.status === "PASS", "a failed sync with previousDataPreserved=true marks that item PASS — genuinely exercised and confirmed");
+  ok("V2.1 Pilot readiness", failedChecklist.find((c) => c.id === "connectivity")?.status === "FAILED", "a failed sync marks connectivity FAILED, not silently NOT_TESTED or READY_TO_TEST");
+  ok("V2.1 Pilot readiness", failedChecklist.find((c) => c.id === "previous-data-preservation")?.status === "PASSED", "a failed sync with previousDataPreserved=true marks that item PASSED — genuinely exercised and confirmed");
 
-  const dpFixture = buildDataProtectionChecklist(fixtureModeReport);
-  ok("V2.0 Data protection checklist", dpFixture.find((c) => c.id === "credential-isolation")?.status === "PASS", "credential isolation is a structural guarantee, reported PASS unconditionally");
-  ok("V2.0 Data protection checklist", dpFixture.find((c) => c.id === "unmapped-fields-visible")?.status === "NOT_TESTED", "unmapped-fields-visible stays NOT_TESTED under fixture-mode (only live-mode data counts)");
-  const dpLive = buildDataProtectionChecklist(liveStyleReport);
-  ok("V2.0 Data protection checklist", dpLive.find((c) => c.id === "unmapped-fields-visible")?.status === "PASS", "unmapped-fields-visible is PASS once a live-source conformance run actually produced field-support data");
+  const dpNotConfigured = buildDataProtectionChecklist(null, false, false);
+  ok("V2.1 Data protection checklist", dpNotConfigured.find((c) => c.id === "credential-isolation")?.status === "PASSED", "credential isolation is a structural guarantee, reported PASSED unconditionally regardless of Jira configuration");
+  ok("V2.1 Data protection checklist", dpNotConfigured.find((c) => c.id === "unmapped-fields-visible")?.status === "NOT_TESTED", "unmapped-fields-visible is NOT_TESTED when Jira isn't even configured");
+
+  const dpFixture = buildDataProtectionChecklist(fixtureModeReport, true, false);
+  ok("V2.1 Data protection checklist", dpFixture.find((c) => c.id === "unmapped-fields-visible")?.status === "READY_TO_TEST", "unmapped-fields-visible is READY_TO_TEST under fixture-mode (credentials configured, only fixture-proven so far)");
+
+  const dpLive = buildDataProtectionChecklist(liveStyleReport, true, false);
+  ok("V2.1 Data protection checklist", dpLive.find((c) => c.id === "unmapped-fields-visible")?.status === "PASSED", "unmapped-fields-visible is PASSED once a live-source conformance run actually produced field-support data");
+
+  const dpBlocked = buildDataProtectionChecklist(liveFailedReport, true, false);
+  ok("V2.1 Data protection checklist", dpBlocked.find((c) => c.id === "mapping-drift-surfaced")?.status === "BLOCKED", "mapping-drift-surfaced is BLOCKED (not silently READY_TO_TEST) when a live attempt genuinely failed");
 }
 
 // ===== V2.0 §10 — Command Bar family consolidation =====
@@ -3235,6 +3256,330 @@ function pfc(overrides: Partial<PersonalFocusCandidate> = {}): PersonalFocusCand
     const content = fs.readFileSync(path.join(langRoot, rel), "utf8");
     ok("V2.0 Weekly Review language audit", !forbidden.some((re) => re.test(content)), `${rel} contains none of the forbidden judgmental phrases (poor performance / underperforming / weak BA / inefficient employee)`);
   }
+}
+
+// ===== V2.1 §13 — Command Bar final precedence audit: near-miss / contraction / plural
+// regression matrix. Confirmed and fixed two genuine gaps: "aren't/isn't working"
+// contractions on actions-not-working, and "my 30-minute plan" phrasing on
+// personal-thirty-min (both widened in query-router.ts, additive, no precedence changes
+// elsewhere). This block also documents deliberate non-matches — a bare "what's stalled"
+// (no "loop") intentionally stays unrecognized rather than over-matching. =====
+{
+  const { current: cbAuditData } = buildDemoData(TODAY);
+  const auditQueries: Array<{ query: string; expectedIntent: string; note: string }> = [
+    // exact intent (sanity baseline)
+    { query: "What should I focus on today?", expectedIntent: "personal-focus-today", note: "exact phrasing" },
+    // near miss / rephrasing
+    { query: "What is most important for me today?", expectedIntent: "personal-focus-today", note: "near-miss rephrasing of the same intent" },
+    { query: "What's most important for me?", expectedIntent: "personal-focus-today", note: "contraction + near-miss rephrasing" },
+    // plural/singular
+    { query: "Which decision is blocked?", expectedIntent: "decisions-blocked", note: "singular 'decision' still matches the plural-shaped pattern (substring match)" },
+    { query: "Which risk is escalating?", expectedIntent: "risks-escalating", note: "singular 'risk' still matches" },
+    // contractions — "aren't working" / "isn't working" (the confirmed, now-fixed gap)
+    { query: "Which actions aren't working?", expectedIntent: "actions-not-working", note: "contraction — previously fell through to unrecognized, now fixed" },
+    { query: "This action isn't working", expectedIntent: "actions-not-working", note: "contraction, singular — now fixed" },
+    { query: "Which actions are not working?", expectedIntent: "actions-not-working", note: "the original non-contracted phrasing still matches" },
+    // "my" possessive forms
+    { query: "What's blocking my focus?", expectedIntent: "whats-blocking-focus", note: "possessive 'my'" },
+    { query: "What is my 30-minute plan?", expectedIntent: "personal-thirty-min", note: "possessive 'my' + the product's own PERSONAL-family example phrasing — previously fell through, now fixed" },
+    { query: "What can I finish in 30 minutes?", expectedIntent: "personal-thirty-min", note: "the original 'finish...30min' phrasing still matches" },
+    // "today" / "yesterday"
+    { query: "What changed today?", expectedIntent: "changed-today", note: "'today' variant" },
+    { query: "Did yesterday's actions help?", expectedIntent: "did-yesterday-help", note: "'yesterday' variant" },
+    { query: "Did today's actions help?", expectedIntent: "did-yesterday-help", note: "'today' also matches the did-(yesterday|today)-help pattern" },
+    // "what changed" vs "what changed after the decision" — precedence between a specific
+    // and a general pattern, must resolve to the MORE SPECIFIC one.
+    { query: "What changed after the decision?", expectedIntent: "what-changed-after-decision", note: "specific pattern must win over the general 'what changed' pattern checked later" },
+    { query: "What changed?", expectedIntent: "changed-today", note: "the general pattern, correctly NOT hijacked by the more specific one above" },
+    // "blocked" vs "stalled"
+    { query: "What's blocked?", expectedIntent: "blocking", note: "'blocked' routes to the generic blocking intent" },
+    { query: "Which loops are stalled?", expectedIntent: "loops-stalled", note: "'stalled' + 'loop' together routes to loops-stalled" },
+    { query: "What's stalled?", expectedIntent: "unrecognized", note: "DELIBERATE non-match: 'stalled' alone (no 'loop' context) is intentionally NOT assumed to mean delivery loops — stays the honest fallback rather than guessing" },
+    // "risk" / "decision" / "action" / "focus" bare category words
+    { query: "Show me risk", expectedIntent: "risks-for", note: "bare 'risk' falls through to the generic risks-for pattern" },
+    { query: "decision", expectedIntent: "unrecognized", note: "DELIBERATE non-match: the bare word 'decision' alone matches no pattern's required keyword combination — stays honestly unrecognized rather than guessing which decision-family intent was meant" },
+    { query: "What's my action strategy?", expectedIntent: "unrecognized", note: "DELIBERATE non-match: action-strategy requires 'different approach/strategy' phrasing specifically — a bare 'action strategy' noun phrase isn't assumed to mean the same thing" },
+    { query: "focus", expectedIntent: "unrecognized", note: "the bare word 'focus' alone matches nothing — never silently mapped to a guess" },
+    // "what should I do" family
+    { query: "What should I do?", expectedIntent: "next-actions", note: "the canonical phrasing" },
+    { query: "What should I do in the next 15 min?", expectedIntent: "next-actions", note: "captures the minutes value from the query text" },
+  ];
+
+  for (const { query, expectedIntent, note } of auditQueries) {
+    const route = classifyQuery(query, cbAuditData);
+    ok("V2.1 Command Bar precedence audit", route.intent === expectedIntent, `"${query}" routes to "${expectedIntent}" (${note}) — got "${route.intent}"`);
+  }
+
+  // Genuinely unknown, unrelated queries must ALWAYS return "unrecognized" — never
+  // silently mapped to the nearest-sounding intent.
+  for (const nonsense of ["asdkjasjdk", "tell me a joke", "what is the weather", "how many clients do we have named xyz123"]) {
+    ok("V2.1 Command Bar precedence audit", classifyQuery(nonsense, cbAuditData).intent === "unrecognized", `a genuinely unrelated query ("${nonsense}") stays unrecognized, never silently guessed`);
+  }
+}
+
+// ===== V2.1 §13-15 — AI usage diagnostics: cache stats + in-flight dedup + trace summary =====
+{
+  const fakeStorage = new Map<string, string>();
+  (globalThis as unknown as { window: unknown }).window = {
+    localStorage: {
+      getItem: (k: string) => (fakeStorage.has(k) ? fakeStorage.get(k)! : null),
+      setItem: (k: string, v: string) => { fakeStorage.set(k, v); },
+      removeItem: (k: string) => { fakeStorage.delete(k); },
+    },
+  };
+  clearAICache();
+  resetCacheStats();
+
+  // In-flight deduplication: two concurrent requests for the identical key must result in
+  // exactly ONE real fetcher call — this is what finally enforces usage-policy.ts's
+  // dedupeInFlight field, declared in V2.0 but never actually wired up until now.
+  let fetchCalls = 0;
+  let resolveFetch: (v: { text: string }) => void;
+  const slowFetcher = () =>
+    new Promise<{ text: string }>((resolve) => {
+      fetchCalls++;
+      resolveFetch = resolve;
+    });
+  const facts = ["dedup fact"];
+  const evidence = [{ content: "dedup evidence" }];
+  const call1 = withAICache("detectRisks", "dedup-entity", facts, evidence, slowFetcher);
+  const call2 = withAICache("detectRisks", "dedup-entity", facts, evidence, slowFetcher);
+  ok("V2.1 AI in-flight dedup", fetchCalls === 1, "two concurrent requests for the identical task+entity+evidence key result in exactly ONE real fetcher call, not two");
+  resolveFetch!({ text: "resolved once" });
+  const [result1, result2] = await Promise.all([call1, call2]);
+  ok("V2.1 AI in-flight dedup", result1.value.text === "resolved once" && result2.value.text === "resolved once", "both concurrent callers receive the same resolved value");
+  ok("V2.1 AI in-flight dedup", result1.cacheState === "refreshed" && result2.cacheState === "cached", "the first caller sees 'refreshed' (it made the real call) and the second sees 'cached' (it deduped onto the in-flight request)");
+
+  // A genuinely SEQUENTIAL second call (after the first has already resolved and cached)
+  // is a normal cache hit, not a dedup case — both paths land on getCacheStats() correctly.
+  const statsAfterDedup = getCacheStats();
+  ok("V2.1 AI usage diagnostics", statsAfterDedup.misses === 1 && statsAfterDedup.hits === 1, `exactly one miss (the real call) and one hit (the deduped caller) are recorded (got misses=${statsAfterDedup.misses}, hits=${statsAfterDedup.hits})`);
+  ok("V2.1 AI usage diagnostics", statsAfterDedup.callsThisSession === 1, "callsThisSession counts only the one real fetcher invocation, not the deduped caller");
+
+  const call3 = await withAICache("detectRisks", "dedup-entity", facts, evidence, () => Promise.resolve({ text: "should not be called" }));
+  ok("V2.1 AI usage diagnostics", call3.cacheState === "cached" && call3.value.text === "resolved once", "a later sequential call with the same key is a normal persisted-cache hit, unaffected by the earlier in-flight dedup");
+
+  // getAiTraceSummary — pure aggregation over the bounded trace. recordAiCall() stamps
+  // real wall-clock time (not the fixture TODAY), so this must compare against the actual
+  // current date, not the fictional dataset date used everywhere else in this file.
+  const realToday = new Date().toISOString().slice(0, 10);
+  clearAiTrace();
+  recordAiCall({ task: "detectRisks", mode: "claude", schemaValid: true, fallbackUsed: false, evidenceReferenceCount: 0, providerState: "REAL_CLAUDE" });
+  recordAiCall({ task: "detectRisks", mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "CALL_FAILED" });
+  recordAiCall({ task: "detectRisks", mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "VALIDATION_FAILED" });
+  const summary = getAiTraceSummary(realToday);
+  ok("V2.1 AI trace summary", summary.callsToday === 3, "getAiTraceSummary counts all 3 recorded calls as today's calls");
+  ok("V2.1 AI trace summary", summary.byProviderState.REAL_CLAUDE === 1 && summary.byProviderState.CALL_FAILED === 1 && summary.byProviderState.VALIDATION_FAILED === 1, "the summary breaks calls down by provider state");
+  ok("V2.1 AI trace summary", summary.failedValidationCount === 1, "failedValidationCount counts only VALIDATION_FAILED entries, distinct from CALL_FAILED");
+  const summaryOtherDay = getAiTraceSummary("2020-01-01");
+  ok("V2.1 AI trace summary", summaryOtherDay.callsToday === 0, "calls recorded on a different day are excluded from that day's summary");
+
+  clearAiTrace();
+  clearAICache();
+  resetCacheStats();
+  delete (globalThis as unknown as { window?: unknown }).window;
+}
+
+// ===== V2.1 §10 — "Before You Trust This Data" summary =====
+{
+  const health = (over: Partial<import("../src/lib/command-center/types").DataHealth>): import("../src/lib/command-center/types").DataHealth => ({
+    freshness: "fresh",
+    sourceType: "jira",
+    ownershipCoveragePct: 100,
+    dueDateCoveragePct: 100,
+    releaseCoveragePct: 100,
+    scopeHistoryCoverage: "full",
+    totalWorkItems: 20,
+    ...over,
+  });
+
+  const empty = buildBeforeYouTrustSummary(health({ totalWorkItems: 0 }));
+  ok("V2.1 Before You Trust This Data", !empty.hasData && empty.rows.length === 0, "with zero open work items, the summary reports hasData:false rather than fabricating 0%/LIMITED rows");
+
+  const allGood = buildBeforeYouTrustSummary(health({}));
+  ok("V2.1 Before You Trust This Data", allGood.rows.every((r) => r.status === "GOOD"), "100% coverage across every dimension bands every row GOOD");
+  ok("V2.1 Before You Trust This Data", allGood.impact.includes("solid"), "when every row is GOOD, the impact line says data quality looks solid, not a fabricated warning");
+
+  const spec = buildBeforeYouTrustSummary(health({ ownershipCoveragePct: 77, dueDateCoveragePct: 100, releaseCoveragePct: 38, scopeHistoryCoverage: "partial" }));
+  const ownershipRow = spec.rows.find((r) => r.label === "Ownership");
+  const releaseRow = spec.rows.find((r) => r.label === "Release");
+  const scopeRow = spec.rows.find((r) => r.label === "Scope history");
+  ok("V2.1 Before You Trust This Data", ownershipRow?.value === "77%" && ownershipRow?.status === "REVIEW", "77% ownership bands to REVIEW, matching the spec's worked example");
+  ok("V2.1 Before You Trust This Data", releaseRow?.value === "38%" && releaseRow?.status === "LIMITED", "38% release coverage bands to LIMITED, matching the spec's worked example");
+  ok("V2.1 Before You Trust This Data", scopeRow?.value === "PARTIAL" && scopeRow?.status === "REVIEW", "PARTIAL scope history bands to REVIEW, matching the spec's worked example");
+  ok("V2.1 Before You Trust This Data", spec.impact.toLowerCase().includes("release"), "the impact line names the single WORST dimension (Release, LIMITED) rather than a generic blended statement");
+  ok("V2.1 Before You Trust This Data", spec.recommended !== "None — no action needed.", "a REVIEW/LIMITED row always produces an actionable recommendation, never silently omitted");
+
+  const withMappings = buildBeforeYouTrustSummary(health({}), { supported: 11, total: 13 });
+  const mappingsRow = withMappings.rows.find((r) => r.label === "Mappings");
+  ok("V2.1 Before You Trust This Data", mappingsRow?.value === "11/13", "when a field-support summary is supplied, the Mappings row shows it exactly as 'supported/total', matching the spec's worked example");
+  ok("V2.1 Before You Trust This Data", buildBeforeYouTrustSummary(health({})).rows.every((r) => r.label !== "Mappings"), "the Mappings row is omitted entirely (never fabricated) when no field-support summary is available");
+}
+
+// ===== V2.1 §6/§14 — AI provider state split (CALL_FAILED vs VALIDATION_FAILED) =====
+// Confirmed: claude-provider.ts used to collapse three distinct failure modes (non-200/API
+// error, malformed/schema-invalid response, thrown network error) into one
+// "MOCK_FALLBACK" providerState. This section proves the request-level and
+// validation-level failures are now genuinely distinguishable in the trace, by
+// temporarily stubbing globalThis.fetch (restored in a finally block) so the "available"
+// check succeeds but the actual call fails in two different, controlled ways.
+{
+  const originalFetch = globalThis.fetch;
+  try {
+    // Scenario 1: the server is "available" but the POST call itself fails (500).
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (!init || init.method === "GET") return new Response(JSON.stringify({ available: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: false, error: "simulated upstream failure" }), { status: 500 });
+    }) as typeof fetch;
+
+    clearAiTrace();
+    const providerCallFailed = new ClaudeProvider();
+    const item = makeItem({ id: "provider-state-1" });
+    const scoreResult = scoreWorkItem(item, { ...emptyData(), workItems: [item] }, TODAY);
+    await providerCallFailed.analyzePriorities(item, scoreResult, ["fact"], []);
+    const traceAfterCallFailed = getRecentAiTrace();
+    ok("V2.1 AI provider states", traceAfterCallFailed[0]?.providerState === "CALL_FAILED", `a non-200 POST response is recorded as CALL_FAILED, not a generic MOCK_FALLBACK (got ${traceAfterCallFailed[0]?.providerState})`);
+
+    // Scenario 2: the server is "available" and returns 200/ok:true, but the payload
+    // doesn't pass schema validation.
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (!init || init.method === "GET") return new Response(JSON.stringify({ available: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, data: { completely: "the wrong shape" } }), { status: 200 });
+    }) as typeof fetch;
+
+    clearAiTrace();
+    const providerValidationFailed = new ClaudeProvider();
+    await providerValidationFailed.analyzePriorities(item, scoreResult, ["fact"], []);
+    const traceAfterValidationFailed = getRecentAiTrace();
+    ok("V2.1 AI provider states", traceAfterValidationFailed[0]?.providerState === "VALIDATION_FAILED", `a 200 response that fails schema validation is recorded as VALIDATION_FAILED, distinct from CALL_FAILED (got ${traceAfterValidationFailed[0]?.providerState})`);
+
+    // Scenario 3: a genuine success still reports REAL_CLAUDE, unaffected by the split.
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      if (!init || init.method === "GET") return new Response(JSON.stringify({ available: true }), { status: 200 });
+      return new Response(JSON.stringify({ ok: true, data: { inference: "real inference", recommendation: "real recommendation", confidence: 0.8 } }), { status: 200 });
+    }) as typeof fetch;
+
+    clearAiTrace();
+    const providerSuccess = new ClaudeProvider();
+    await providerSuccess.analyzePriorities(item, scoreResult, ["fact"], []);
+    const traceAfterSuccess = getRecentAiTrace();
+    ok("V2.1 AI provider states", traceAfterSuccess[0]?.providerState === "REAL_CLAUDE" && providerSuccess.mode === "claude", "a genuinely successful, schema-valid response still reports REAL_CLAUDE — the split only affects the two failure paths");
+  } finally {
+    globalThis.fetch = originalFetch;
+    clearAiTrace();
+  }
+
+  // NOT_CONFIGURED (CLAUDE_UNAVAILABLE) must never be confused with a call/validation
+  // failure — the existing "Claude fallback" test block above already proves this path
+  // (no server reachable -> providerState CLAUDE_UNAVAILABLE); spot-check it's still
+  // distinct from the two new states.
+  const unavailableProvider = new ClaudeProvider();
+  const uItem = makeItem({ id: "provider-state-unavailable" });
+  await unavailableProvider.analyzePriorities(uItem, scoreWorkItem(uItem, { ...emptyData(), workItems: [uItem] }, TODAY), ["fact"], []);
+  const unavailableTrace = getRecentAiTrace();
+  ok("V2.1 AI provider states", unavailableTrace[0]?.providerState === "CLAUDE_UNAVAILABLE", "with no server reachable at all, providerState is CLAUDE_UNAVAILABLE — distinct from both CALL_FAILED and VALIDATION_FAILED, never mislabeled as a 'Claude error'");
+  clearAiTrace();
+}
+
+// ===== V2.1 §7 — Real Jira Pilot Runner: never fabricate LIVE =====
+// Confirmed root cause: runJiraConformance() used to set `live = !!options` — i.e. purely
+// from whether a config was PASSED IN, never from whether any HTTP call actually
+// succeeded. A caller with real (but unreachable) credentials would get a report claiming
+// "LIVE JIRA MODE" despite zero real Jira contact. This section proves the fix.
+{
+  // A genuinely successful live-style round-trip (fixture data standing in for a real
+  // server response, but going through the real {fetchImpl, config} path) still reports
+  // "live" — the fix must not make genuine live success harder to detect.
+  const genuineLive = await runJiraConformance({ fetchImpl: fixtureFetch(), config: FIXTURE_CONFIG });
+  ok("V2.1 Jira pilot runner", genuineLive.source === "live", "a config/fetchImpl whose project-discovery call actually succeeds is reported source: 'live'");
+  ok("V2.1 Jira pilot runner", genuineLive.mode === "LIVE", "the explicit mode field agrees with source for a genuine live success");
+  ok("V2.1 Jira pilot runner", genuineLive.modeLabel === "LIVE JIRA MODE", "modeLabel reads 'LIVE JIRA MODE' only for a genuinely verified live run");
+  ok("V2.1 Jira pilot runner", !genuineLive.liveAttemptFailed, "liveAttemptFailed is not set on a genuine live success");
+  ok("V2.1 Jira pilot runner", typeof genuineLive.startedAt === "string" && typeof genuineLive.completedAt === "string", "the report carries explicit startedAt/completedAt execution metadata");
+
+  // Credentials WERE configured (a real config + fetchImpl were passed) but the round-trip
+  // itself fails (401) — this must NEVER be reported as "live" (nothing was verified) nor
+  // silently relabeled "fixtures" (fixtures were never used) — the fix must produce the
+  // honest third state.
+  const failedLiveAttempt = await runJiraConformance({ fetchImpl: fixtureFetch({ httpStatus: 401 }), config: FIXTURE_CONFIG });
+  ok("V2.1 Jira pilot runner", failedLiveAttempt.source === "live-failed", "a config/fetchImpl whose project-discovery call FAILS is reported source: 'live-failed', never 'live' and never silently 'fixtures'");
+  ok("V2.1 Jira pilot runner", failedLiveAttempt.mode === "FIXTURE", "the explicit mode field is FIXTURE (not LIVE) when the live attempt failed — nothing was verified");
+  ok("V2.1 Jira pilot runner", failedLiveAttempt.modeLabel === "LIVE ATTEMPT FAILED", "modeLabel explicitly says the live attempt failed, distinct from both LIVE JIRA MODE and FIXTURE MODE");
+  ok("V2.1 Jira pilot runner", failedLiveAttempt.liveAttemptFailed === true, "liveAttemptFailed is explicitly true so downstream consumers (e.g. the pilot checklist) can distinguish this from a plain fixture run");
+  ok("V2.1 Jira pilot runner", failedLiveAttempt.jiraHostname !== undefined, "the attempted hostname is still surfaced even though the attempt failed — useful diagnostic, no credential value exposed");
+
+  // A pure fixture run (no options at all) is unaffected — still reports "fixtures".
+  const pureFixture = await runJiraConformance();
+  ok("V2.1 Jira pilot runner", pureFixture.source === "fixtures" && pureFixture.mode === "FIXTURE", "omitting options entirely still produces a plain fixtures run, unaffected by the fix");
+  ok("V2.1 Jira pilot runner", !pureFixture.liveAttemptFailed, "liveAttemptFailed is not set on a pure fixture run — no live attempt was ever made");
+}
+
+// ===== V2.1 §4 — Action Effectiveness Consistency (proactive.actionEffectivenessToday) =====
+// Confirmed root cause: proactive.ts used to pass the FULL lifetime actionEffectiveness
+// array into computeOutcomeScorecard's "actionsToday" parameter, and CloseDayModal merged
+// EFFECTIVE+PARTIALLY_EFFECTIVE into one bucket while the scorecard counted EFFECTIVE only
+// — same source, two inconsistent views. This section proves the fix: both surfaces now
+// derive from proactive.actionEffectivenessToday with the identical strict predicate.
+{
+  const YESTERDAY = "2026-08-28";
+  const baseAction = (over: Partial<Action>): Action => ({
+    id: over.id!,
+    title: over.title ?? over.id!,
+    why: "why",
+    status: "completed",
+    estimateMinutes: 15,
+    createdAt: YESTERDAY,
+    completedAt: TODAY,
+    ...over,
+  });
+
+  const actionsData: CommandCenterData = {
+    ...emptyData(),
+    actions: [
+      baseAction({ id: "a-resolved", outcomeStatus: "RESOLVED" }),
+      baseAction({ id: "a-improved", outcomeStatus: "IMPROVED" }),
+      baseAction({ id: "a-partial", outcomeStatus: "PARTIALLY_IMPROVED" }),
+      baseAction({ id: "a-nochange", outcomeStatus: "NO_CHANGE" }),
+      baseAction({ id: "a-worsened", outcomeStatus: "WORSENED" }),
+      baseAction({ id: "a-unknown-status", outcomeStatus: "UNKNOWN" }),
+      baseAction({ id: "a-zero-outcome" }), // no outcomeStatus, no outcome, no relatedWorkItemId — genuinely UNKNOWN
+      baseAction({ id: "a-yesterday", outcomeStatus: "RESOLVED", completedAt: YESTERDAY }), // completed, but not today
+      { ...baseAction({ id: "a-still-open", outcomeStatus: "RESOLVED" }), status: "open", completedAt: undefined }, // not completed at all
+    ],
+  };
+
+  const actionsDerived = deriveData(actionsData, null, TODAY);
+  const actionsProactive = computeProactiveIntelligence(actionsData, actionsDerived, [], null, {}, "manual", TODAY);
+
+  const todayIds = actionsProactive.actionEffectivenessToday.map((r) => r.actionId).sort();
+  ok("V2.1 Action effectiveness consistency", !todayIds.includes("a-yesterday"), "an action completed yesterday is excluded from actionEffectivenessToday");
+  ok("V2.1 Action effectiveness consistency", !todayIds.includes("a-still-open"), "an action that is not completed at all is excluded from actionEffectivenessToday");
+  ok("V2.1 Action effectiveness consistency", todayIds.length === 7, `exactly the 7 actions genuinely completed today are included (got ${todayIds.length}: ${todayIds.join(", ")})`);
+
+  const byId = new Map(actionsProactive.actionEffectivenessToday.map((r) => [r.actionId, r.classification]));
+  ok("V2.1 Action effectiveness consistency", byId.get("a-resolved") === "EFFECTIVE", "RESOLVED outcomeStatus classifies EFFECTIVE");
+  ok("V2.1 Action effectiveness consistency", byId.get("a-improved") === "EFFECTIVE", "IMPROVED outcomeStatus classifies EFFECTIVE");
+  ok("V2.1 Action effectiveness consistency", byId.get("a-partial") === "PARTIALLY_EFFECTIVE", "PARTIALLY_IMPROVED outcomeStatus classifies PARTIALLY_EFFECTIVE");
+  ok("V2.1 Action effectiveness consistency", byId.get("a-nochange") === "INEFFECTIVE", "NO_CHANGE outcomeStatus classifies INEFFECTIVE");
+  ok("V2.1 Action effectiveness consistency", byId.get("a-worsened") === "INEFFECTIVE", "WORSENED outcomeStatus classifies INEFFECTIVE");
+  ok("V2.1 Action effectiveness consistency", byId.get("a-unknown-status") === "UNKNOWN", "an explicit UNKNOWN outcomeStatus classifies UNKNOWN");
+  ok("V2.1 Action effectiveness consistency", byId.get("a-zero-outcome") === "UNKNOWN", "an action with zero outcome evidence at all classifies UNKNOWN, never guessed");
+
+  // The actual consistency proof: recompute the same 4 buckets two different ways — once
+  // exactly as CloseDayModal.tsx now does (filter actionEffectivenessToday by class), and
+  // once via the Outcome Scorecard's own computation — and assert they agree exactly.
+  const effectiveCount = actionsProactive.actionEffectivenessToday.filter((r) => r.classification === "EFFECTIVE").length;
+  const ineffectiveCount = actionsProactive.actionEffectivenessToday.filter((r) => r.classification === "INEFFECTIVE").length;
+  ok("V2.1 Action effectiveness consistency", actionsProactive.outcomeScorecard.actionsCompleted === todayIds.length, "outcomeScorecard.actionsCompleted equals the count of actions genuinely completed today — no longer inflated by lifetime history");
+  ok("V2.1 Action effectiveness consistency", actionsProactive.outcomeScorecard.actionsEffective === effectiveCount, "outcomeScorecard.actionsEffective exactly matches CloseDayModal's own EFFECTIVE-bucket count over the same today-filtered array — the two surfaces can no longer disagree");
+  ok("V2.1 Action effectiveness consistency", actionsProactive.outcomeScorecard.actionsIneffective === ineffectiveCount, "outcomeScorecard.actionsIneffective exactly matches CloseDayModal's own INEFFECTIVE-bucket count over the same today-filtered array");
+
+  // Zero-outcomes dataset: no completed actions at all today.
+  const zeroData: CommandCenterData = { ...emptyData(), actions: [{ ...baseAction({ id: "a-old" }), completedAt: YESTERDAY }] };
+  const zeroDerived = deriveData(zeroData, null, TODAY);
+  const zeroProactive = computeProactiveIntelligence(zeroData, zeroDerived, [], null, {}, "manual", TODAY);
+  ok("V2.1 Action effectiveness consistency", zeroProactive.actionEffectivenessToday.length === 0, "a dataset with zero actions completed today produces an empty actionEffectivenessToday, not a crash or a fabricated count");
+  ok("V2.1 Action effectiveness consistency", zeroProactive.outcomeScorecard.actionsCompleted === 0 && zeroProactive.outcomeScorecard.actionsEffective === 0, "the scorecard reports zero/zero rather than falling back to lifetime history when nothing was completed today");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

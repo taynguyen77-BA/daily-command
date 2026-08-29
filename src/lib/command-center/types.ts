@@ -1131,13 +1131,25 @@ export interface MappingDriftReport {
  *  Jira is configured) — the UI must never present a fixture run as live validation.
  *  V1.8 §4 additions are all optional so a pre-V1.8 stored/cached report shape still
  *  loads unchanged; never a credential-bearing field among them (§4, §30). */
+// V2.1 §7 — "live" is NEVER inferred merely because credentials/config were passed in; it
+// requires an actual successful HTTP round-trip that proves a real Jira environment was
+// reached. "live-failed" is the honest third state: credentials were configured and a live
+// attempt was genuinely made, but the round-trip itself failed — this must never be
+// reported as "fixtures" (fixtures were never used) nor as "live" (nothing was verified).
+export type JiraConformanceSource = "fixtures" | "live" | "live-failed";
+
 export interface JiraConformanceReport {
-  source: "fixtures" | "live";
+  source: JiraConformanceSource;
+  // V2.1 §7 — explicit execution metadata, additive to `source`/`generatedAt`.
+  mode: "FIXTURE" | "LIVE";
+  startedAt: string;
+  completedAt: string;
   generatedAt: string;
   checks: JiraConformanceCheck[];
   fieldSupport: JiraFieldSupport[];
   credentialSafety: string;
-  modeLabel?: "FIXTURE MODE" | "LIVE JIRA MODE";
+  modeLabel?: "FIXTURE MODE" | "LIVE JIRA MODE" | "LIVE ATTEMPT FAILED";
+  liveAttemptFailed?: boolean;
   jiraHostname?: string;
   projectsDiscovered?: number;
   issuesFetched?: number;
@@ -1201,8 +1213,15 @@ export interface AiEvaluationResult {
  *  ANTHROPIC_API_KEY configured, but MOCK_FALLBACK means this specific call still fell back
  *  (network/schema/malformed-output failure); CLAUDE_UNAVAILABLE means no key is configured
  *  at all, so every call in this session is expected to be Mock. The UI must never make
- *  Mock output look like real Claude output (§13). */
-export type AiProviderState = "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE";
+ *  Mock output look like real Claude output (§13).
+ *
+ *  V2.1 §6, §14 — CALL_FAILED and VALIDATION_FAILED split the two genuinely distinct
+ *  failure reasons that used to be collapsed into MOCK_FALLBACK: CALL_FAILED means the
+ *  request itself failed (network error, non-200, or the API reported an error) — Claude
+ *  was never meaningfully consulted; VALIDATION_FAILED means a response WAS received but
+ *  didn't pass schema validation. Never show "Claude error" when the real state is simply
+ *  "not configured" (CLAUDE_UNAVAILABLE) — these five states must stay distinguishable. */
+export type AiProviderState = "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CALL_FAILED" | "VALIDATION_FAILED";
 
 /** V1.7 §27 — one AI call's trace. Never persists the raw prompt/credentials — just enough
  *  to answer "did this call use Claude or Mock, and did its output pass validation?".

@@ -116,6 +116,30 @@ export function setCachedAIResult<T>(key: string, value: T): void {
 
 export type CacheState = "cached" | "refreshed";
 
+// V2.1 §13-15 — session-local diagnostics + cost protection. In-memory only (resets on
+// page load, same lifetime as ai/trace.ts's log) — not a new monitoring system, just
+// counters over the existing cache mechanism. `inFlight` is what finally implements
+// usage-policy.ts's `dedupeInFlight` field, which was declared in V2.0 but never actually
+// enforced: a second identical request (same task+entityId+evidenceVersion) that arrives
+// while the first is still in flight (e.g. a double-click) now awaits the SAME request
+// instead of firing a duplicate call to the model.
+let cacheHits = 0;
+let cacheMisses = 0;
+let sessionCallCount = 0;
+const inFlight = new Map<string, Promise<unknown>>();
+
+export function getCacheStats(): { hits: number; misses: number; callsThisSession: number } {
+  return { hits: cacheHits, misses: cacheMisses, callsThisSession: sessionCallCount };
+}
+
+/** Test-only reset so stats don't leak between test cases. */
+export function resetCacheStats(): void {
+  cacheHits = 0;
+  cacheMisses = 0;
+  sessionCallCount = 0;
+  inFlight.clear();
+}
+
 /** The one call-site pattern every on-demand AI trigger should use (V2.0 §3): check the
  *  cache first — a hit renders immediately with zero network/model calls and is labeled
  *  "cached"; a miss calls the real fetcher, stores the result, and is labeled "refreshed".
@@ -132,9 +156,29 @@ export async function withAICache<T>(
   const version = makeEvidenceVersion(facts, evidence);
   const key = makeAICacheKey(task, entityId, version);
   const cached = getCachedAIResult<T>(key, policy.cacheDurationMs);
-  if (cached !== undefined) return { value: cached, cacheState: "cached" };
-  const value = await fetcher();
-  setCachedAIResult(key, value);
+  if (cached !== undefined) {
+    cacheHits++;
+    return { value: cached, cacheState: "cached" };
+  }
+
+  if (policy.dedupeInFlight) {
+    const pending = inFlight.get(key);
+    if (pending) {
+      cacheHits++; // a request for this exact key is already in flight — no new call made
+      return { value: (await pending) as T, cacheState: "cached" };
+    }
+  }
+
+  cacheMisses++;
+  sessionCallCount++;
+  const promise = fetcher()
+    .then((value) => {
+      setCachedAIResult(key, value);
+      return value;
+    })
+    .finally(() => inFlight.delete(key));
+  if (policy.dedupeInFlight) inFlight.set(key, promise);
+  const value = await promise;
   return { value, cacheState: "refreshed" };
 }
 

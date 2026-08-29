@@ -399,7 +399,7 @@ export function ConfidenceTag({ confidence }: { confidence: number }) {
 /** V1.8 §13 — AI fallback transparency. A single, contextual tri-state indicator so Mock
  *  output can never be mistaken for real Claude output — deliberately not repeated on
  *  every AI-generated card (§13 "do not create a disruptive warning on every card"). */
-export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CACHED" }) {
+export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CACHED" | "CALL_FAILED" | "VALIDATION_FAILED" }) {
   const styles: Record<typeof state, string> = {
     REAL_CLAUDE: "bg-green/10 text-green border-green/30",
     MOCK_FALLBACK: "bg-yellow/10 text-yellow border-yellow/30",
@@ -407,12 +407,18 @@ export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FA
     // V2.0 §3 — a cached AI result must never read as a freshly-calculated fact; this is
     // the visible "AI assessment — cached" vs "— refreshed" distinction from the spec.
     CACHED: "bg-surface text-text3 border-border",
+    // V2.1 §6/§14 — the two distinct fallback reasons that used to both read "Mock
+    // fallback": the request itself failed, vs. a response arrived but failed validation.
+    CALL_FAILED: "bg-red/10 text-red border-red/30",
+    VALIDATION_FAILED: "bg-orange/10 text-orange border-orange/30",
   };
   const labels: Record<typeof state, string> = {
     REAL_CLAUDE: "Real Claude",
     MOCK_FALLBACK: "Mock fallback",
     CLAUDE_UNAVAILABLE: "Claude unavailable",
     CACHED: "Cached result",
+    CALL_FAILED: "Call failed",
+    VALIDATION_FAILED: "Response invalid",
   };
   return (
     <span className={`inline-flex items-center rounded border px-1.5 py-0 text-[10px] normal-case tracking-normal ${styles[state]}`}>

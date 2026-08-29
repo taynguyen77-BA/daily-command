@@ -142,7 +142,9 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   if (/decision.*(effective|worked)/.test(q)) {
     return { intent: "decisions-effective" };
   }
-  if (/action.*(not working|ineffective|not resolv)/.test(q)) {
+  // V2.1 §13 — "aren't working"/"isn't working" contractions were a real gap: they don't
+  // contain the literal substring "not working" so they fell through to unrecognized.
+  if (/action.*(not working|ineffective|not resolv|aren'?t working|isn'?t working)/.test(q)) {
     return { intent: "actions-not-working" };
   }
   if (/do differently|different approach|different strategy/.test(q)) {
@@ -168,7 +170,9 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   if (/what can wait|can this wait/.test(q)) {
     return { intent: "personal-can-wait" };
   }
-  if (/finish.*30.?min|30.?min.*finish|complete.*30.?min/.test(q)) {
+  // V2.1 §13 — "what's my 30-minute plan?" (the product's own PERSONAL-family example
+  // phrasing) didn't contain "finish"/"complete" and fell through to unrecognized.
+  if (/finish.*30.?min|30.?min.*finish|complete.*30.?min|30.?min.*plan|plan.*30.?min|my 30.?min/.test(q)) {
     return { intent: "personal-thirty-min" };
   }
   if (/why (is this|.*on my list)/.test(q)) {

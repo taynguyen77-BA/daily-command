@@ -39,6 +39,12 @@ export interface ProactiveIntelligence {
   clientAttentionMap: ReturnType<typeof computeClientAttentionMap>;
   first30Minutes: ReturnType<typeof buildFirst30Minutes>;
   outcomeScorecard: ReturnType<typeof computeOutcomeScorecard>;
+  // V2.1 §4 — actionEffectiveness (above) covers every completed action ever; this is the
+  // subset actually completed TODAY. Both the Outcome Scorecard and Close Day's ACTIONS
+  // section must consume THIS array so their action counts can never disagree — see the
+  // computeOutcomeScorecard() call below, which previously (accidentally) received the
+  // full-history array despite its own "actionsToday" parameter name.
+  actionEffectivenessToday: ReturnType<typeof computeActionEffectiveness>;
 }
 
 export function computeProactiveIntelligence(
@@ -89,7 +95,15 @@ export function computeProactiveIntelligence(
   );
 
   const first30Minutes = buildFirst30Minutes(attentionQueue, data, today);
-  const outcomeScorecard = computeOutcomeScorecard(currentMetrics, previousSnapshot?.metrics, actionEffectiveness);
+  // V2.1 §4 — fixes a confirmed bug: this used to pass the full-history `actionEffectiveness`
+  // array (every completed action ever) into a parameter literally named "actionsToday",
+  // which is why the Outcome Scorecard's counts and Close Day's ACTIONS section could
+  // disagree — they were built from inconsistently-filtered/bucketed views of the same
+  // data. Filtering to actions genuinely completed today, once, here, is the single source
+  // of truth both surfaces now share.
+  const completedTodayIds = new Set(data.actions.filter((a) => a.status === "completed" && a.completedAt === today).map((a) => a.id));
+  const actionEffectivenessToday = actionEffectiveness.filter((r) => completedTodayIds.has(r.actionId));
+  const outcomeScorecard = computeOutcomeScorecard(currentMetrics, previousSnapshot?.metrics, actionEffectivenessToday);
 
   return {
     drift,
@@ -101,6 +115,7 @@ export function computeProactiveIntelligence(
     decisionRadar,
     decisionEffectiveness,
     actionEffectiveness,
+    actionEffectivenessToday,
     deliveryLoops,
     stakeholderAttention,
     communicationPriority,

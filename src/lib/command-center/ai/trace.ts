@@ -21,3 +21,29 @@ export function getRecentAiTrace(): AiCallTrace[] {
 export function clearAiTrace(): void {
   trace = [];
 }
+
+// V2.1 §13-14 — a pure aggregation over the existing bounded trace, not a new monitoring
+// system. "Today" is judged from each entry's own ISO timestamp against the caller-supplied
+// `today` (an ISO date, e.g. from getTodayIso()) so this stays deterministic and testable
+// rather than depending on wall-clock Date.now() inside the module.
+export interface AiTraceSummary {
+  callsToday: number;
+  byProviderState: Partial<Record<import("../types").AiProviderState, number>>;
+  failedValidationCount: number;
+}
+
+export function getAiTraceSummary(today: string): AiTraceSummary {
+  const byProviderState: AiTraceSummary["byProviderState"] = {};
+  let callsToday = 0;
+  let failedValidationCount = 0;
+  for (const entry of trace) {
+    const isToday = entry.timestamp.slice(0, 10) === today;
+    if (!isToday) continue;
+    callsToday++;
+    if (entry.providerState) {
+      byProviderState[entry.providerState] = (byProviderState[entry.providerState] ?? 0) + 1;
+    }
+    if (entry.providerState === "VALIDATION_FAILED") failedValidationCount++;
+  }
+  return { callsToday, byProviderState, failedValidationCount };
+}

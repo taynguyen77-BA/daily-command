@@ -22,9 +22,12 @@ import { ControlTower } from "@/components/command-center/ControlTower";
 import { YourDeliveryFocus } from "@/components/command-center/YourDeliveryFocus";
 import { AttentionQueuePanel } from "@/components/command-center/AttentionQueuePanel";
 import { ClientAttentionMap } from "@/components/command-center/ClientAttentionMap";
+import { BeforeYouTrustThisData } from "@/components/command-center/BeforeYouTrustThisData";
 import { itemForScore } from "@/lib/command-center/selectors";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
 import { computeFreshness } from "@/lib/command-center/freshness";
+import { computeDataHealth } from "@/lib/command-center/data-health";
+import { buildBeforeYouTrustSummary } from "@/lib/command-center/trust-diagnostic";
 import { AttentionSeverityBadge, FocusCategoryBadge, HeatBadge, LoopHealthBadge } from "@/components/command-center/ui";
 import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 
@@ -70,6 +73,12 @@ export default function CommandCenterPage() {
 
       <FilterBar />
       <CommandBar />
+
+      {/* V2.1 §10 — data quality visible BEFORE strong personal recommendations, only once
+          a real Jira sync has actually completed (demo/local-import data doesn't need this). */}
+      {state.dataSource === "jira" && state.jiraSync.lastSyncStatus === "success" && (
+        <BeforeYouTrustThisData summary={buildBeforeYouTrustSummary(computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt))} />
+      )}
 
       {proactive && (
         <ControlTower

@@ -144,20 +144,24 @@ export class ClaudeProvider implements AIProvider {
         body: JSON.stringify({ task, prompt }),
       });
       if (!res.ok) {
+        // V2.1 §6/§14 — the request itself failed (non-200); Claude was never
+        // meaningfully consulted. Distinct from a schema-validation failure below.
         this._mode = "mock";
-        recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "MOCK_FALLBACK" });
+        recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "CALL_FAILED" });
         return { ok: false };
       }
       const json = (await res.json()) as { ok: boolean; data?: unknown };
       if (!json.ok) {
         this._mode = "mock";
-        recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "MOCK_FALLBACK" });
+        recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "CALL_FAILED" });
         return { ok: false };
       }
       const parsed = schema.safeParse(json.data);
       if (!parsed.success || parsed.data === undefined) {
+        // A response WAS received but didn't pass schema validation — distinct from the
+        // request itself failing.
         this._mode = "mock";
-        recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "MOCK_FALLBACK" });
+        recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "VALIDATION_FAILED" });
         return { ok: false };
       }
       this._mode = "claude";
@@ -167,7 +171,7 @@ export class ClaudeProvider implements AIProvider {
     } catch {
       // Network error, offline, server down — never let this reach the caller as a throw.
       this._mode = "mock";
-      recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "MOCK_FALLBACK" });
+      recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState: "CALL_FAILED" });
       return { ok: false };
     }
   }

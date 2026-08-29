@@ -27,16 +27,21 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const completed = state.data.actions.filter((a) => a.status === "completed");
   const deferred = state.data.actions.filter((a) => a.status === "deferred");
   const blocked = state.data.actions.filter((a) => a.status === "blocked");
   const decisionsToday = state.data.decisions.filter((d) => d.date === today);
   const decisionsPending = state.data.decisions.filter((d) => d.status === "pending" || d.status === "ACTIVE" || d.status === "PROPOSED" || d.status === "UNDER_REVIEW");
   const decisionsOutcomeKnown = state.data.decisions.filter((d) => !!d.outcomeStatus && d.outcomeStatus !== "UNKNOWN");
   const decisionsOutcomeUnknown = state.data.decisions.filter((d) => d.date && !d.outcomeStatus);
-  const failedActions = proactive?.actionEffectiveness.filter((r) => r.classification === "INEFFECTIVE") ?? [];
-  const effectiveActions = proactive?.actionEffectiveness.filter((r) => r.classification === "EFFECTIVE" || r.classification === "PARTIALLY_EFFECTIVE") ?? [];
-  const unknownOutcomeActions = proactive?.actionEffectiveness.filter((r) => r.classification === "UNKNOWN") ?? [];
+  // V2.1 §4 — Action Effectiveness Consistency. Both this ACTIONS section and the Outcome
+  // Scorecard below now read from the SAME today-filtered array (proactive.ts) with the
+  // SAME strict per-class predicate, so these numbers can never disagree again — see
+  // proactive.ts's actionEffectivenessToday for the fix.
+  const actionsToday = proactive?.actionEffectivenessToday ?? [];
+  const effectiveActions = actionsToday.filter((r) => r.classification === "EFFECTIVE");
+  const partiallyEffectiveActions = actionsToday.filter((r) => r.classification === "PARTIALLY_EFFECTIVE");
+  const failedActions = actionsToday.filter((r) => r.classification === "INEFFECTIVE");
+  const unknownOutcomeActions = actionsToday.filter((r) => r.classification === "UNKNOWN");
   const allLoops = proactive?.deliveryLoops ?? [];
   const openLoops = allLoops.filter((l) => l.health === "STALLED" || l.health === "AT_RISK");
   const completedLoops = allLoops.filter((l) => l.health === "COMPLETED");
@@ -118,14 +123,19 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
 
           <section>
             <p className="font-display text-sm text-text">ACTIONS</p>
+            <p className="mt-1 text-xs text-text3">Actions completed today — same classification the Outcome Scorecard below uses, so these numbers always agree.</p>
             <div className="mt-2 grid gap-3 sm:grid-cols-2">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-text3">Completed</p>
-                <p className="mt-1 text-xs text-text2">{completed.length} action(s).</p>
+                <p className="mt-1 text-xs text-text2">{actionsToday.length} action(s).</p>
               </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-text3">Effective</p>
                 <p className="mt-1 text-xs text-text2">{effectiveActions.length} action(s).</p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-text3">Partially effective</p>
+                <p className="mt-1 text-xs text-text2">{partiallyEffectiveActions.length} action(s).</p>
               </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-text3">Ineffective</p>

@@ -125,14 +125,24 @@ async function runMalformedFieldChecks(): Promise<JiraConformanceCheck[]> {
  * credentials) to validate against a live Jira instance; omit both to run entirely against
  * fixtures. The report's `source` field always tells the truth about which one happened —
  * nothing here may present a fixture run as live validation (§6).
+ *
+ * V2.1 §7 — "live" is NEVER inferred merely because a config/fetchImpl was passed in
+ * (credentials being configured proves nothing about reachability). It is only reported
+ * once the first real check — project discovery — actually returns data, proving a real
+ * HTTP round-trip to Jira succeeded. If credentials were supplied but that round-trip
+ * fails, the report honestly says so (`source: "live-failed"`) rather than silently
+ * mislabeling the result as either "fixtures" (never used) or "live" (never verified).
  */
 export async function runJiraConformance(options?: { fetchImpl: FetchLike; config: JiraConnectionConfig }): Promise<JiraConformanceReport> {
-  const live = !!options;
+  const attemptingLive = !!options;
   const fetchImpl = options?.fetchImpl ?? fixtureFetch();
   const config: JiraConnectionConfig = options?.config ?? { baseUrl: "https://fixture.invalid", email: "fixture@example.test", apiToken: "fixture-token-not-real" };
-  const startedAt = Date.now();
+  const startedAtDate = new Date();
+  const startedAt = startedAtDate.getTime();
 
   const projectsResult = await runProjectsCheck(fetchImpl, config);
+  const live = attemptingLive && projectsResult.projectsCount !== undefined;
+  const liveAttemptFailed = attemptingLive && !live;
   const issuesResult = await runIssuesCheck(fetchImpl, config);
   const cursorCapability = await detectJiraSearchCapability(fetchImpl, config);
   const dataContract = issuesResult.issues ? evaluateJiraDataContract(issuesResult.issues) : undefined;
@@ -168,7 +178,7 @@ export async function runJiraConformance(options?: { fetchImpl: FetchLike; confi
   const truncated = issuesFetched !== undefined && issuesFetched >= JIRA_MAX_ISSUES;
 
   let jiraHostname: string | undefined;
-  if (live) {
+  if (attemptingLive) {
     try {
       jiraHostname = new URL(config.baseUrl).host;
     } catch {
@@ -176,10 +186,16 @@ export async function runJiraConformance(options?: { fetchImpl: FetchLike; confi
     }
   }
 
+  const completedAtDate = new Date();
+
   return {
-    source: live ? "live" : "fixtures",
-    modeLabel: live ? "LIVE JIRA MODE" : "FIXTURE MODE",
-    generatedAt: new Date().toISOString(),
+    source: live ? "live" : liveAttemptFailed ? "live-failed" : "fixtures",
+    mode: live ? "LIVE" : "FIXTURE",
+    startedAt: startedAtDate.toISOString(),
+    completedAt: completedAtDate.toISOString(),
+    modeLabel: live ? "LIVE JIRA MODE" : liveAttemptFailed ? "LIVE ATTEMPT FAILED" : "FIXTURE MODE",
+    liveAttemptFailed: liveAttemptFailed || undefined,
+    generatedAt: completedAtDate.toISOString(),
     checks,
     fieldSupport: JIRA_FIELD_SUPPORT,
     credentialSafety: "No API token, password, or email was logged, persisted, or included in this report — only pass/fail outcomes, hostname, and issue/project counts.",
