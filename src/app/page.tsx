@@ -1,101 +1,372 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+import Link from "next/link";
+import { useCommandCenter } from "@/components/command-center/use-command-center";
+import { EmptyState, Panel, RiskBadge, SectionHeading } from "@/components/command-center/ui";
+import { KpiStrip } from "@/components/command-center/KpiStrip";
+import { PriorityCard } from "@/components/command-center/PriorityCard";
+import { ChangeItem } from "@/components/command-center/ChangeItem";
+import { CommunicationCard } from "@/components/command-center/CommunicationCard";
+import { TakeActionPanel } from "@/components/command-center/TakeActionPanel";
+import { CloseDayModal } from "@/components/command-center/CloseDayModal";
+import { MorningBrief } from "@/components/command-center/MorningBrief";
+import { GapsPanel } from "@/components/command-center/GapsPanel";
+import { ExecutiveView } from "@/components/command-center/ExecutiveView";
+import { HealthTrend } from "@/components/command-center/HealthTrend";
+import { GettingBetterWorse } from "@/components/command-center/GettingBetterWorse";
+import { ReleaseHealthPanel } from "@/components/command-center/ReleaseHealthPanel";
+import { FilterBar } from "@/components/command-center/FilterBar";
+import { CommandBar } from "@/components/command-center/CommandBar";
+import { ControlTower } from "@/components/command-center/ControlTower";
+import { YourDeliveryFocus } from "@/components/command-center/YourDeliveryFocus";
+import { AttentionQueuePanel } from "@/components/command-center/AttentionQueuePanel";
+import { ClientAttentionMap } from "@/components/command-center/ClientAttentionMap";
+import { itemForScore } from "@/lib/command-center/selectors";
+import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
+import { computeFreshness } from "@/lib/command-center/freshness";
+import { AttentionSeverityBadge, FocusCategoryBadge, HeatBadge, LoopHealthBadge } from "@/components/command-center/ui";
+import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
+
+type ViewMode = "operations" | "executive";
+
+export default function CommandCenterPage() {
+  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, store } = useCommandCenter();
+  const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
+  const [closingDay, setClosingDay] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("operations");
+
+  if (!state.loaded) {
+    return (
+      <EmptyState
+        title="No data yet"
+        description="Load the demo dataset to see the Command Center in action, or bring in your own work items via Data & Settings."
+        onLoadDemo={() => store.loadDemoData()}
+      />
+    );
+  }
+
+  const topPriorities = derived.scores.slice(0, 4);
+  const topChanges = derived.changes.slice(0, 5);
+  const topRisks = derived.risks.slice(0, 4);
+  const openComms = filteredData.communications.filter((c) => c.status === "open").slice(0, 4);
+
+  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length);
+  const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics);
+  const confidenceDelta = trend.deltas.find((d) => d.label === "Delivery confidence")?.delta;
+  const escalatingRisks = proactive?.riskEscalations.filter((r) => r.trend === "worsening" || r.reopened).slice(0, 4) ?? [];
+  const agingDependencies = proactive?.dependencyRadar.filter((d) => d.heat !== "LOW").slice(0, 4) ?? [];
+  const reEscalations = proactive?.attentionQueue.filter((a) => a.lifecycle === "RE_ESCALATED") ?? [];
+  const stalledLoops = proactive?.deliveryLoops.filter((l) => l.health === "STALLED" || l.health === "AT_RISK").slice(0, 4) ?? [];
+  const decisionsNeedingReview = proactive?.decisionRadar.slice(0, 4) ?? [];
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <div className="space-y-8 pb-16">
+      {state.isDemo && (
+        <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent2">
+          DEMO DATA — fictional clients, for demonstration only. Import your own data anytime from Data & Settings.
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+      )}
+
+      <FilterBar />
+      <CommandBar />
+
+      {proactive && (
+        <ControlTower
+          proactive={proactive}
+          deliveryConfidence={currentMetrics.deliveryConfidence}
+          confidenceDelta={confidenceDelta}
+          lastSyncedLabel={state.dataSource === "jira" && state.jiraSync.lastSyncCompletedAt ? `Synced ${new Date(state.jiraSync.lastSyncCompletedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}` : undefined}
+          freshness={state.dataSource === "jira" ? computeFreshness(state.jiraSync.lastSyncCompletedAt) : undefined}
+        />
+      )}
+
+      {/* V1.6 §43 — the personal layer sits on top of project intelligence, never hiding it. */}
+      {personalFocus && <YourDeliveryFocus personalFocus={personalFocus} compact />}
+
+      <div className="flex items-center justify-between">
+        <MorningBriefHeading />
+        <div role="tablist" aria-label="View mode" className="flex gap-1 rounded-md border border-border p-0.5">
+          {(["operations", "executive"] as ViewMode[]).map((m) => (
+            <button
+              key={m}
+              role="tab"
+              aria-selected={viewMode === m}
+              onClick={() => setViewMode(m)}
+              className={`rounded px-3 py-1 text-xs font-medium capitalize ${
+                viewMode === m ? "bg-surface2 text-text" : "text-text3 hover:text-text2"
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <MorningBrief data={filteredData} proactive={proactive} personalFocus={personalFocus} trend={trend} dataSource={state.dataSource} lastSyncedAt={state.jiraSync.lastSyncCompletedAt} />
+
+      {proactive && <AttentionQueuePanel items={proactive.attentionQueue} />}
+      {proactive && <ClientAttentionMap rows={proactive.clientAttentionMap} />}
+
+      {viewMode === "executive" ? (
+        <ExecutiveView data={filteredData} derived={derived} proactive={proactive} personalFocus={personalFocus} memoryEvents={state.memoryEvents} />
+      ) : (
+        <>
+          <KpiStrip kpis={derived.kpis} />
+
+          <HealthTrend trend={trend} currentConfidence={currentMetrics.deliveryConfidence} />
+          <GettingBetterWorse trend={trend} />
+          <ReleaseHealthPanel data={filteredData} today={today} />
+
+          {reEscalations.length > 0 && (
+            <section>
+              <SectionHeading title="Re-escalations" subtitle="V1.5 §22 — items you'd acknowledged or snoozed whose severity has since increased." />
+              <div className="grid gap-2 md:grid-cols-2">
+                {reEscalations.map((a) => (
+                  <Panel key={a.id} className="border-red/30 p-4">
+                    <AttentionSeverityBadge severity={a.severity} />
+                    <p className="mt-1 font-display text-sm text-text">{a.what}</p>
+                    <p className="mt-1 text-xs text-text2">{a.why}</p>
+                  </Panel>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section>
+            <SectionHeading title="Decisions" subtitle="Decision Radar — needs review or urgent review, never changed automatically." action={<Link href="/decisions" className="text-xs font-medium text-accent2 hover:underline">Decision Log →</Link>} />
+            {decisionsNeedingReview.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">No decisions currently need review.</Panel>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {decisionsNeedingReview.map((d) => (
+                  <Panel key={d.decisionId} className="p-4">
+                    <div className="mb-1 flex items-center gap-2">
+                      <AttentionSeverityBadge severity={d.reviewUrgency === "URGENT_REVIEW" ? "HIGH" : "MEDIUM"} />
+                    </div>
+                    <p className="font-display text-sm text-text">{d.decision.title}</p>
+                    <p className="mt-1 text-xs text-text2">{d.whyReview[0] ?? `Stale for ${d.stalenessDays}d`}</p>
+                  </Panel>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {stalledLoops.length > 0 && (
+            <section>
+              <SectionHeading title="Stalled Loops" subtitle="Decision -> Action -> Outcome loops that need a nudge." action={<Link href="/loops" className="text-xs font-medium text-accent2 hover:underline">All loops →</Link>} />
+              <div className="grid gap-2 md:grid-cols-2">
+                {stalledLoops.map((l) => (
+                  <Panel key={l.id} className="p-4">
+                    <LoopHealthBadge health={l.health} />
+                    <p className="mt-1 font-display text-sm text-text">{l.issue}</p>
+                    <p className="mt-1 text-xs text-text2">{l.why}</p>
+                  </Panel>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {/* V1.6 §42 — Operations Mode personal-focus additions. Focus Overload is already
+              surfaced by Your Delivery Focus above; these add the remaining two bullets. */}
+          {personalFocus && (personalFocus.byCategory.DO_NOW.length > 0 || personalFocus.byCategory.DO_TODAY.length > 0) && (
+            <section>
+              <SectionHeading title="My Next Actions" subtitle="Personal Focus Engine — DO NOW and DO TODAY." action={<Link href="/focus" className="text-xs font-medium text-accent2 hover:underline">Open My Day →</Link>} />
+              <div className="grid gap-2 md:grid-cols-2">
+                {[...personalFocus.byCategory.DO_NOW, ...personalFocus.byCategory.DO_TODAY].slice(0, 4).map((c) => (
+                  <Panel key={c.id} className="p-4">
+                    <FocusCategoryBadge category={c.category} />
+                    <p className="mt-1 font-display text-sm text-text">{c.title}</p>
+                    <p className="mt-1 text-xs text-text2">{c.nowWhat}</p>
+                  </Panel>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {personalFocus && personalFocus.byCategory.BLOCKED.length > 0 && (
+            <section>
+              <SectionHeading title="Blocked Focus" subtitle="Personal focus items that cannot progress right now." />
+              <div className="grid gap-2 md:grid-cols-2">
+                {personalFocus.byCategory.BLOCKED.slice(0, 4).map((c) => (
+                  <Panel key={c.id} className="p-4">
+                    <FocusCategoryBadge category={c.category} />
+                    <p className="mt-1 font-display text-sm text-text">{c.title}</p>
+                    <p className="mt-1 text-xs text-text2">{c.why}</p>
+                  </Panel>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section>
+            <SectionHeading title="Escalating Risks" subtitle="Worsening severity, growing evidence, or reopened after being resolved." />
+            {escalatingRisks.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">No risks are currently escalating.</Panel>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {escalatingRisks.map((r) => (
+                  <Panel key={r.riskId} className="p-4">
+                    <div className="mb-1 flex items-center gap-2">
+                      <AttentionSeverityBadge severity={r.currentSeverity === "HIGH" ? "HIGH" : "MEDIUM"} />
+                      {r.reopened && <span className="text-xs text-red">Reopened</span>}
+                    </div>
+                    <p className="font-display text-sm text-text">{r.riskTitle}</p>
+                    <p className="mt-1 text-xs text-text2">{r.escalationReason ?? `Open ${r.daysOpen} day(s).`}</p>
+                  </Panel>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <SectionHeading title="Aging Dependencies" subtitle="Deterministic Dependency Radar — age, blocked work, release proximity, linked risk." />
+            {agingDependencies.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">No dependencies currently need escalation.</Panel>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {agingDependencies.map((d) => (
+                  <Panel key={d.dependencyId} className="p-4">
+                    <div className="mb-1 flex items-center gap-2">
+                      <HeatBadge heat={d.heat} />
+                    </div>
+                    <p className="font-display text-sm text-text">Dependency on {d.dependsOnTeam}</p>
+                    <p className="mt-1 text-xs text-text2">{d.recommended}</p>
+                  </Panel>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <SectionHeading title="Top Priorities" subtitle="Ranked by the deterministic priority model — see Priorities for the full list." />
+            {topPriorities.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">Nothing urgent right now.</Panel>
+            ) : (
+              <div className="grid gap-3 md:grid-cols-2">
+                {topPriorities.map((result) => {
+                  const item = itemForScore(filteredData, result);
+                  if (!item) return null;
+                  return (
+                    <PriorityCard
+                      key={item.id}
+                      item={item}
+                      result={result}
+                      data={filteredData}
+                      isDemo={state.isDemo}
+                      onTakeAction={() => setSelected({ item, result })}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <SectionHeading
+              title="What Changed?"
+              subtitle="Since the last snapshot."
+              action={
+                <Link href="/changes" className="text-xs font-medium text-accent2 hover:underline">
+                  Full change log →
+                </Link>
+              }
+            />
+            {topChanges.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">No meaningful changes detected.</Panel>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {topChanges.map((c) => (
+                  <ChangeItem key={c.id} change={c} />
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <SectionHeading
+              title="What Might Go Wrong?"
+              subtitle="Deterministically detected from combinations of data."
+              action={
+                <Link href="/risks" className="text-xs font-medium text-accent2 hover:underline">
+                  All risks →
+                </Link>
+              }
+            />
+            {topRisks.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">No emerging risks detected.</Panel>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {topRisks.map((r) => (
+                  <Panel key={r.id} className="p-4">
+                    <div className="mb-1 flex items-center gap-2">
+                      <RiskBadge level={r.level} />
+                    </div>
+                    <p className="font-display text-sm text-text">{r.title}</p>
+                    <p className="mt-1 text-xs text-text2">{r.reason}</p>
+                  </Panel>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <section>
+            <SectionHeading
+              title="First 30 Minutes"
+              subtitle="Deterministic recommendation — priority-ordered from the Attention Queue, not automatic actions."
+              action={
+                <Link href="/action-plan" className="text-xs font-medium text-accent2 hover:underline">
+                  Build a full plan →
+                </Link>
+              }
+            />
+            <Panel className="p-4">
+              {!proactive || proactive.first30Minutes.length === 0 ? (
+                <p className="text-sm text-text3">No priority items fit the next 30 minutes.</p>
+              ) : (
+                <ol className="space-y-2 text-sm text-text2">
+                  {proactive.first30Minutes.map((f, i) => (
+                    <li key={i}>
+                      {i + 1}. {f.text}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </Panel>
+          </section>
+
+          <section>
+            <SectionHeading title="Who Should I Communicate With?" subtitle="Detected from blockers, deadlines, and unresolved decisions." />
+            {openComms.length === 0 ? (
+              <Panel className="p-6 text-sm text-text3">No pending communications.</Panel>
+            ) : (
+              <div className="grid gap-2 md:grid-cols-2">
+                {openComms.map((c) => (
+                  <CommunicationCard key={c.id} comm={c} />
+                ))}
+              </div>
+            )}
+          </section>
+
+          <GapsPanel />
+
+          <div className="flex justify-end border-t border-border pt-6">
+            <button
+              onClick={() => setClosingDay(true)}
+              className="rounded-md border border-border px-4 py-2 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+            >
+              Close My Day
+            </button>
+          </div>
+        </>
+      )}
+
+      <TakeActionPanel item={selected?.item ?? null} result={selected?.result ?? null} onClose={() => setSelected(null)} />
+      {closingDay && <CloseDayModal onClose={() => setClosingDay(false)} />}
     </div>
   );
+}
+
+function MorningBriefHeading() {
+  return <h2 className="font-display text-sm uppercase tracking-wide text-text3">Good morning</h2>;
 }

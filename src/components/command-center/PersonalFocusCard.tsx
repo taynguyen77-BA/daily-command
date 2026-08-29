@@ -1,0 +1,86 @@
+"use client";
+
+// V1.6 §8 — the card shape used across Top 3, the 30-minute plan, and My Day. TITLE /
+// PROJECT / WHY IT MATTERS / WHY NOW / YOUR NEXT MOVE / EXPECTED IMPACT / ESTIMATED FOCUS /
+// EVIDENCE / CONFIDENCE, plus [START FOCUS]. Never shows an unsupported fact (§8).
+
+import { useMemo, useState } from "react";
+import { makeEvidence } from "@/lib/command-center/evidence";
+import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
+import type { PersonalFocusCandidate } from "@/lib/command-center/types";
+import { FocusCategoryBadge, Panel, TrustLabel } from "./ui";
+import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
+
+export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: PersonalFocusCandidate; onStartFocus: (c: PersonalFocusCandidate) => void }) {
+  const [showEvidence, setShowEvidence] = useState(false);
+
+  // V2.0 §4/§11 — upgrades the old ad hoc "why is this on my list?" toggle into the shared
+  // Why Should I Care drawer. No AI call here — a focus candidate's why/nowWhat are already
+  // deterministic, so this is FACT/SIGNAL/IMPACT/UNKNOWN/NEXT MOVE with no "Ask Claude"
+  // sub-section (there's no single bounded AI task that fits a generic candidate).
+  const content = useMemo(
+    () =>
+      buildWhyShouldICare({
+        fact: candidate.evidence,
+        signal: candidate.why,
+        impact: {
+          currentCondition: `${candidate.title} is currently ${candidate.category.replace(/_/g, " ")}.`,
+          unresolvedSignal: "If no intervention occurs, this item is expected to remain unresolved.",
+          affectedEntities: [candidate.sourceId],
+          evidence: [],
+          confidence: 0.6,
+          insufficientEvidence: candidate.evidence.length === 0,
+        },
+        unknown: candidate.ownerAmbiguous
+          ? ["Ownership is unclear — related items disagree on owner."]
+          : candidate.dueDate
+            ? []
+            : ["No explicit due/review date is recorded."],
+        nextMove: candidate.nowWhat,
+        evidence: candidate.evidence.map((e) => makeEvidence(e, "manual", candidate.sourceId)),
+      }),
+    [candidate]
+  );
+
+  return (
+    <Panel className="p-4">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <FocusCategoryBadge category={candidate.category} />
+        {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
+      </div>
+      <p className="font-display text-sm text-text">{candidate.title}</p>
+      <p className="mt-1 text-xs text-text2">
+        <span className="font-medium text-text3">Why now: </span>
+        {candidate.why}
+      </p>
+      <p className="mt-1 text-xs text-text2">
+        <span className="font-medium text-text3">Your next move: </span>
+        {candidate.nowWhat}
+      </p>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-text3">
+        <TrustLabel kind="calculated" />
+        <span>Estimated focus: {candidate.estimatedMinutes} min (heuristic)</span>
+      </div>
+
+      <WhyShouldICareDrawer content={content} triggerLabel="Why is this on my list?" />
+      <p className="mt-1 text-xs text-text2">{candidate.whyOnMyList}</p>
+
+      <div className="mt-2 flex flex-wrap gap-3 text-xs">
+        <button onClick={() => setShowEvidence((s) => !s)} aria-expanded={showEvidence} className="font-medium text-accent2 hover:underline">
+          {showEvidence ? "Hide evidence" : `Evidence (${candidate.evidence.length})`}
+        </button>
+      </div>
+      {showEvidence && (
+        <ul className="mt-2 space-y-0.5 rounded-md border border-border bg-surface2 p-2 text-xs text-text2">
+          {candidate.evidence.length === 0 ? <li>- (no additional evidence)</li> : candidate.evidence.map((e, i) => <li key={i}>- {e}</li>)}
+        </ul>
+      )}
+
+      <div className="mt-3 border-t border-border pt-3">
+        <button onClick={() => onStartFocus(candidate)} className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2">
+          Start Focus
+        </button>
+      </div>
+    </Panel>
+  );
+}
