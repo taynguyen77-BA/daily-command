@@ -9,6 +9,7 @@
 import {
   jiraChangelogResponseSchema,
   jiraProjectSearchResponseSchema,
+  jiraSearchJqlResponseSchema,
   jiraSearchResponseSchema,
   type JiraChangelogHistory,
   type JiraConnectionConfig,
@@ -28,7 +29,7 @@ export const JIRA_MAX_ISSUES = 2000; // safety cap — §11 "handle large result
 const JIRA_FETCH_TIMEOUT_MS = 20_000;
 
 export type JiraFetchResult<T> =
-  | { ok: true; data: T; recordsFetched: number }
+  | { ok: true; data: T; recordsFetched: number; method?: "jql-cursor" | "classic-offset" }
   | { ok: false; error: string; errorKind: JiraErrorKind };
 
 export type FetchLike = (url: string, init?: { headers?: Record<string, string>; method?: string; body?: string; signal?: AbortSignal }) => Promise<{
@@ -51,6 +52,12 @@ export function classifyHttpError(status: number): { error: string; errorKind: J
   if (status === 401) return { error: "Jira rejected the configured credentials.", errorKind: "auth-failure" };
   if (status === 403) return { error: "The configured Jira account lacks permission for this request.", errorKind: "permission-failure" };
   if (status === 429) return { error: "Jira rate limit exceeded — try again shortly.", errorKind: "rate-limited" };
+  // V2.2.2 — Atlassian has fully sunset the classic GET /rest/api/3/search endpoint on Jira
+  // Cloud; a real instance now answers it with 410 Gone. fetchJiraIssuesWith below already
+  // tries the replacement endpoint first and only falls back to classic search, so a 410
+  // reaching this classifier means even that fallback attempt failed — worth a specific,
+  // actionable message rather than a generic "unexpected status".
+  if (status === 410) return { error: "Jira reports this API endpoint as permanently removed (410 Gone) — it may have been deprecated by Atlassian.", errorKind: "unknown" };
   return { error: `Jira API returned an unexpected status (${status}).`, errorKind: "unknown" };
 }
 
@@ -125,7 +132,15 @@ export interface FetchIssuesOptions {
   projectKeys?: string[];
 }
 
-export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, options: FetchIssuesOptions): Promise<JiraFetchResult<JiraIssue[]>> {
+/**
+ * Classic, offset/startAt-based issue search — the ORIGINAL endpoint this app used, kept
+ * only as a fallback (see fetchJiraIssuesWith below) for a Jira instance that genuinely
+ * doesn't expose the replacement endpoint. Atlassian has sunset this endpoint on Jira
+ * Cloud (a real instance answers with 410 Gone as of late 2025), so this path is no longer
+ * expected to succeed against Cloud — it exists purely as a defensive fallback, tried only
+ * when the replacement endpoint itself reports 404 (genuinely not present).
+ */
+async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnectionConfig, options: FetchIssuesOptions): Promise<JiraFetchResult<JiraIssue[]>> {
   const jql = buildIssuesJql(options);
   const issues: JiraIssue[] = [];
   let startAt = 0;
@@ -150,20 +165,76 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
       startAt += fetchedThisPage;
       if (fetchedThisPage === 0 || startAt >= parsed.data.total) break;
     }
-    return { ok: true, data: issues, recordsFetched: issues.length };
+    return { ok: true, data: issues, recordsFetched: issues.length, method: "classic-offset" };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
   }
 }
 
 /**
- * V1.8 §5 — cursor-based pagination capability probe. Jira Cloud's enhanced JQL search
- * (`POST /rest/api/3/search/jql`, cursor/nextPageToken-based) coexists with the classic
- * `GET /rest/api/3/search` (startAt-based, still used exclusively by Server/Data Center
- * instances). Whether cursor pagination can be used is a property of the connected
- * instance, not something this app can decide in advance — so this issues one minimal,
- * side-effect-free probe request (maxResults: 0) and classifies the real response rather
- * than assuming. A 404 means the endpoint genuinely doesn't exist (UNSUPPORTED); a
+ * V2.2.2 — root-cause fix for a real production bug: Jira Cloud now answers the classic
+ * `GET /rest/api/3/search` endpoint this app originally used with 410 Gone (Atlassian
+ * sunset it in favor of `POST /rest/api/3/search/jql`, cursor/`nextPageToken`-based rather
+ * than offset/`startAt`-based), so every real sync was failing with "Jira API returned an
+ * unexpected status (410)" despite fully correct credentials.
+ *
+ * This now tries the replacement endpoint first — the only one any current Jira Cloud site
+ * actually supports. It falls back to fetchJiraIssuesClassic ONLY when the very FIRST page
+ * of the replacement endpoint reports 404 (this exact instance genuinely doesn't expose it
+ * at all — never on 410, which means "existed but this request is gone", not "doesn't exist
+ * here"). Once pagination is under way, a later-page failure is reported as-is rather than
+ * silently restarting via the other endpoint, which could otherwise return a subtly
+ * different result set mid-fetch.
+ */
+export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, options: FetchIssuesOptions): Promise<JiraFetchResult<JiraIssue[]>> {
+  const jql = buildIssuesJql(options);
+  const issues: JiraIssue[] = [];
+  let nextPageToken: string | undefined;
+  let firstPage = true;
+  try {
+    while (issues.length < JIRA_MAX_ISSUES) {
+      const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: ISSUE_FIELDS.split(",") };
+      if (nextPageToken) body.nextPageToken = nextPageToken;
+      const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
+        method: "POST",
+        headers: { Authorization: authHeader(config), Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) {
+        if (firstPage && res.status === 404) return fetchJiraIssuesClassic(fetchImpl, config, options);
+        return { ok: false, ...classifyHttpError(res.status) };
+      }
+      firstPage = false;
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+      }
+      const parsed = jiraSearchJqlResponseSchema.safeParse(json);
+      if (!parsed.success) return { ok: false, error: "Jira's search response did not match the expected shape.", errorKind: "malformed-response" };
+
+      issues.push(...parsed.data.issues);
+      const fetchedThisPage = parsed.data.issues.length;
+      if (fetchedThisPage === 0 || parsed.data.isLast || !parsed.data.nextPageToken) break;
+      nextPageToken = parsed.data.nextPageToken;
+    }
+    return { ok: true, data: issues, recordsFetched: issues.length, method: "jql-cursor" };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
+  }
+}
+
+/**
+ * V1.8 §5, updated V2.2.2 — cursor-based pagination capability probe. `POST
+ * /rest/api/3/search/jql` is now fetchJiraIssuesWith's PRIMARY endpoint (Atlassian has
+ * sunset the classic `GET /rest/api/3/search` on Jira Cloud — it now answers 410 Gone); the
+ * classic endpoint remains only as a same-fetch fallback for an instance that genuinely
+ * doesn't expose the replacement (404 on it). This probe still exists as a standalone,
+ * side-effect-free diagnostic for the Conformance panel (issues one minimal request,
+ * maxResults: 0) rather than requiring a real sync attempt just to answer "which one will
+ * this instance use". A 404 means the endpoint genuinely doesn't exist (UNSUPPORTED); a
  * successful response means it does (SUPPORTED); anything that prevents a clear read
  * (auth failure, rate limit, network error, unexpected status) is reported as UNKNOWN —
  * §5 explicitly forbids inventing a workaround instead of admitting "we don't know yet".

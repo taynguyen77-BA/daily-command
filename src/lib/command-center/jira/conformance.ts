@@ -48,16 +48,24 @@ async function runProjectsCheck(fetchImpl: FetchLike, config: JiraConnectionConf
   return { checks, projectsCount: result.data.length };
 }
 
-async function runIssuesCheck(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<{ checks: JiraConformanceCheck[]; issues?: JiraIssue[] }> {
+async function runIssuesCheck(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<{ checks: JiraConformanceCheck[]; issues?: JiraIssue[]; method?: "jql-cursor" | "classic-offset" }> {
   const checks: JiraConformanceCheck[] = [];
   const result = await fetchJiraIssuesWith(fetchImpl, config, {});
   checks.push({ capability: "Issue retrieval", status: result.ok ? "PASS" : "FAIL", detail: result.ok ? `Fetched ${result.recordsFetched} issue(s).` : result.error });
   if (!result.ok) return { checks };
 
+  // V2.2.2 — this must describe what ACTUALLY happened, not a hardcoded assumption: since
+  // fetchJiraIssuesWith tries the cursor-based replacement endpoint first (the classic one
+  // is now 410 Gone on real Jira Cloud), reporting "classic startAt pagination" here
+  // unconditionally would overclaim exactly the kind of false certainty this diagnostic
+  // exists to prevent.
+  const usedClassic = result.method === "classic-offset";
   checks.push({
     capability: "Pagination",
     status: result.recordsFetched >= 0 ? "PASS" : "FAIL",
-    detail: `Classic startAt pagination — paged to ${result.recordsFetched} issue(s) at ${JIRA_PAGE_SIZE}/page, capped at ${JIRA_MAX_ISSUES}.`,
+    detail: usedClassic
+      ? `Classic startAt pagination (fallback — the cursor-based endpoint was not available on this instance) — paged to ${result.recordsFetched} issue(s) at ${JIRA_PAGE_SIZE}/page, capped at ${JIRA_MAX_ISSUES}.`
+      : `Cursor-based (nextPageToken) pagination via /rest/api/3/search/jql — paged to ${result.recordsFetched} issue(s) at ${JIRA_PAGE_SIZE}/page, capped at ${JIRA_MAX_ISSUES}.`,
   });
 
   let mappingOk = true;
@@ -70,7 +78,7 @@ async function runIssuesCheck(fetchImpl: FetchLike, config: JiraConnectionConfig
   }
   checks.push({ capability: "Issue mapping (priority/status/type/labels/fixVersion/owner/dates)", status: mappingOk ? "PASS" : "FAIL", detail: mappingDetail });
 
-  return { checks, issues: result.data };
+  return { checks, issues: result.data, method: result.method };
 }
 
 async function runChangelogCheck(fetchImpl: FetchLike, config: JiraConnectionConfig, issueKey: string): Promise<JiraConformanceCheck[]> {
@@ -202,7 +210,10 @@ export async function runJiraConformance(options?: { fetchImpl: FetchLike; confi
     jiraHostname,
     projectsDiscovered: projectsResult.projectsCount,
     issuesFetched,
-    paginationBehavior: `Classic offset (startAt) pagination, ${JIRA_PAGE_SIZE} issues/page, hard safety cap ${JIRA_MAX_ISSUES}.`,
+    paginationBehavior:
+      issuesResult.method === "classic-offset"
+        ? `Classic offset (startAt) pagination (fallback — cursor endpoint unavailable on this instance), ${JIRA_PAGE_SIZE} issues/page, hard safety cap ${JIRA_MAX_ISSUES}.`
+        : `Cursor-based (nextPageToken) pagination via /rest/api/3/search/jql, ${JIRA_PAGE_SIZE} issues/page, hard safety cap ${JIRA_MAX_ISSUES}.`,
     changelogBehavior: "Best-effort, single-page (100 entries), fetched only for a heuristically-prioritized subset of issues (≤20/sync) — never every issue.",
     durationMs: Date.now() - startedAt,
     truncated,

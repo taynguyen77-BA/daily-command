@@ -68,6 +68,19 @@ export const jiraSearchResponseSchema = z.object({
 });
 export type JiraSearchResponse = z.infer<typeof jiraSearchResponseSchema>;
 
+// V2.2.2 — Atlassian has sunset the classic `GET /rest/api/3/search` endpoint on Jira Cloud
+// (it now returns 410 Gone on every real Cloud site) in favor of `POST /rest/api/3/search/jql`,
+// which is cursor/nextPageToken-based rather than startAt/total-based — there is no `total`
+// to report, and `isLast`/absence of `nextPageToken` is how a caller knows it reached the
+// last page. `issues` stays required for the same "malformed response must not look like an
+// empty-but-valid page" reasoning as jiraSearchResponseSchema above.
+export const jiraSearchJqlResponseSchema = z.object({
+  issues: z.array(jiraIssueSchema),
+  nextPageToken: z.string().optional(),
+  isLast: z.boolean().optional(),
+});
+export type JiraSearchJqlResponse = z.infer<typeof jiraSearchJqlResponseSchema>;
+
 export const jiraProjectSchema = z.object({
   id: z.string().optional(),
   key: z.string(),

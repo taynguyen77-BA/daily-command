@@ -762,7 +762,11 @@ function makeJiraIssue(overrides: Partial<JiraIssue["fields"]> & { key?: string 
   // 3-page fixture: 50 + 50 + 20 = 120 total issues.
   const pages = [50, 50, 20];
   let callCount = 0;
+  // V2.2.2 — fetchJiraIssuesWith now tries POST /rest/api/3/search/jql first; these mocks
+  // only model the classic startAt-based endpoint, so they report 404 on the replacement to
+  // exercise the (still-real, still-tested) fallback path — see jira/http.ts.
   const paginatedFetch: FetchLike = async (url) => {
+    if (url.includes("/search/jql")) return { ok: false, status: 404, json: async () => ({}) };
     callCount++;
     const startAt = Number(new URL(url).searchParams.get("startAt"));
     const pageIndex = startAt / JIRA_PAGE_SIZE;
@@ -797,6 +801,7 @@ function makeJiraIssue(overrides: Partial<JiraIssue["fields"]> & { key?: string 
 
   // Malformed response mid-pagination
   const malformedMidway: FetchLike = async (url) => {
+    if (url.includes("/search/jql")) return { ok: false, status: 404, json: async () => ({}) };
     const startAt = Number(new URL(url).searchParams.get("startAt"));
     if (startAt === 0) return { ok: true, status: 200, json: async () => ({ issues: [makeJiraIssue()], startAt: 0, maxResults: 50, total: 100 }) };
     return { ok: true, status: 200, json: async () => ({ garbage: "not a search response" }) };
@@ -2690,6 +2695,7 @@ function pfc(overrides: Partial<PersonalFocusCandidate> = {}): PersonalFocusCand
 {
   const config: JiraConnectionConfig = { baseUrl: "https://acme.atlassian.net", email: "ba@acme.com", apiToken: "x" };
   const hugeFetch: FetchLike = async (url) => {
+    if (url.includes("/search/jql")) return { ok: false, status: 404, json: async () => ({}) };
     const startAt = Number(new URL(url).searchParams.get("startAt"));
     const issues = Array.from({ length: JIRA_PAGE_SIZE }, (_, i) => makeJiraIssue({ key: `HUGE-${startAt + i}` }));
     // total is deliberately far beyond the cap — a real Jira instance really could have this many.
@@ -3959,7 +3965,11 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   ok("V2.2.1 Jira timeout", typeof AbortSignal.timeout === "function", "the runtime supports AbortSignal.timeout, which jira/http.ts now attaches to every real fetch call");
   const httpSource = fs.readFileSync(path.join(process.cwd(), "src/lib/command-center/jira/http.ts"), "utf8");
   const timeoutCallSites = (httpSource.match(/signal: AbortSignal\.timeout\(JIRA_FETCH_TIMEOUT_MS\)/g) ?? []).length;
-  ok("V2.2.1 Jira timeout", timeoutCallSites === 4, `all 4 real Jira fetch call sites (projects, issues page, changelog, capability probe) attach the timeout signal (found ${timeoutCallSites})`);
+  ok(
+    "V2.2.1 Jira timeout",
+    timeoutCallSites === 5,
+    `all 5 real Jira fetch call sites (projects, jql issue search, classic issue search fallback, changelog, capability probe) attach the timeout signal (found ${timeoutCallSites})`
+  );
 }
 
 // ----- §4 — jira/status and jira/conformance GET routes must be force-dynamic. Without it,
@@ -3972,6 +3982,87 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
     const source = fs.readFileSync(path.join(process.cwd(), routeFile), "utf8");
     ok("V2.2.1 Route dynamic rendering", /export const dynamic = "force-dynamic"/.test(source), `${routeFile} declares force-dynamic — without it this parameter-less GET route would be statically frozen at build time`);
   }
+}
+
+// ===== V2.2.2 — real production bug fix: Jira Cloud now answers the classic
+// GET /rest/api/3/search endpoint with 410 Gone (Atlassian sunset it in favor of
+// POST /rest/api/3/search/jql). fetchJiraIssuesWith now tries the replacement endpoint
+// first and only falls back to classic search on a 404 from the replacement itself. =====
+{
+  const jqlConfig: JiraConnectionConfig = { baseUrl: "https://acme.atlassian.net", email: "ba@acme.com", apiToken: "x" };
+
+  // ----- The fix: a modern Jira Cloud instance (jql endpoint works, classic is 410 Gone if
+  // ever called) must be fetched successfully via the new endpoint, never touching classic. -----
+  {
+    let classicCalled = false;
+    let jqlCallCount = 0;
+    const modernCloudFetch: FetchLike = async (url, init) => {
+      if (url.includes("/search/jql")) {
+        jqlCallCount++;
+        const body = JSON.parse((init as { body?: string })?.body ?? "{}") as { nextPageToken?: string };
+        if (!body.nextPageToken) {
+          const issues = Array.from({ length: JIRA_PAGE_SIZE }, (_, i) => makeJiraIssue({ key: `JPMC-${i}` }));
+          return { ok: true, status: 200, json: async () => ({ issues, nextPageToken: "page-2-token", isLast: false }) };
+        }
+        const issues = Array.from({ length: 10 }, (_, i) => makeJiraIssue({ key: `JPMC-page2-${i}` }));
+        return { ok: true, status: 200, json: async () => ({ issues, isLast: true }) };
+      }
+      if (url.includes("/search")) {
+        classicCalled = true;
+        return { ok: false, status: 410, json: async () => ({ errorMessages: ["fixture: classic search is Gone"] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    const result = await fetchJiraIssuesWith(modernCloudFetch, jqlConfig, {});
+    ok("V2.2.2 Jira search migration", result.ok && result.recordsFetched === JIRA_PAGE_SIZE + 10, `a modern Jira Cloud instance is fetched successfully via /search/jql, across cursor pages (got ${result.ok ? result.recordsFetched : "error"})`);
+    ok("V2.2.2 Jira search migration", result.ok && result.method === "jql-cursor", "the successful result records that the cursor-based endpoint was actually used");
+    ok("V2.2.2 Jira search migration", jqlCallCount === 2, "cursor pagination followed nextPageToken across exactly 2 pages");
+    ok("V2.2.2 Jira search migration", !classicCalled, "the classic (410 Gone) endpoint is never called when the replacement endpoint works — this is the actual bug fix");
+  }
+
+  // ----- An instance that genuinely doesn't expose the replacement endpoint (404 on the very
+  // first page) falls back to classic search, which still works there. -----
+  {
+    const legacyInstanceFetch: FetchLike = async (url) => {
+      if (url.includes("/search/jql")) return { ok: false, status: 404, json: async () => ({}) };
+      if (url.includes("/search")) {
+        const startAt = Number(new URL(url).searchParams.get("startAt"));
+        const issues = Array.from({ length: 5 }, (_, i) => makeJiraIssue({ key: `LEGACY-${startAt + i}` }));
+        return { ok: true, status: 200, json: async () => ({ issues, startAt, maxResults: JIRA_PAGE_SIZE, total: 5 }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    const result = await fetchJiraIssuesWith(legacyInstanceFetch, jqlConfig, {});
+    ok("V2.2.2 Jira search migration", result.ok && result.recordsFetched === 5, "a 404 on the very first /search/jql page falls back to classic search for the whole fetch");
+    ok("V2.2.2 Jira search migration", result.ok && result.method === "classic-offset", "the fallback result honestly records that the classic endpoint was actually used");
+  }
+
+  // ----- The real-world failure this bug report reproduced: neither endpoint works. Must
+  // surface a clear, non-crashing error — never silently return zero issues as if the
+  // project were simply empty. -----
+  {
+    const brokenInstanceFetch: FetchLike = async (url) => {
+      if (url.includes("/search/jql")) return { ok: false, status: 404, json: async () => ({}) };
+      return { ok: false, status: 410, json: async () => ({ errorMessages: ["Gone"] }) };
+    };
+    const result = await fetchJiraIssuesWith(brokenInstanceFetch, jqlConfig, {});
+    ok("V2.2.2 Jira search migration", !result.ok, "when both the replacement and classic endpoints fail, the fetch honestly fails rather than returning an empty-looking success");
+    ok("V2.2.2 Jira search migration", !result.ok && /deprecated|Gone/.test(result.error), `the 410 failure message is specific and actionable, not a generic "unexpected status" (got: ${!result.ok ? result.error : ""})`);
+  }
+
+  // ----- A non-404 failure on the replacement endpoint (real auth/permission/rate-limit
+  // problem) must surface immediately — never mask a real credential issue with a silent
+  // fallback attempt. -----
+  {
+    const authFailOnJql: FetchLike = async (url) => {
+      if (url.includes("/search/jql")) return { ok: false, status: 401, json: async () => ({}) };
+      throw new Error("classic endpoint must never be called for a 401 on the replacement endpoint");
+    };
+    const result = await fetchJiraIssuesWith(authFailOnJql, jqlConfig, {});
+    ok("V2.2.2 Jira search migration", !result.ok && result.errorKind === "auth-failure", "a 401 on the replacement endpoint is classified as auth-failure immediately, with no fallback attempt that could mask it");
+  }
+
+  ok("V2.2.2 Jira search migration", classifyHttpError(410).error.includes("410") || /deprecated|Gone/i.test(classifyHttpError(410).error), "classifyHttpError(410) gives a specific, actionable message distinguishing it from a generic unrecognized status");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
