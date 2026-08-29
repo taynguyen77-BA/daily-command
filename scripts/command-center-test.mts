@@ -4065,5 +4065,72 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   ok("V2.2.2 Jira search migration", classifyHttpError(410).error.includes("410") || /deprecated|Gone/i.test(classifyHttpError(410).error), "classifyHttpError(410) gives a specific, actionable message distinguishing it from a generic unrecognized status");
 }
 
+// ===== V2.2.3 — real production bug fix #2: after migrating to /search/jql, real sync
+// started failing with 400 Bad Request. Root cause: that endpoint strictly validates every
+// requested field name and rejects the WHOLE request if one doesn't resolve on the instance
+// (the classic endpoint silently ignored unrecognized fields instead) — and "flagged" is
+// documented as an instance-specific custom field, not a universal system field, so it's
+// the one entry that could legitimately fail this validation on a real site. =====
+{
+  const fieldsConfig: JiraConnectionConfig = { baseUrl: "https://acme.atlassian.net", email: "ba@acme.com", apiToken: "x" };
+
+  // ----- The actual fix: "flagged" is never requested from the strict endpoint. -----
+  {
+    let requestedFields: string[] | undefined;
+    const captureFieldsFetch: FetchLike = async (url, init) => {
+      if (url.includes("/search/jql")) {
+        const body = JSON.parse((init as { body?: string })?.body ?? "{}") as { fields?: string[] };
+        requestedFields = body.fields;
+        return { ok: true, status: 200, json: async () => ({ issues: [], isLast: true }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    await fetchJiraIssuesWith(captureFieldsFetch, fieldsConfig, {});
+    ok("V2.2.3 Jira field validation", Array.isArray(requestedFields) && !requestedFields.includes("flagged"), "the strict /search/jql endpoint is never asked for 'flagged' — the one field known not to be a universal system field");
+    ok(
+      "V2.2.3 Jira field validation",
+      Array.isArray(requestedFields) && ["summary", "status", "priority", "assignee", "duedate", "labels", "fixVersions", "issuetype", "issuelinks", "project", "created", "updated"].every((f) => requestedFields!.includes(f)),
+      "every genuine universal system field is still requested — only the one instance-specific field was dropped"
+    );
+  }
+
+  // ----- The debuggability fix: Jira's own validation message is surfaced, not swallowed. -----
+  {
+    const rejectedFieldFetch: FetchLike = async (url) => {
+      if (url.includes("/search/jql")) {
+        return { ok: false, status: 400, json: async () => ({ errorMessages: [], errors: { fields: "The value 'flagged' does not exist for the field 'fields'." } }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    const result = await fetchJiraIssuesWith(rejectedFieldFetch, fieldsConfig, {});
+    ok("V2.2.3 Jira error surfacing", !result.ok, "a 400 from the strict endpoint fails the fetch");
+    ok(
+      "V2.2.3 Jira error surfacing",
+      !result.ok && result.error.includes("does not exist for the field"),
+      `Jira's actual validation message is included in the surfaced error, not just a generic status code (got: ${!result.ok ? result.error : ""})`
+    );
+  }
+
+  // ----- errorMessages[] (the other real Jira error shape) is also surfaced. -----
+  {
+    const errorMessagesFetch: FetchLike = async (url) => {
+      if (url.includes("/project/search")) return { ok: false, status: 400, json: async () => ({ errorMessages: ["The JQL you have entered is not valid."] }) };
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+    const result = await fetchJiraProjectsWith(errorMessagesFetch, fieldsConfig);
+    ok("V2.2.3 Jira error surfacing", !result.ok && result.error.includes("The JQL you have entered is not valid."), "errorMessages[] entries are surfaced the same way errors{} entries are");
+  }
+
+  // ----- A response body that isn't the expected error shape (or isn't JSON at all) never
+  // crashes — the status-based message alone still stands. -----
+  {
+    const nonJsonErrorFetch: FetchLike = async () => ({ ok: false, status: 400, json: async () => { throw new Error("Unexpected token < in JSON"); } });
+    const result = await fetchJiraProjectsWith(nonJsonErrorFetch, fieldsConfig);
+    ok("V2.2.3 Jira error surfacing", !result.ok && result.error.length > 0, "an unparseable error body (e.g. an HTML error page) never throws — the status-based message alone is used");
+  }
+
+  ok("V2.2.3 Jira error surfacing", classifyHttpError(400).error.includes("400"), "classifyHttpError(400) gives a specific 'malformed request' message rather than a generic unrecognized-status message");
+}
+
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
 process.exit(failures === 0 ? 0 : 1);

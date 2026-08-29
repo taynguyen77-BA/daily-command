@@ -20,6 +20,17 @@ import type { JiraCapabilityResult, JiraErrorKind } from "../types";
 
 const ISSUE_FIELDS =
   "summary,status,priority,assignee,duedate,labels,fixVersions,issuetype,issuelinks,project,created,updated,flagged";
+// V2.2.3 — `POST /rest/api/3/search/jql` validates every requested field name against the
+// instance's real, resolvable field IDs and 400s the WHOLE request if one doesn't resolve
+// (unlike the classic GET /rest/api/3/search, which silently ignores an unrecognized field
+// name). "flagged" is NOT a real system field — it's always instance-specific custom field
+// on real Jira sites (jira/types.ts already documents this: "some instances expose a
+// boolean 'Flagged' custom field") — so it's the one entry in ISSUE_FIELDS that can't be
+// safely sent to the strict endpoint. Every other field here is a genuine, universal Jira
+// system field, safe on any instance. Omitted here only for the request; normalize.ts's
+// flagged-based blocked-status detection still works via the status-name heuristic when
+// this signal isn't available (see mapping.ts isBlockedByHeuristic).
+const JQL_SEARCH_FIELDS = ISSUE_FIELDS.split(",").filter((f) => f !== "flagged");
 export const JIRA_PAGE_SIZE = 50;
 export const JIRA_MAX_ISSUES = 2000; // safety cap — §11 "handle large result sets safely"
 // V2.2.1 §4/§5 — every Jira request gets an explicit abort timeout. Without this, a hung
@@ -58,7 +69,37 @@ export function classifyHttpError(status: number): { error: string; errorKind: J
   // reaching this classifier means even that fallback attempt failed — worth a specific,
   // actionable message rather than a generic "unexpected status".
   if (status === 410) return { error: "Jira reports this API endpoint as permanently removed (410 Gone) — it may have been deprecated by Atlassian.", errorKind: "unknown" };
+  if (status === 400) return { error: "Jira rejected this request as malformed (400 Bad Request).", errorKind: "unknown" };
   return { error: `Jira API returned an unexpected status (${status}).`, errorKind: "unknown" };
+}
+
+/**
+ * V2.2.3 — every non-2xx classification above previously discarded the response body, so a
+ * real Jira validation error (e.g. "The value 'flagged' does not exist for the field
+ * 'fields'.") was reduced to a bare status code with no way to actually diagnose it. Jira's
+ * error bodies are consistently shaped as `{ errorMessages: string[], errors: {field: msg} }`
+ * — this reads that shape (tolerating anything else, including a non-JSON body) and appends
+ * whatever it finds to the status-based message, never replacing it (so a caller can never
+ * end up with an empty/missing error).
+ */
+async function describeJiraError(res: { status: number; json: () => Promise<unknown> }): Promise<{ error: string; errorKind: JiraErrorKind }> {
+  const base = classifyHttpError(res.status);
+  try {
+    const body = (await res.json()) as unknown;
+    if (typeof body !== "object" || body === null) return base;
+    const details: string[] = [];
+    const errorMessages = (body as { errorMessages?: unknown }).errorMessages;
+    if (Array.isArray(errorMessages)) details.push(...errorMessages.filter((m): m is string => typeof m === "string"));
+    const errors = (body as { errors?: unknown }).errors;
+    if (typeof errors === "object" && errors !== null) {
+      for (const [field, msg] of Object.entries(errors as Record<string, unknown>)) {
+        if (typeof msg === "string") details.push(`${field}: ${msg}`);
+      }
+    }
+    return details.length > 0 ? { error: `${base.error} ${details.join(" ")}`, errorKind: base.errorKind } : base;
+  } catch {
+    return base; // body wasn't readable/JSON (e.g. an HTML error page) — the status-based message still stands
+  }
 }
 
 /**
@@ -112,7 +153,7 @@ export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraCo
       headers: { Authorization: authHeader(config), Accept: "application/json" },
       signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return { ok: false, ...classifyHttpError(res.status) };
+    if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
     let json: unknown;
     try {
       json = await res.json();
@@ -150,7 +191,7 @@ async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnecti
         buildUrl(config.baseUrl, "/rest/api/3/search", { jql, startAt: String(startAt), maxResults: String(JIRA_PAGE_SIZE), fields: ISSUE_FIELDS }),
         { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
       );
-      if (!res.ok) return { ok: false, ...classifyHttpError(res.status) };
+      if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
       let json: unknown;
       try {
         json = await res.json();
@@ -193,7 +234,7 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
   let firstPage = true;
   try {
     while (issues.length < JIRA_MAX_ISSUES) {
-      const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: ISSUE_FIELDS.split(",") };
+      const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: JQL_SEARCH_FIELDS };
       if (nextPageToken) body.nextPageToken = nextPageToken;
       const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
         method: "POST",
@@ -203,7 +244,7 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
       });
       if (!res.ok) {
         if (firstPage && res.status === 404) return fetchJiraIssuesClassic(fetchImpl, config, options);
-        return { ok: false, ...classifyHttpError(res.status) };
+        return { ok: false, ...(await describeJiraError(res)) };
       }
       firstPage = false;
       let json: unknown;
@@ -274,7 +315,7 @@ export async function fetchIssueChangelogWith(fetchImpl: FetchLike, config: Jira
       headers: { Authorization: authHeader(config), Accept: "application/json" },
       signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return { ok: false, ...classifyHttpError(res.status) };
+    if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
     let json: unknown;
     try {
       json = await res.json();
