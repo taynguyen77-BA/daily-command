@@ -156,22 +156,49 @@ export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: strin
   return `${clauses.join(" AND ")} order by updated desc`;
 }
 
+export const JIRA_PROJECT_PAGE_SIZE = 50;
+export const JIRA_MAX_PROJECTS = 2000; // safety cap, same philosophy as JIRA_MAX_ISSUES
+
+/**
+ * V2.3.1 — real production bug fix: this previously fetched only the FIRST page (maxResults:
+ * "50") of `GET /rest/api/3/project/search` and returned it as if it were the whole catalog,
+ * silently dropping every project past the 50th (in whatever order Jira happened to return
+ * them) — a real Jira site with more projects than that would show a "Projects Discovered"
+ * count and Focus Project Scope picker that simply omit some real, existing projects (e.g.
+ * MCWS) with no visible error. This endpoint is startAt/maxResults paginated exactly like
+ * classic issue search, and its response carries `isLast` — this now follows it to the end,
+ * same as fetchJiraIssuesClassic below does for issues.
+ */
 export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<JiraFetchResult<JiraProject[]>> {
+  const projects: JiraProject[] = [];
+  let startAt = 0;
   try {
-    const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/project/search", { maxResults: "50" }), {
-      headers: { Authorization: authHeader(config), Accept: "application/json" },
-      signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
-    let json: unknown;
-    try {
-      json = await res.json();
-    } catch {
-      return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+    while (projects.length < JIRA_MAX_PROJECTS) {
+      const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/project/search", { maxResults: String(JIRA_PROJECT_PAGE_SIZE), startAt: String(startAt) }), {
+        headers: { Authorization: authHeader(config), Accept: "application/json" },
+        signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
+      });
+      if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+      }
+      const parsed = jiraProjectSearchResponseSchema.safeParse(json);
+      if (!parsed.success) return { ok: false, error: "Jira's project response did not match the expected shape.", errorKind: "malformed-response" };
+
+      projects.push(...parsed.data.values);
+      const fetchedThisPage = parsed.data.values.length;
+      startAt += fetchedThisPage;
+      // isLast is the authoritative signal (and the schema defaults it to true when a
+      // response omits it — see jira/types.ts). `total`, when present, is an independent
+      // cross-check so a boundary case (isLast missing on a real exactly-page-size final
+      // page) still terminates correctly rather than looping past the real end.
+      const reachedTotal = parsed.data.total !== undefined && startAt >= parsed.data.total;
+      if (fetchedThisPage === 0 || parsed.data.isLast || reachedTotal || fetchedThisPage < JIRA_PROJECT_PAGE_SIZE) break;
     }
-    const parsed = jiraProjectSearchResponseSchema.safeParse(json);
-    if (!parsed.success) return { ok: false, error: "Jira's project response did not match the expected shape.", errorKind: "malformed-response" };
-    return { ok: true, data: parsed.data.values, recordsFetched: parsed.data.values.length };
+    return { ok: true, data: projects, recordsFetched: projects.length };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
   }

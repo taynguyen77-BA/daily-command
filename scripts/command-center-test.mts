@@ -29,7 +29,7 @@ import type { Decision, DailySnapshot, SnapshotMetrics } from "../src/lib/comman
 import { mapPriority, mapStatus, mapWorkItemType, isBlockedByHeuristic } from "../src/lib/command-center/jira/mapping";
 import { normalizeIssue, normalizeIssues, normalizeProjects, clientIdForProjectKey } from "../src/lib/command-center/jira/normalize";
 import { jiraIssueSchema, jiraSearchResponseSchema, type JiraIssue } from "../src/lib/command-center/jira/types";
-import { fetchJiraIssuesWith, fetchJiraProjectsWith, buildIssuesJql, classifyHttpError, JIRA_PAGE_SIZE, type FetchLike } from "../src/lib/command-center/jira/http";
+import { fetchJiraIssuesWith, fetchJiraProjectsWith, buildIssuesJql, classifyHttpError, JIRA_PAGE_SIZE, JIRA_PROJECT_PAGE_SIZE, type FetchLike } from "../src/lib/command-center/jira/http";
 import { DisabledJiraActionProvider } from "../src/lib/command-center/jira/jira-action-provider";
 import { applyFilters, availableFixVersions } from "../src/lib/command-center/filters";
 import { computeFreshness } from "../src/lib/command-center/freshness";
@@ -4568,6 +4568,83 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   const filterBarSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/FilterBar.tsx"), "utf8");
   ok("V2.3 UI", /Jira Scope:/.test(filterBarSrc), "the Current-View FilterBar visibly distinguishes itself from Jira Project Scope (§13) rather than presenting a single ambiguous filter surface");
   ok("V2.3 UI", !/setJiraProjectScope/.test(filterBarSrc), "the FilterBar can only DISPLAY the current Jira scope, never change it — a temporary view filter can never silently mutate the persisted scope (§13)");
+}
+
+// ===== V2.3.1 — real production bug fix: fetchJiraProjectsWith previously fetched only the
+// FIRST page (maxResults: "50") of GET /rest/api/3/project/search and returned it as the
+// whole catalog, silently dropping every project past the 50th — so a real Jira site with
+// more than 50 projects (or where the project a user cared about, e.g. MCWS, simply wasn't
+// in the first page) showed a wrong "Projects Discovered" count and an incomplete Focus
+// Project Scope picker, with no visible error. =====
+{
+  const projectsConfig: JiraConnectionConfig = { baseUrl: "https://acme.atlassian.net", email: "ba@acme.com", apiToken: "x" };
+
+  // ----- The actual fix: a catalog larger than one page is fully paginated. -----
+  {
+    const startAts: number[] = [];
+    const page1 = Array.from({ length: JIRA_PROJECT_PAGE_SIZE }, (_, i) => ({ id: String(10000 + i), key: `P${i}`, name: `Project ${i}` }));
+    const page2 = [
+      { id: "20001", key: "UBS", name: "UBS Trade Reporting Upgrade" },
+      { id: "20002", key: "MCWS", name: "Managed Cloud Workflow Services" },
+    ];
+    const multiPageFetch: FetchLike = async (url) => {
+      const startAt = Number(new URL(url).searchParams.get("startAt"));
+      startAts.push(startAt);
+      if (startAt === 0) return { ok: true, status: 200, json: async () => ({ values: page1, isLast: false, total: JIRA_PROJECT_PAGE_SIZE + page2.length }) };
+      return { ok: true, status: 200, json: async () => ({ values: page2, isLast: true, total: JIRA_PROJECT_PAGE_SIZE + page2.length }) };
+    };
+    const result = await fetchJiraProjectsWith(multiPageFetch, projectsConfig);
+    ok("V2.3.1 Jira project pagination", result.ok && result.recordsFetched === JIRA_PROJECT_PAGE_SIZE + 2, `every project across both pages is returned, not just the first ${JIRA_PROJECT_PAGE_SIZE} (got ${result.ok ? result.recordsFetched : "error"})`);
+    ok("V2.3.1 Jira project pagination", result.ok && result.data.some((p) => p.key === "UBS"), "a project on the SECOND page (UBS) is present in the final result");
+    ok("V2.3.1 Jira project pagination", result.ok && result.data.some((p) => p.key === "MCWS"), "a project on the second page (MCWS) — this is the exact real-world bug report: a real project silently missing from discovery — is now present");
+    ok("V2.3.1 Jira project pagination", JSON.stringify(startAts) === JSON.stringify([0, JIRA_PROJECT_PAGE_SIZE]), `pagination correctly advances startAt by the number of projects actually fetched each page (got ${JSON.stringify(startAts)})`);
+  }
+
+  // ----- A single-page catalog (isLast: true immediately) makes exactly one request — no
+  // wasted extra round-trip for the common small-instance case. -----
+  {
+    let callCount = 0;
+    const singlePageFetch: FetchLike = async () => {
+      callCount++;
+      return { ok: true, status: 200, json: async () => ({ values: [{ id: "1", key: "JPMC", name: "JPMC" }], isLast: true, total: 1 }) };
+    };
+    const result = await fetchJiraProjectsWith(singlePageFetch, projectsConfig);
+    ok("V2.3.1 Jira project pagination", result.ok && result.recordsFetched === 1, "a single-page catalog still returns correctly");
+    ok("V2.3.1 Jira project pagination", callCount === 1, "a single-page catalog (isLast: true on the first response) makes exactly one request, not an unnecessary second page fetch");
+  }
+
+  // ----- A response missing `isLast` entirely still terminates correctly via the `total`
+  // cross-check, rather than looping forever or (worse) silently stopping at the wrong page. -----
+  {
+    const page1 = Array.from({ length: JIRA_PROJECT_PAGE_SIZE }, (_, i) => ({ id: String(i), key: `X${i}`, name: `X${i}` }));
+    const page2 = [{ id: "999", key: "BARC", name: "Barclays" }];
+    const noIsLastFetch: FetchLike = async (url) => {
+      const startAt = Number(new URL(url).searchParams.get("startAt"));
+      if (startAt === 0) return { ok: true, status: 200, json: async () => ({ values: page1, total: JIRA_PROJECT_PAGE_SIZE + 1 }) }; // isLast omitted
+      return { ok: true, status: 200, json: async () => ({ values: page2, total: JIRA_PROJECT_PAGE_SIZE + 1 }) };
+    };
+    const result = await fetchJiraProjectsWith(noIsLastFetch, projectsConfig);
+    ok(
+      "V2.3.1 Jira project pagination",
+      result.ok && result.recordsFetched === JIRA_PROJECT_PAGE_SIZE + 1 && result.data.some((p) => p.key === "BARC"),
+      "the `total` field is used as an independent cross-check, so a full-size first page with `isLast` omitted still continues to the real second page rather than stopping early"
+    );
+  }
+
+  // ----- Failure/malformed handling on a later page still surfaces honestly, same discipline
+  // as issue pagination. -----
+  {
+    const page1 = Array.from({ length: JIRA_PROJECT_PAGE_SIZE }, (_, i) => ({ id: String(i), key: `Y${i}`, name: `Y${i}` }));
+    const failsOnPage2: FetchLike = async (url) => {
+      const startAt = Number(new URL(url).searchParams.get("startAt"));
+      if (startAt === 0) return { ok: true, status: 200, json: async () => ({ values: page1, isLast: false, total: JIRA_PROJECT_PAGE_SIZE + 5 }) };
+      return { ok: false, status: 401, json: async () => ({}) };
+    };
+    const result = await fetchJiraProjectsWith(failsOnPage2, projectsConfig);
+    ok("V2.3.1 Jira project pagination", !result.ok && result.errorKind === "auth-failure", "a failure on a later project page is surfaced honestly, never silently truncated into a smaller-looking success");
+  }
+
+  ok("V2.3.1 Jira project pagination", JIRA_PROJECT_PAGE_SIZE === 50, "the project page size matches Jira's own default page size for /rest/api/3/project/search");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

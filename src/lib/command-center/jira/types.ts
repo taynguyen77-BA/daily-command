@@ -92,9 +92,15 @@ export type JiraProject = z.infer<typeof jiraProjectSchema>;
 // malformed response (wrong endpoint, an error page's JSON body, etc.) silently validated
 // as "zero projects" instead of failing. Made required, matching jiraSearchResponseSchema's
 // `issues` field above and its documented reasoning.
+// V2.3.1 — `isLast` now defaults to `false` (was `true`) when a response omits it. Now that
+// http.ts's fetchJiraProjectsWith actually paginates through this endpoint, defaulting a
+// missing isLast to `true` would silently stop at page 1 and drop every later project — the
+// exact bug this default previously caused. Defaulting to `false` instead just means "keep
+// paging"; the loop still terminates correctly via the `total` cross-check or an empty page,
+// so this can never spin forever — it can only ever fetch one page too many, never too few.
 export const jiraProjectSearchResponseSchema = z.object({
   values: z.array(jiraProjectSchema),
-  isLast: z.boolean().default(true),
+  isLast: z.boolean().default(false),
   total: z.number().optional(),
 });
 
