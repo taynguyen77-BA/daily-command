@@ -3,7 +3,7 @@
 // state) — no new scoring/intelligence engine, no blended trust "score". Pure function so
 // it's deterministically testable, same pattern as data-health.ts.
 
-import type { AiProviderState, DataHealth, DataSourceType, JiraSyncState } from "./types";
+import type { AiProviderState, DataHealth, DataSourceType, JiraProjectScope, JiraSyncState } from "./types";
 
 export type TrustDiagnosticStatus = "good" | "warn" | "bad" | "info";
 
@@ -19,10 +19,13 @@ export interface TrustDiagnosticInput {
   jiraSync: JiraSyncState;
   claudeAvailable: boolean | null;
   latestAiProviderState?: AiProviderState;
+  // V2.3 §18 — optional; when provided, the existing "Jira" entry below also answers "why
+  // am I not seeing this Jira project?" without a second blended score.
+  jiraProjectScope?: JiraProjectScope;
 }
 
 export function computeTrustDiagnostic(input: TrustDiagnosticInput): TrustDiagnosticEntry[] {
-  const { dataHealth, dataSource, jiraSync, claudeAvailable, latestAiProviderState } = input;
+  const { dataHealth, dataSource, jiraSync, claudeAvailable, latestAiProviderState, jiraProjectScope } = input;
 
   const entries: TrustDiagnosticEntry[] = [];
 
@@ -60,17 +63,26 @@ export function computeTrustDiagnostic(input: TrustDiagnosticInput): TrustDiagno
         : `${dataHealth.ownershipCoveragePct}% of open items have an explicit owner — the rest are never guessed, only reported as unowned.`,
   });
 
+  // V2.3 §18 — "Why am I not seeing this Jira project?" gets an honest, always-available
+  // answer: "It is outside the current Focus Project Scope." appended to the existing Jira
+  // sync status, never a separate blended score.
+  const scopeSuffix =
+    dataSource === "jira" && jiraProjectScope
+      ? jiraProjectScope.mode === "FOCUSED"
+        ? ` Focus Project Scope: FOCUSED — ${jiraProjectScope.projectKeys.length} project(s) selected. A project not in this list is outside the current scope.`
+        : " Focus Project Scope: ALL Jira projects."
+      : "";
   entries.push({
     category: "Jira",
     status: dataSource !== "jira" ? "info" : jiraSync.lastSyncStatus === "success" ? "good" : jiraSync.lastSyncStatus === "failed" ? "bad" : "warn",
     answer:
-      dataSource !== "jira"
+      (dataSource !== "jira"
         ? "Active data source is not Jira — this doesn't apply."
         : jiraSync.lastSyncStatus === "success"
         ? `Last sync succeeded${jiraSync.lastSyncCompletedAt ? ` at ${new Date(jiraSync.lastSyncCompletedAt).toLocaleString()}` : ""}.`
         : jiraSync.lastSyncStatus === "failed"
         ? `Last sync failed${jiraSync.lastSyncError ? `: ${jiraSync.lastSyncError}` : ""}. Previous data was preserved — nothing was lost.`
-        : "Jira has never been synced yet.",
+        : "Jira has never been synced yet.") + scopeSuffix,
   });
 
   entries.push({

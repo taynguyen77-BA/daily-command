@@ -5,7 +5,8 @@ import { useCommandCenter } from "@/components/command-center/use-command-center
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
-import { checkJiraConfigured } from "@/lib/command-center/datasource/jira-source";
+import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
+import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import { computeDataHealth } from "@/lib/command-center/data-health";
 import { getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
 import { getCacheStats } from "@/lib/command-center/ai/ai-cache";
@@ -15,7 +16,7 @@ import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadin
 import { isArtifactStale, rebuildDraftFromSourceRef } from "@/lib/command-center/communicate";
 import { computeUsageSummary } from "@/lib/command-center/usage";
 import { ArtifactEditor } from "@/components/command-center/ArtifactEditor";
-import type { ArtifactDraft, ArtifactRecord, JiraConformanceReport } from "@/lib/command-center/types";
+import type { ArtifactDraft, ArtifactRecord, JiraConformanceReport, JiraProjectScopeMode, JiraProjectSummary } from "@/lib/command-center/types";
 
 const PILOT_STATUS_STYLE: Record<PilotReadinessStatus, string> = {
   NOT_TESTED: "text-text3",
@@ -92,6 +93,170 @@ function ArtifactHistoryRow({
   );
 }
 
+// V2.3 — Focus Project Scope picker. Lives inside Data & Settings (§6 — no new settings
+// page). Local editing state is separate from the persisted `state.jiraProjectScope` until
+// "Save Focus" is clicked (§10 — narrowing scope must be an explicit, deliberate action, not
+// something that fires on every checkbox click). Project discovery (§5) is fetched on demand
+// (only when the FOCUSED picker is opened), never on every render, and never fetches issues.
+function JiraProjectScopePanel({
+  state,
+  store,
+  jiraConfigured,
+}: {
+  state: ReturnType<typeof useCommandCenter>["state"];
+  store: ReturnType<typeof useCommandCenter>["store"];
+  jiraConfigured: boolean | undefined;
+}) {
+  const persisted = state.jiraProjectScope;
+  const [mode, setMode] = useState<JiraProjectScopeMode>(persisted.mode);
+  const [selected, setSelected] = useState<Set<string>>(new Set(persisted.projectKeys));
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [discovered, setDiscovered] = useState<JiraProjectSummary[] | null>(null);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  // Fallback catalog from whatever Jira projects this browser has already synced (§12 "if
+  // imported/synced data already contains project identifiers, the scope abstraction may be
+  // reused") — shown immediately, before/if live discovery hasn't run yet this session.
+  const knownProjects = useMemo(() => knownJiraProjects(state.data), [state.data]);
+  const catalog = discovered ?? knownProjects;
+  const visibleCatalog = search.trim() ? catalog.filter((p) => p.name.toLowerCase().includes(search.toLowerCase()) || p.key.toLowerCase().includes(search.toLowerCase())) : catalog;
+
+  async function openPicker() {
+    setPickerOpen((o) => !o);
+    if (discovered !== null || discoverLoading) return;
+    setDiscoverLoading(true);
+    setDiscoverError(null);
+    const result = await discoverJiraProjects();
+    setDiscoverLoading(false);
+    if (!result.ok) {
+      setDiscoverError(result.error ?? "Could not discover Jira projects.");
+      return;
+    }
+    setDiscovered(result.projects ?? []);
+  }
+
+  function toggle(key: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setSaved(false);
+  }
+
+  function save() {
+    store.setJiraProjectScope(mode, mode === "FOCUSED" ? Array.from(selected) : undefined);
+    setSaved(true);
+  }
+
+  const dirty = mode !== persisted.mode || (mode === "FOCUSED" && (selected.size !== persisted.projectKeys.length || !persisted.projectKeys.every((k) => selected.has(k))));
+
+  if (!jiraConfigured) {
+    return (
+      <Panel className="p-5">
+        <SectionHeading title="Jira Project Scope" subtitle="Choose which Jira projects Daily Command Center should sync and analyze. Projects outside this scope will not be included in delivery intelligence." />
+        <p className="text-sm text-text3">Project scope is available for Jira data. Configure Jira above to enable it.</p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel className="p-5">
+      <SectionHeading
+        title="Jira Project Scope"
+        subtitle="Choose which Jira projects Daily Command Center should sync and analyze. Projects outside this scope will not be included in delivery intelligence."
+      />
+      <div className="space-y-3 text-sm">
+        <div role="radiogroup" aria-label="Project scope mode" className="flex flex-col gap-2 sm:flex-row sm:gap-4">
+          <label className="flex items-center gap-2 text-text2">
+            <input type="radio" name="jira-scope-mode" checked={mode === "ALL"} onChange={() => { setMode("ALL"); setSaved(false); }} />
+            All Jira Projects
+          </label>
+          <label className="flex items-center gap-2 text-text2">
+            <input type="radio" name="jira-scope-mode" checked={mode === "FOCUSED"} onChange={() => { setMode("FOCUSED"); setSaved(false); }} />
+            Focused Projects
+          </label>
+        </div>
+
+        {mode === "ALL" && (
+          <p className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs text-text2">
+            Daily Command Center will include all discoverable Jira projects. For large Jira environments, Focus Projects is recommended.
+          </p>
+        )}
+
+        {mode === "FOCUSED" && (
+          <div className="space-y-2">
+            <p className="text-xs text-text3">Only selected projects will be included in Jira sync and downstream delivery intelligence.</p>
+            <button
+              onClick={openPicker}
+              aria-expanded={pickerOpen}
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-accent hover:text-text"
+            >
+              {pickerOpen ? "Hide project picker" : `Select projects (${selected.size} selected)`}
+            </button>
+            {pickerOpen && (
+              <div className="rounded-md border border-border bg-surface2 p-3">
+                <label htmlFor="jira-scope-search" className="sr-only">
+                  Search projects
+                </label>
+                <input
+                  id="jira-scope-search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search projects…"
+                  className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs text-text placeholder:text-text3"
+                />
+                <div className="mt-2 max-h-64 space-y-0.5 overflow-y-auto" role="group" aria-label="Focus project selection">
+                  {discoverLoading && <p className="p-2 text-xs text-text3">Discovering Jira projects…</p>}
+                  {discoverError && <p className="p-2 text-xs text-red">{discoverError} — showing previously-synced projects instead.</p>}
+                  {!discoverLoading && visibleCatalog.length === 0 && <p className="p-2 text-xs text-text3">No matching projects.</p>}
+                  {visibleCatalog.map((p) => (
+                    <label key={p.key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-xs text-text2 hover:bg-surface">
+                      <input type="checkbox" checked={selected.has(p.key)} onChange={() => toggle(p.key)} aria-label={`${p.name} (${p.key})`} />
+                      <span className="font-mono text-text3">{p.key}</span>
+                      <span className="truncate text-text">{p.name}</span>
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs font-medium text-text2">{selected.size} project{selected.size === 1 ? "" : "s"} selected</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            onClick={save}
+            disabled={mode === "FOCUSED" && selected.size === 0}
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            Save Focus
+          </button>
+          {dirty && !saved && <span className="text-xs text-yellow">Unsaved changes</span>}
+          {saved && !dirty && <span className="text-xs text-green">Saved</span>}
+        </div>
+
+        <div className="rounded-md border border-border bg-surface2 p-2.5 text-xs">
+          <p className="text-text3">Current scope</p>
+          {persisted.mode === "ALL" ? (
+            <p className="mt-0.5 text-text">ALL — every discoverable Jira project.</p>
+          ) : persisted.projectKeys.length === 0 ? (
+            <p className="mt-0.5 text-red">
+              No Focus Projects selected. Daily Command Center cannot build Jira-based delivery intelligence until at least one project is selected.
+            </p>
+          ) : (
+            <p className="mt-0.5 text-text">{persisted.projectKeys.join(" · ")}</p>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
   good: "text-green",
   warn: "text-yellow",
@@ -140,8 +305,16 @@ export default function DataSettingsPage() {
   const cacheStats = useMemo(() => getCacheStats(), [aiTraceTick]);
   const dataHealth = useMemo(() => computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt), [state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt]);
   const trustDiagnostic = useMemo(
-    () => computeTrustDiagnostic({ dataHealth, dataSource: state.dataSource, jiraSync: state.jiraSync, claudeAvailable, latestAiProviderState: aiTrace[0]?.providerState }),
-    [dataHealth, state.dataSource, state.jiraSync, claudeAvailable, aiTrace]
+    () =>
+      computeTrustDiagnostic({
+        dataHealth,
+        dataSource: state.dataSource,
+        jiraSync: state.jiraSync,
+        claudeAvailable,
+        latestAiProviderState: aiTrace[0]?.providerState,
+        jiraProjectScope: state.jiraProjectScope,
+      }),
+    [dataHealth, state.dataSource, state.jiraSync, claudeAvailable, aiTrace, state.jiraProjectScope]
   );
   const pilotChecklist = useMemo(
     () => buildLivePilotChecklist({ jiraConfigured: !!jiraStatus?.configured, conformance, conformanceRunning: conformanceLoading, sync: state.jiraSync, dataHealth }),
@@ -156,7 +329,13 @@ export default function DataSettingsPage() {
   async function runConformance() {
     setConformanceLoading(true);
     try {
-      const res = await fetch("/api/command-center/jira/conformance");
+      // V2.3 §19 — the currently-configured Focus Project Scope is sent along so a live
+      // conformance run honestly reports against the same scope production sync would use.
+      const params = new URLSearchParams({ scopeMode: state.jiraProjectScope.mode });
+      if (state.jiraProjectScope.mode === "FOCUSED") {
+        for (const key of state.jiraProjectScope.projectKeys) params.append("projectKey", key);
+      }
+      const res = await fetch(`/api/command-center/jira/conformance?${params.toString()}`);
       setConformance((await res.json()) as JiraConformanceReport);
     } finally {
       setConformanceLoading(false);
@@ -392,6 +571,7 @@ export default function DataSettingsPage() {
                   <span>Issues fetched: {sync.recordsFetched ?? 0}</span>
                   <span>Issues changed: {(sync.recordsCreated ?? 0) + (sync.recordsUpdated ?? 0)}</span>
                   <span>Projects: {sync.projectsDiscovered ?? "—"}</span>
+                  <span>Jira scope: {sync.scopeMode === "FOCUSED" ? `Focused (${sync.focusedProjectCount ?? 0})` : "All"}</span>
                   <span>Scope changes: {sync.scopeChangesDetected ?? "—"}</span>
                   <span>Pages: {sync.pages ?? "—"}</span>
                   <span>Changelog requests: {sync.changelogRequests ?? "—"}</span>
@@ -410,6 +590,8 @@ export default function DataSettingsPage() {
           )}
         </div>
       </Panel>
+
+      <JiraProjectScopePanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
 
       <Panel className="p-5">
         <SectionHeading title="Jira Conformance" subtitle="Runs the same connector code (pagination, mapping, error classification) against fixtures — or, when Jira is configured, the real API — never a reimplementation." />
@@ -438,7 +620,10 @@ export default function DataSettingsPage() {
               )}
               <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
                 <p className="text-text3">Projects</p>
-                <p className="font-display text-text">{conformance.projectsDiscovered ?? "—"}</p>
+                <p className="font-display text-text">
+                  {conformance.projectsDiscovered ?? "—"}
+                  {conformance.scopeMode === "FOCUSED" && <span className="ml-1 text-xs text-text3">({conformance.focusedProjectCount ?? 0} in scope)</span>}
+                </p>
               </div>
               <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
                 <p className="text-text3">Issues</p>
@@ -613,6 +798,26 @@ export default function DataSettingsPage() {
             <p className="font-display text-text">{dataHealth.totalWorkItems}</p>
           </div>
         </div>
+        {/* V2.3 §17 — makes scope visible in Data Health without introducing a blended
+            "scope score"; a plain fact, styled like the trust-diagnostic rows above. */}
+        {state.dataSource === "jira" && (
+          <div className="mt-3 rounded-md border border-border bg-surface2 p-3 text-xs">
+            <p className="font-semibold uppercase tracking-wide text-text3">Jira Scope</p>
+            {state.jiraProjectScope.mode === "FOCUSED" ? (
+              <p className="mt-1 text-text2">
+                <span className="text-text">FOCUSED</span> — {state.jiraProjectScope.projectKeys.length} of {state.jiraSync.projectsDiscovered ?? "—"} Jira projects selected.
+                <br />
+                <span className="text-text3">Why it matters: Daily Command Center analyzes only these projects.</span>
+              </p>
+            ) : (
+              <p className="mt-1 text-text2">
+                <span className="text-text">ALL PROJECTS</span> — {state.jiraSync.projectsDiscovered ?? "—"} Jira projects available.
+                <br />
+                <span className="text-yellow">Large Jira environments may increase sync volume and processing time — consider Select Focus Projects above.</span>
+              </p>
+            )}
+          </div>
+        )}
         {dataHealth.remediation && dataHealth.remediation.length > 0 && (
           <div className="mt-4 space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-text3">What to do about it</p>

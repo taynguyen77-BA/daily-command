@@ -3,16 +3,17 @@
 // client or touches credentials. Same "dumb caller, server does the real work" pattern as
 // ClaudeProvider (see ../ai/claude-provider.ts).
 
-import type { CommandCenterData, JiraErrorKind } from "../types";
+import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary } from "../types";
 import type { DataSourceProvider, DataSourceSyncResult } from "./types";
 
 const SYNC_ENDPOINT = "/api/command-center/jira/sync";
 const STATUS_ENDPOINT = "/api/command-center/jira/status";
+const PROJECTS_ENDPOINT = "/api/command-center/jira/projects";
 
 export class JiraDataSource implements DataSourceProvider {
   readonly type = "jira" as const;
 
-  async sync(options?: { sinceIso?: string }): Promise<DataSourceSyncResult> {
+  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[] }): Promise<DataSourceSyncResult> {
     try {
       const res = await fetch(SYNC_ENDPOINT, {
         method: "POST",
@@ -32,6 +33,9 @@ export class JiraDataSource implements DataSourceProvider {
         warnings?: string[];
         pages?: number;
         changelogRequests?: number;
+        scopeMode?: JiraProjectScopeMode;
+        focusedProjectCount?: number;
+        focusedProjects?: string[];
       };
       if (!res.ok || !json.ok) {
         return { ok: false, error: json.error ?? `Jira sync failed (${res.status}).`, errorKind: json.errorKind ?? "unknown" };
@@ -47,6 +51,9 @@ export class JiraDataSource implements DataSourceProvider {
         warnings: json.warnings,
         pages: json.pages,
         changelogRequests: json.changelogRequests,
+        scopeMode: json.scopeMode,
+        focusedProjectCount: json.focusedProjectCount,
+        focusedProjects: json.focusedProjects,
       };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Network error contacting the sync endpoint.", errorKind: "network-error" };
@@ -61,5 +68,18 @@ export async function checkJiraConfigured(): Promise<{ configured: boolean; base
     return (await res.json()) as { configured: boolean; baseUrlHost?: string };
   } catch {
     return { configured: false };
+  }
+}
+
+/** V2.3 §5 — Focus Project Scope project discovery. Never fetches issues — see the
+ *  /api/command-center/jira/projects route. */
+export async function discoverJiraProjects(): Promise<{ ok: boolean; projects?: JiraProjectSummary[]; error?: string }> {
+  try {
+    const res = await fetch(PROJECTS_ENDPOINT, { method: "GET" });
+    const json = (await res.json()) as { ok: boolean; projects?: JiraProjectSummary[]; error?: string };
+    if (!res.ok || !json.ok) return { ok: false, error: json.error ?? `Project discovery failed (${res.status}).` };
+    return { ok: true, projects: json.projects ?? [] };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error contacting the project discovery endpoint." };
   }
 }

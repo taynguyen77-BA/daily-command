@@ -18,11 +18,14 @@ const GROUPS: { statuses: DecisionStatus[]; label: string }[] = [
 ];
 
 export default function DecisionLogPage() {
-  const { state, store, proactive } = useCommandCenter();
+  const { state, store, proactive, filteredData } = useCommandCenter();
 
+  // V2.3 §11 — Decision Radar/Conflicts is one of the engines the spec explicitly calls out
+  // as needing to naturally operate on the scoped dataset; reads `filteredData` (scope +
+  // the global filter already applied) rather than raw `state.data`.
   const conflicts = useMemo(
-    () => (state.loaded ? detectDecisionConflictCandidates(state.data, state.isDemo ? "demo" : "manual") : []),
-    [state.loaded, state.data, state.isDemo]
+    () => (state.loaded ? detectDecisionConflictCandidates(filteredData, state.isDemo ? "demo" : "manual") : []),
+    [state.loaded, filteredData, state.isDemo]
   );
   const conflictByDecisionId = new Map(conflicts.map((c) => [c.decision.id, c]));
   const radarByDecisionId = new Map((proactive?.decisionRadar ?? []).map((r) => [r.decisionId, r]));
@@ -38,15 +41,15 @@ export default function DecisionLogPage() {
     );
   }
 
-  const grouped = (statuses: DecisionStatus[]): Decision[] => state.data.decisions.filter((d) => statuses.includes(d.status));
+  const grouped = (statuses: DecisionStatus[]): Decision[] => filteredData.decisions.filter((d) => statuses.includes(d.status));
   const shown = new Set(GROUPS.flatMap((g) => g.statuses));
-  const other = state.data.decisions.filter((d) => !shown.has(d.status));
+  const other = filteredData.decisions.filter((d) => !shown.has(d.status));
 
   return (
     <div className="space-y-6 pb-16">
       <SectionHeading title="Decision Log" subtitle="Decision Memory — every decision, its status, and whether current data still supports it." />
 
-      {state.data.decisions.length === 0 && (
+      {filteredData.decisions.length === 0 && (
         <p className="py-10 text-center text-sm text-text3">No decisions recorded yet.</p>
       )}
 

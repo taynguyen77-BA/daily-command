@@ -13,7 +13,7 @@ import { discoverJiraDataShape } from "./shape-discovery";
 import { computeMappingDrift } from "./mapping-drift";
 import { fixtureFetch, FIXTURE_ISSUE_DELETED_LINK, FIXTURE_ISSUE_MALFORMED_MISSING_FIELDS, FIXTURE_ISSUE_UNKNOWN_STATUS } from "./fixtures";
 import type { JiraConnectionConfig, JiraIssue } from "./types";
-import type { JiraConformanceCheck, JiraConformanceReport, JiraFieldSupport } from "../types";
+import type { JiraConformanceCheck, JiraConformanceReport, JiraFieldSupport, JiraProjectScopeMode } from "../types";
 
 /** V1.7 §7 — a property of this app's Jira integration CODE, not of any one sync's data.
  *  Computed once; never claims a field is supported just because a fixture happened to
@@ -48,9 +48,9 @@ async function runProjectsCheck(fetchImpl: FetchLike, config: JiraConnectionConf
   return { checks, projectsCount: result.data.length };
 }
 
-async function runIssuesCheck(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<{ checks: JiraConformanceCheck[]; issues?: JiraIssue[]; method?: "jql-cursor" | "classic-offset" }> {
+async function runIssuesCheck(fetchImpl: FetchLike, config: JiraConnectionConfig, projectKeys?: string[]): Promise<{ checks: JiraConformanceCheck[]; issues?: JiraIssue[]; method?: "jql-cursor" | "classic-offset" }> {
   const checks: JiraConformanceCheck[] = [];
-  const result = await fetchJiraIssuesWith(fetchImpl, config, {});
+  const result = await fetchJiraIssuesWith(fetchImpl, config, { projectKeys });
   checks.push({ capability: "Issue retrieval", status: result.ok ? "PASS" : "FAIL", detail: result.ok ? `Fetched ${result.recordsFetched} issue(s).` : result.error });
   if (!result.ok) return { checks };
 
@@ -141,17 +141,27 @@ async function runMalformedFieldChecks(): Promise<JiraConformanceCheck[]> {
  * fails, the report honestly says so (`source: "live-failed"`) rather than silently
  * mislabeling the result as either "fixtures" (never used) or "live" (never verified).
  */
-export async function runJiraConformance(options?: { fetchImpl: FetchLike; config: JiraConnectionConfig }): Promise<JiraConformanceReport> {
+export async function runJiraConformance(options?: {
+  fetchImpl: FetchLike;
+  config: JiraConnectionConfig;
+  // V2.3 §19 — when the caller passes the currently-configured Focus Project Scope, the
+  // live-mode issues/projects checks below honestly restrict themselves to it, same as
+  // production sync (§7) — this harness must never claim to validate "all projects" when
+  // the app itself would only ever request a focused subset.
+  scope?: { mode: JiraProjectScopeMode; projectKeys: string[] };
+}): Promise<JiraConformanceReport> {
   const attemptingLive = !!options;
   const fetchImpl = options?.fetchImpl ?? fixtureFetch();
   const config: JiraConnectionConfig = options?.config ?? { baseUrl: "https://fixture.invalid", email: "fixture@example.test", apiToken: "fixture-token-not-real" };
+  const scope = options?.scope;
   const startedAtDate = new Date();
   const startedAt = startedAtDate.getTime();
 
   const projectsResult = await runProjectsCheck(fetchImpl, config);
   const live = attemptingLive && projectsResult.projectsCount !== undefined;
   const liveAttemptFailed = attemptingLive && !live;
-  const issuesResult = await runIssuesCheck(fetchImpl, config);
+  const scopedProjectKeys = scope?.mode === "FOCUSED" ? scope.projectKeys : undefined;
+  const issuesResult = await runIssuesCheck(fetchImpl, config, scopedProjectKeys);
   const cursorCapability = await detectJiraSearchCapability(fetchImpl, config);
   const dataContract = issuesResult.issues ? evaluateJiraDataContract(issuesResult.issues) : undefined;
   const shapeDiscovery = issuesResult.issues ? discoverJiraDataShape(issuesResult.issues) : undefined;
@@ -221,5 +231,8 @@ export async function runJiraConformance(options?: { fetchImpl: FetchLike; confi
     dataContract,
     shapeDiscovery,
     mappingDrift,
+    scopeMode: scope?.mode,
+    focusedProjectCount: scope?.mode === "FOCUSED" ? scope.projectKeys.length : undefined,
+    focusedProjectKeys: scope?.mode === "FOCUSED" ? scope.projectKeys : undefined,
   };
 }

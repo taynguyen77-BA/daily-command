@@ -126,6 +126,10 @@ import { communicationArtifactResponseSchema } from "../src/lib/command-center/a
 import type { WhyShouldICareContent } from "../src/lib/command-center/why-should-i-care";
 import type { DecisionOptionsResult, Project } from "../src/lib/command-center/types";
 
+// V2.3 — Focus Project Scope & Jira Ingestion Guard
+import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, findOutOfScopeMention, knownJiraProjects, parseJiraProjectScope, resolveEffectiveProjectKeys } from "../src/lib/command-center/jira/project-scope";
+import type { JiraProjectScope } from "../src/lib/command-center/types";
+
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
@@ -4162,6 +4166,408 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   const result = await fetchJiraIssuesWith(strictInstanceFetch, boundedConfig, {});
   ok("V2.2.4 Jira bounded JQL", result.ok, `a first full sync against an instance that enforces bounded JQL now succeeds (got ${result.ok ? "ok" : "error: " + (result as { error?: string }).error})`);
   ok("V2.2.4 Jira bounded JQL", sentJql === "project is not EMPTY order by updated desc", "the exact JQL sent to a real instance matches the bounded-query workaround");
+}
+
+// ===== V2.3 — Focus Project Scope & Jira Ingestion Guard =====
+
+// ----- Scope model: parseJiraProjectScope — malformed persisted data always degrades to a
+// safe default, never crashes, never silently invents a different mode than what's valid. -----
+{
+  ok("V2.3 Scope model", parseJiraProjectScope(undefined).mode === "ALL", "missing scope defaults to ALL — reproduces exact pre-V2.3 behavior");
+  ok("V2.3 Scope model", parseJiraProjectScope(undefined).projectKeys.length === 0, "missing scope defaults to an empty projectKeys array");
+  ok("V2.3 Scope model", parseJiraProjectScope(null).mode === "ALL", "null scope defaults to ALL rather than crashing");
+  ok("V2.3 Scope model", parseJiraProjectScope("garbage-string").mode === "ALL", "a wrong-typed (string) scope value defaults to ALL rather than crashing");
+  ok("V2.3 Scope model", parseJiraProjectScope(42).mode === "ALL", "a wrong-typed (number) scope value defaults to ALL rather than crashing");
+  ok("V2.3 Scope model", parseJiraProjectScope([]).mode === "ALL", "a wrong-typed (array) scope value defaults to ALL rather than crashing");
+
+  const focused = parseJiraProjectScope({ mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] });
+  ok("V2.3 Scope model", focused.mode === "FOCUSED" && focused.projectKeys.length === 2, "a well-formed FOCUSED scope with multiple projects round-trips exactly");
+  ok("V2.3 Scope model", focused.projectKeys.includes("JPMC") && focused.projectKeys.includes("UBS"), "both selected project keys are preserved");
+
+  const emptyFocused = parseJiraProjectScope({ mode: "FOCUSED", projectKeys: [] });
+  ok("V2.3 Scope model", emptyFocused.mode === "FOCUSED" && emptyFocused.projectKeys.length === 0, "an explicit FOCUSED scope with zero projects is preserved as-is — never silently reinterpreted as ALL (§23)");
+
+  const invalidMode = parseJiraProjectScope({ mode: "SOMETHING_WEIRD", projectKeys: ["JPMC"] });
+  ok("V2.3 Scope model", invalidMode.mode === "ALL", "an unrecognized mode string falls back to ALL rather than being trusted as-is");
+  ok("V2.3 Scope model", invalidMode.projectKeys.includes("JPMC"), "projectKeys are still preserved even when mode itself was invalid — a later switch back to FOCUSED doesn't lose the prior selection");
+
+  const nonArrayKeys = parseJiraProjectScope({ mode: "FOCUSED", projectKeys: "JPMC" });
+  ok("V2.3 Scope model", Array.isArray(nonArrayKeys.projectKeys) && nonArrayKeys.projectKeys.length === 0, "a non-array projectKeys value (e.g. a bare string) falls back to an empty array rather than crashing");
+
+  const dupes = parseJiraProjectScope({ mode: "FOCUSED", projectKeys: ["JPMC", "JPMC", "UBS", "JPMC"] });
+  ok("V2.3 Scope model", dupes.projectKeys.length === 2, "duplicate project keys are de-duplicated (got " + dupes.projectKeys.length + ")");
+
+  const junkEntries = parseJiraProjectScope({ mode: "FOCUSED", projectKeys: [123, null, "JPMC", "", "  ", undefined] });
+  ok("V2.3 Scope model", junkEntries.projectKeys.length === 1 && junkEntries.projectKeys[0] === "JPMC", "non-string and blank entries in projectKeys are dropped, only the one genuine key survives");
+
+  ok("V2.3 Scope model", DEFAULT_JIRA_PROJECT_SCOPE.mode === "ALL" && DEFAULT_JIRA_PROJECT_SCOPE.projectKeys.length === 0, "the exported default scope constant is ALL with no projects, matching pre-V2.3 behavior");
+}
+
+// ----- Backward compatibility: parseStoredState — a V2.2 (pre-V2.3) persisted blob, and a
+// malformed jiraProjectScope, must both load safely. -----
+{
+  const v22Blob = JSON.stringify({
+    schemaVersion: 5,
+    data: emptyData(),
+    snapshotHistory: [],
+    loaded: true,
+    isDemo: false,
+    eodHistory: [],
+    dataSource: "jira",
+    jiraSync: { lastSyncStatus: "success" },
+    filters: {},
+    attentionState: {},
+    memoryEvents: [],
+    personalPlan: [],
+    artifacts: [],
+    usageCounters: {},
+    // no jiraProjectScope key at all — exactly what a real V2.2 localStorage blob looks like
+  });
+  const migrated = parseStoredState(v22Blob);
+  ok("V2.3 Backward compatibility", migrated.jiraProjectScope.mode === "ALL", "a V2.2 state blob with no jiraProjectScope key at all loads with the safe ALL default");
+  ok("V2.3 Backward compatibility", migrated.dataSource === "jira" && migrated.jiraSync.lastSyncStatus === "success", "every other V2.2 field still loads unchanged alongside the new default scope");
+
+  const malformedBlob = JSON.stringify({ ...JSON.parse(v22Blob), jiraProjectScope: "not-an-object" });
+  const migratedMalformed = parseStoredState(malformedBlob);
+  ok("V2.3 Backward compatibility", migratedMalformed.jiraProjectScope.mode === "ALL", "a malformed (wrong-typed) jiraProjectScope value never crashes parseStoredState — falls back to ALL");
+
+  const nullScopeBlob = JSON.stringify({ ...JSON.parse(v22Blob), jiraProjectScope: null });
+  ok("V2.3 Backward compatibility", parseStoredState(nullScopeBlob).jiraProjectScope.mode === "ALL", "a null jiraProjectScope value never crashes parseStoredState — falls back to ALL");
+
+  const totallyMalformedJson = "{not valid json at all";
+  const fallbackState = parseStoredState(totallyMalformedJson);
+  ok("V2.3 Backward compatibility", fallbackState.jiraProjectScope.mode === "ALL" && fallbackState.jiraProjectScope.projectKeys.length === 0, "totally invalid JSON still produces a pristine state with a safe default scope, never a crash");
+}
+
+// ----- applyProjectScope: the data-boundary enforcement point. Fixture models a realistic
+// mixed dataset: two Jira projects (JPMC, UBS) plus one non-Jira (Demo/Local Import) project,
+// each with a work item, dependency, decision, action, communication, and risk. -----
+{
+  const scopeFixtureData = {
+    ...emptyData(),
+    clients: [
+      { id: "jira-client-jpmc", name: "JPMorgan Chase" },
+      { id: "jira-client-ubs", name: "UBS" },
+      { id: "client-internal", name: "Internal" },
+    ],
+    projects: [
+      { id: "jira-project-JPMC", name: "JPMC", clientId: "jira-client-jpmc", status: "on-track" as const, sourceType: "jira" as const, sourceId: "JPMC" },
+      { id: "jira-project-UBS", name: "UBS", clientId: "jira-client-ubs", status: "on-track" as const, sourceType: "jira" as const, sourceId: "UBS" },
+      { id: "internal-1", name: "Internal Tools", clientId: "client-internal", status: "on-track" as const },
+    ],
+    workItems: [
+      makeItem({ id: "wi-jpmc-1", key: "JPMC-1", title: "JPMC onboarding flow", projectId: "jira-project-JPMC", clientId: "jira-client-jpmc", sourceType: "jira", sourceId: "JPMC-1", riskIds: [], dependencyIds: ["dep-jpmc-1"] }),
+      makeItem({ id: "wi-ubs-1", key: "UBS-1", title: "UBS settlement report", projectId: "jira-project-UBS", clientId: "jira-client-ubs", sourceType: "jira", sourceId: "UBS-1", riskIds: [], dependencyIds: ["dep-ubs-1"] }),
+      makeItem({ id: "wi-demo-1", key: "INT-1", title: "Internal tooling task", projectId: "internal-1", clientId: "client-internal", riskIds: [], dependencyIds: [] }),
+    ],
+    dependencies: [
+      { id: "dep-jpmc-1", workItemId: "wi-jpmc-1", description: "Blocked by JPMC-0", dependsOnTeam: "JPMC", status: "unresolved" as const, raisedDate: TODAY },
+      { id: "dep-ubs-1", workItemId: "wi-ubs-1", description: "Blocked by UBS-0", dependsOnTeam: "UBS", status: "unresolved" as const, raisedDate: TODAY },
+    ],
+    risks: [
+      { id: "risk-jpmc", projectId: "jira-project-JPMC", title: "JPMC risk", level: "HIGH" as const, reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open" as const, confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["wi-jpmc-1"] },
+      { id: "risk-ubs", projectId: "jira-project-UBS", title: "UBS risk", level: "HIGH" as const, reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open" as const, confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["wi-ubs-1"] },
+      { id: "risk-none", projectId: "internal-1", title: "Unlinked risk", level: "LOW" as const, reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open" as const, confidence: 0.5, detectedAt: TODAY, sourceWorkItemIds: [] },
+    ],
+    decisions: [
+      { id: "dec-jpmc", projectId: "jira-project-JPMC", title: "JPMC decision", status: "ACTIVE" as const, description: "x" },
+      { id: "dec-ubs", projectId: "jira-project-UBS", title: "UBS decision", status: "ACTIVE" as const, description: "x" },
+      { id: "dec-demo", projectId: "internal-1", title: "Internal decision", status: "ACTIVE" as const, description: "x" },
+    ],
+    actions: [
+      { id: "action-jpmc", title: "JPMC action", why: "x", relatedWorkItemId: "wi-jpmc-1", status: "open" as const, estimateMinutes: 10, createdAt: TODAY },
+      { id: "action-ubs", title: "UBS action", why: "x", relatedWorkItemId: "wi-ubs-1", status: "open" as const, estimateMinutes: 10, createdAt: TODAY },
+      { id: "action-demo", title: "Internal action", why: "x", relatedWorkItemId: "wi-demo-1", status: "open" as const, estimateMinutes: 10, createdAt: TODAY },
+      { id: "action-none", title: "Unlinked action", why: "x", status: "open" as const, estimateMinutes: 10, createdAt: TODAY },
+    ],
+    communications: [
+      { id: "comm-jpmc", workItemId: "wi-jpmc-1", audience: "Client" as const, who: "x", why: "x", whatTheyNeedToKnow: "x", suggestedMessage: "x", status: "open" as const },
+      { id: "comm-ubs", workItemId: "wi-ubs-1", audience: "Client" as const, who: "x", why: "x", whatTheyNeedToKnow: "x", suggestedMessage: "x", status: "open" as const },
+      { id: "comm-demo", workItemId: "wi-demo-1", audience: "Client" as const, who: "x", why: "x", whatTheyNeedToKnow: "x", suggestedMessage: "x", status: "open" as const },
+      { id: "comm-none", audience: "Client" as const, who: "x", why: "x", whatTheyNeedToKnow: "x", suggestedMessage: "x", status: "open" as const },
+    ],
+    requirements: [
+      { id: "req-jpmc", projectId: "jira-project-JPMC", title: "JPMC req", status: "approved" as const, businessImpact: 3 as const },
+      { id: "req-ubs", projectId: "jira-project-UBS", title: "UBS req", status: "approved" as const, businessImpact: 3 as const },
+    ],
+  };
+
+  const allScope: JiraProjectScope = { mode: "ALL", projectKeys: [] };
+  const identityResult = applyProjectScope(scopeFixtureData, allScope);
+  ok("V2.3 applyProjectScope", identityResult === scopeFixtureData, "ALL mode is a true no-op — returns the exact same object reference, matching pre-V2.3 behavior with zero overhead");
+
+  const focusedScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: ["JPMC"] };
+  const scoped = applyProjectScope(scopeFixtureData, focusedScope);
+
+  ok("V2.3 applyProjectScope", scoped.projects.some((p) => p.id === "jira-project-JPMC"), "the focused Jira project (JPMC) is kept");
+  ok("V2.3 applyProjectScope", !scoped.projects.some((p) => p.id === "jira-project-UBS"), "the out-of-scope Jira project (UBS) is excluded");
+  ok("V2.3 applyProjectScope", scoped.projects.some((p) => p.id === "internal-1"), "a non-Jira (Demo/Local Import) project is never affected by Jira scope");
+
+  ok("V2.3 applyProjectScope", scoped.workItems.some((w) => w.id === "wi-jpmc-1"), "the in-scope Jira work item is kept");
+  ok("V2.3 applyProjectScope", !scoped.workItems.some((w) => w.id === "wi-ubs-1"), "the out-of-scope Jira work item is excluded");
+  ok("V2.3 applyProjectScope", scoped.workItems.some((w) => w.id === "wi-demo-1"), "a non-Jira work item is never excluded by Jira scope");
+
+  ok("V2.3 applyProjectScope", scoped.dependencies.some((d) => d.id === "dep-jpmc-1"), "a dependency belonging to an in-scope work item is kept");
+  ok("V2.3 applyProjectScope", !scoped.dependencies.some((d) => d.id === "dep-ubs-1"), "a dependency belonging to an out-of-scope work item is excluded");
+
+  ok("V2.3 applyProjectScope", scoped.risks.some((r) => r.id === "risk-jpmc"), "a risk sourced from an in-scope work item is kept");
+  ok("V2.3 applyProjectScope", !scoped.risks.some((r) => r.id === "risk-ubs"), "a risk sourced only from an out-of-scope work item is excluded");
+  ok("V2.3 applyProjectScope", scoped.risks.some((r) => r.id === "risk-none"), "a risk with no sourceWorkItemIds (never tied to a specific item) is never excluded");
+
+  ok("V2.3 applyProjectScope", scoped.decisions.some((d) => d.id === "dec-jpmc"), "an in-scope decision is kept");
+  ok("V2.3 applyProjectScope", !scoped.decisions.some((d) => d.id === "dec-ubs"), "an out-of-scope decision is excluded");
+  ok("V2.3 applyProjectScope", scoped.decisions.some((d) => d.id === "dec-demo"), "a non-Jira decision is never excluded");
+
+  ok("V2.3 applyProjectScope", scoped.actions.some((a) => a.id === "action-jpmc"), "an in-scope action is kept");
+  ok("V2.3 applyProjectScope", !scoped.actions.some((a) => a.id === "action-ubs"), "an out-of-scope action is excluded");
+  ok("V2.3 applyProjectScope", scoped.actions.some((a) => a.id === "action-none"), "an action with no relatedWorkItemId is never excluded");
+
+  ok("V2.3 applyProjectScope", scoped.communications.some((c) => c.id === "comm-jpmc"), "an in-scope communication is kept");
+  ok("V2.3 applyProjectScope", !scoped.communications.some((c) => c.id === "comm-ubs"), "an out-of-scope communication is excluded");
+  ok("V2.3 applyProjectScope", scoped.communications.some((c) => c.id === "comm-none"), "a communication with no workItemId is never excluded");
+
+  ok("V2.3 applyProjectScope", scoped.requirements.some((r) => r.id === "req-jpmc"), "an in-scope requirement is kept");
+  ok("V2.3 applyProjectScope", !scoped.requirements.some((r) => r.id === "req-ubs"), "an out-of-scope requirement is excluded");
+
+  ok("V2.3 applyProjectScope", scoped.clients.some((c) => c.id === "jira-client-jpmc"), "a client still referenced by an in-scope project is kept");
+  ok("V2.3 applyProjectScope", !scoped.clients.some((c) => c.id === "jira-client-ubs"), "a client ONLY reachable through an excluded Jira project is dropped");
+  ok("V2.3 applyProjectScope", scoped.clients.some((c) => c.id === "client-internal"), "a client backing a non-Jira project is never affected");
+
+  // §8 — multiple projects, and a project whose name contains a space.
+  const multiScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] };
+  const multiScoped = applyProjectScope(scopeFixtureData, multiScope);
+  ok("V2.3 applyProjectScope", multiScoped.projects.length === 3 && multiScoped.workItems.length === 3, "selecting BOTH Jira projects keeps everything — multi-project selection is additive, not exclusive");
+
+  // §23 — an EMPTY focused list must exclude every Jira project, not silently become ALL.
+  const emptyFocusScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: [] };
+  const emptyScoped = applyProjectScope(scopeFixtureData, emptyFocusScope);
+  ok("V2.3 applyProjectScope", !emptyScoped.projects.some((p) => p.sourceType === "jira"), "an empty FOCUSED project list excludes every Jira project — never silently reinterpreted as ALL");
+  ok("V2.3 applyProjectScope", emptyScoped.workItems.length === 1 && emptyScoped.workItems[0].id === "wi-demo-1", "with zero focused projects, only the non-Jira work item remains");
+
+  // ----- AI context excludes out-of-scope data (§16, §24) -----
+  const scopedForAI = applyProjectScope(scopeFixtureData, focusedScope);
+  const derivedAI = deriveData(scopedForAI, null, TODAY);
+  const aiContext = buildAIContext(scopedForAI, derivedAI, null, TODAY, { dataSourceType: "jira" });
+  ok("V2.3 AI context scope", !aiContext.topScores.some((s) => /UBS/i.test(s.title)), "AI context topScores built from scoped data contains no trace of the out-of-scope project's work items");
+  ok("V2.3 AI context scope", !aiContext.topRisks.some((r) => /UBS/i.test(r.title)), "AI context topRisks contains no trace of the out-of-scope project's risks");
+  ok("V2.3 AI context scope", aiContext.topScores.some((s) => /JPMC/i.test(s.title)), "AI context DOES include the in-scope project's work items — scoping never accidentally hides everything");
+  ok("V2.3 AI context scope", aiContext.topRisks.some((r) => /JPMC/i.test(r.title)), "AI context DOES include the in-scope project's risks");
+}
+
+// ----- Jira query behavior: ALL vs FOCUSED, combined with incremental sync, and the
+// operator-configured JIRA_PROJECT_KEYS env restriction (§7). -----
+{
+  ok("V2.3 Jira query", resolveEffectiveProjectKeys(null, { mode: "ALL", projectKeys: [] }) === undefined, "ALL mode with no env restriction resolves to no restriction at all — unchanged pre-V2.3 behavior");
+  ok("V2.3 Jira query", JSON.stringify(resolveEffectiveProjectKeys(["A", "B"], { mode: "ALL", projectKeys: [] })) === JSON.stringify(["A", "B"]), "ALL mode with an env restriction is untouched by Focus Project Scope — the env var alone still governs");
+
+  const focusedNoEnv = resolveEffectiveProjectKeys(null, { mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] });
+  ok("V2.3 Jira query", JSON.stringify(focusedNoEnv) === JSON.stringify(["JPMC", "UBS"]), "FOCUSED mode with no env restriction resolves to exactly the user's selected projects");
+
+  const focusedWithOverlappingEnv = resolveEffectiveProjectKeys(["JPMC", "BARC"], { mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] });
+  ok("V2.3 Jira query", JSON.stringify(focusedWithOverlappingEnv) === JSON.stringify(["JPMC"]), "FOCUSED mode combined with a server env restriction resolves to their intersection, never the union");
+
+  const focusedWithNoOverlapEnv = resolveEffectiveProjectKeys(["BARC"], { mode: "FOCUSED", projectKeys: ["JPMC"] });
+  ok("V2.3 Jira query", Array.isArray(focusedWithNoOverlapEnv) && focusedWithNoOverlapEnv.length === 0, "zero overlap between the focused selection and the env restriction resolves to an explicit empty array (never undefined/unbounded)");
+
+  // §7-8 — the JQL restriction clause itself, for multiple projects.
+  ok("V2.3 Jira query", buildIssuesJql({ projectKeys: ["JPMC", "UBS"] }) === 'project in ("JPMC","UBS") order by updated desc', "FOCUSED mode with multiple projects produces a correctly-quoted `project in (...)` JQL restriction");
+  ok("V2.3 Jira query", buildIssuesJql({ projectKeys: ["JPMC"] }) === 'project in ("JPMC") order by updated desc', "FOCUSED mode with a single project still produces the restriction");
+
+  // §7 — incremental sync + focused scope combine with AND, neither clause is dropped.
+  const combined = buildIssuesJql({ sinceIso: "2026-08-01", projectKeys: ["JPMC", "UBS"] });
+  ok("V2.3 Jira query", combined === 'project in ("JPMC","UBS") AND updated >= "2026-08-01" order by updated desc', "an incremental sync's `updated >=` cursor and a focused project restriction combine into a single AND-ed JQL clause");
+  ok("V2.3 Jira query", combined.includes("project in"), "the combined JQL still carries the project restriction");
+  ok("V2.3 Jira query", combined.includes('updated >= "2026-08-01"'), "the combined JQL still carries the incremental cursor");
+
+  // §21 — pagination + focused scope: confirm the actual fetch sends the scoped JQL.
+  let sentJql: string | undefined;
+  let sentBody: { projectKeys?: unknown } | undefined;
+  const scopedFetch: FetchLike = async (url, init) => {
+    if (url.includes("/search/jql")) {
+      const body = JSON.parse((init as { body?: string })?.body ?? "{}") as { jql?: string };
+      sentJql = body.jql;
+      return { ok: true, status: 200, json: async () => ({ issues: [makeJiraIssue({ key: "JPMC-1" })], isLast: true }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  const scopedFetchResult = await fetchJiraIssuesWith(scopedFetch, { baseUrl: "https://acme.atlassian.net", email: "x", apiToken: "x" }, { projectKeys: ["JPMC"] });
+  ok("V2.3 Jira query", scopedFetchResult.ok && scopedFetchResult.recordsFetched === 1, "a focused-scope fetch still succeeds and returns only what the (fixture) instance sent back");
+  ok("V2.3 Jira query", sentJql === 'project in ("JPMC") order by updated desc', "the real HTTP request sent to Jira carries the scoped project restriction — the restriction is enforced BEFORE ingestion, not filtered client-side afterward");
+
+  // §20 — the pre-existing 2000-issue safety cap is untouched by this feature.
+  ok("V2.3 Jira query", JIRA_MAX_ISSUES === 2000, "the existing 2000-issue safety cap constant is unchanged by Focus Project Scope");
+}
+
+// ----- Sync safety: a FOCUSED scope with zero projects must never silently sync everything,
+// and must never touch existing local data (§9, §23). -----
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const workItemCountBefore = commandCenterStore.getSnapshot().data.workItems.length;
+
+  commandCenterStore.setJiraProjectScope("FOCUSED", []);
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().jiraProjectScope.mode === "FOCUSED" && commandCenterStore.getSnapshot().jiraProjectScope.projectKeys.length === 0, "setJiraProjectScope persists an explicit empty FOCUSED scope");
+
+  const emptyFocusedSyncResult = await commandCenterStore.syncJira();
+  ok("V2.3 Sync safety", emptyFocusedSyncResult.ok === false, "a sync attempt with FOCUSED scope and zero selected projects is refused");
+  ok("V2.3 Sync safety", !!emptyFocusedSyncResult.error && /No Focus Projects selected/.test(emptyFocusedSyncResult.error), "the refusal gives an honest, specific reason rather than a generic failure");
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().jiraSync.lastSyncErrorKind === "not-configured", "the refusal is classified as not-configured, proving the guard fired BEFORE any network call was attempted (a real network attempt with no dev server running would classify as network-error instead)");
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().jiraSync.previousDataPreserved === true, "previousDataPreserved is set even for this pre-network refusal — the existing sync-safety contract still holds");
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().data.workItems.length === workItemCountBefore, "existing work-item data is completely untouched by the refused sync");
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().dataSource === "demo", "the active data source is not switched to jira by a refused sync");
+
+  // A real network sync attempt (FOCUSED with real projects, or ALL) still fails safely in
+  // this offline test environment (no dev server) — same pre-existing "Sync safety" contract
+  // this feature must not weaken.
+  commandCenterStore.setJiraProjectScope("FOCUSED", ["JPMC"]);
+  const focusedNetworkResult = await commandCenterStore.syncJira();
+  ok("V2.3 Sync safety", focusedNetworkResult.ok === false, "a real (network) focused sync attempt still fails safely with no server running, rather than throwing");
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().data.workItems.length === workItemCountBefore, "a failed FOCUSED sync (this time an actual network attempt) still never touches existing data");
+  ok("V2.3 Sync safety", commandCenterStore.getSnapshot().jiraSync.scopeMode === "FOCUSED" && commandCenterStore.getSnapshot().jiraSync.focusedProjectCount === 1, "sync diagnostics honestly record which scope this (failed) attempt ran under");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- Scope change semantics: narrowing/switching scope must never delete persisted data
+// (§10) — it only changes the derived view, never `state.data` itself. -----
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const dataRefBefore = commandCenterStore.getSnapshot().data;
+
+  commandCenterStore.setJiraProjectScope("FOCUSED", ["SOME-PROJECT"]);
+  ok("V2.3 Scope change semantics", commandCenterStore.getSnapshot().data === dataRefBefore, "narrowing to FOCUSED never mutates or replaces the persisted data object");
+
+  commandCenterStore.setJiraProjectScope("FOCUSED", []);
+  ok("V2.3 Scope change semantics", commandCenterStore.getSnapshot().data === dataRefBefore, "narrowing all the way to an empty focused list STILL never touches persisted data");
+
+  commandCenterStore.setJiraProjectScope("ALL");
+  ok("V2.3 Scope change semantics", commandCenterStore.getSnapshot().data === dataRefBefore, "switching back to ALL never touches persisted data either — scope only ever controls what's operated on, never triggers deletion");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- Command Bar: scope integrity (§15) — an out-of-scope project mention gets an honest
+// answer, never a live Jira query, and never an empty-looking "nothing found" that could be
+// mistaken for "genuinely nothing is blocked". -----
+{
+  const cmdBarData = {
+    ...emptyData(),
+    projects: [
+      { id: "jira-project-JPMC", name: "JPMC", clientId: "c1", status: "on-track" as const, sourceType: "jira" as const, sourceId: "JPMC" },
+      { id: "jira-project-BARC", name: "Barclays", clientId: "c2", status: "on-track" as const, sourceType: "jira" as const, sourceId: "BARC" },
+    ],
+    workItems: [
+      makeItem({ id: "wi-jpmc", key: "JPMC-1", title: "JPMC item", projectId: "jira-project-JPMC", clientId: "c1", blocked: true, blockerReason: "waiting on legal", sourceType: "jira", sourceId: "JPMC-1" }),
+      makeItem({ id: "wi-barc", key: "BARC-1", title: "Barclays item", projectId: "jira-project-BARC", clientId: "c2", blocked: true, blockerReason: "waiting on infra", sourceType: "jira", sourceId: "BARC-1" }),
+    ],
+  };
+  const cmdBarScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: ["JPMC"] };
+  const cmdBarScopedData = applyProjectScope(cmdBarData, cmdBarScope);
+
+  // In-scope query: resolves normally against the already-scoped data.
+  const inScopeRoute = classifyQuery("What's blocking JPMC?", cmdBarScopedData);
+  ok("V2.3 Command Bar scope", inScopeRoute.intent === "blocking" && inScopeRoute.target === "JPMC", "an in-scope project query still routes and resolves its target normally");
+
+  // Out-of-scope query: fails to resolve a target against the scoped data (proving it's
+  // genuinely invisible), but findOutOfScopeMention (run against the FULL, unscoped local
+  // data, never a live Jira call) correctly identifies why.
+  const outOfScopeRoute = classifyQuery("What's blocking Barclays?", cmdBarScopedData);
+  ok("V2.3 Command Bar scope", outOfScopeRoute.target === undefined, "the out-of-scope project's name doesn't even resolve as a target against the scoped view — it is genuinely invisible to the router");
+
+  const mention = findOutOfScopeMention("What's blocking Barclays?", cmdBarData, cmdBarScope);
+  ok("V2.3 Command Bar scope", mention?.key === "BARC", "findOutOfScopeMention identifies the excluded project by matching its NAME against the full local catalog, purely as a local lookup");
+
+  const keyMention = findOutOfScopeMention("what's blocking barc", cmdBarData, cmdBarScope);
+  ok("V2.3 Command Bar scope", keyMention?.key === "BARC", "findOutOfScopeMention also matches by the project's KEY, case-insensitively");
+
+  const inScopeMention = findOutOfScopeMention("What's blocking JPMC?", cmdBarData, cmdBarScope);
+  ok("V2.3 Command Bar scope", inScopeMention === undefined, "a query naming an IN-scope project is never flagged as out-of-scope");
+
+  const unknownMention = findOutOfScopeMention("What's blocking some totally unrelated thing?", cmdBarData, cmdBarScope);
+  ok("V2.3 Command Bar scope", unknownMention === undefined, "a query naming a project the app has never even heard of is not flagged — this is a local-knowledge check, never a guess");
+
+  const allModeMention = findOutOfScopeMention("What's blocking Barclays?", cmdBarData, { mode: "ALL", projectKeys: [] });
+  ok("V2.3 Command Bar scope", allModeMention === undefined, "in ALL mode, nothing is ever considered out-of-scope");
+
+  // Existing command routing is unaffected by any of this — a totally unrelated intent still
+  // classifies exactly as before.
+  ok("V2.3 Command Bar scope", classifyQuery("What should I focus on today?", cmdBarScopedData).intent === "personal-focus-today", "existing, unrelated Command Bar routing is completely unaffected — classifyQuery behavior is unchanged");
+  ok("V2.3 Command Bar scope", classifyQuery("Am I overloaded?", cmdBarScopedData).intent === "am-i-overloaded", "another existing intent still routes correctly");
+}
+
+// ----- Data Health / Trust Diagnostic: scope is visible, with no new blended score. -----
+{
+  const trustFixtureData = { ...emptyData(), workItems: [makeItem({ id: "th-1", owner: "Alice" })] };
+  const trustHealth = computeDataHealth(trustFixtureData, "jira", "2026-06-15T00:00:00.000Z");
+
+  const focusedEntries = computeTrustDiagnostic({
+    dataHealth: trustHealth,
+    dataSource: "jira",
+    jiraSync: { lastSyncStatus: "success", lastSyncCompletedAt: "2026-06-15T00:00:00.000Z" },
+    claudeAvailable: true,
+    jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] },
+  });
+  const focusedJiraEntry = focusedEntries.find((e) => e.category === "Jira");
+  ok("V2.3 Trust diagnostic", !!focusedJiraEntry && /FOCUSED/.test(focusedJiraEntry.answer) && /2 project/.test(focusedJiraEntry.answer), "a FOCUSED scope is visibly reported in the existing Jira trust entry, with the correct selected count");
+
+  const allEntries = computeTrustDiagnostic({
+    dataHealth: trustHealth,
+    dataSource: "jira",
+    jiraSync: { lastSyncStatus: "success" },
+    claudeAvailable: true,
+    jiraProjectScope: { mode: "ALL", projectKeys: [] },
+  });
+  const allJiraEntry = allEntries.find((e) => e.category === "Jira");
+  ok("V2.3 Trust diagnostic", !!allJiraEntry && /ALL Jira projects/.test(allJiraEntry.answer), "ALL mode is also visibly reported, distinctly from FOCUSED");
+
+  ok("V2.3 Trust diagnostic", focusedEntries.length === allEntries.length, "adding scope reporting never adds or removes trust diagnostic categories — no new blended-score row");
+  const categories = focusedEntries.map((e) => e.category).sort();
+  ok("V2.3 Trust diagnostic", JSON.stringify(categories) === JSON.stringify(["AI", "Coverage", "Data", "Evidence", "Jira", "Ownership", "Scope"]), "the exact same 7 trust categories exist as before V2.3 — 'Scope' here is still the pre-existing scope-HISTORY-coverage category, not a new one");
+  ok("V2.3 Trust diagnostic", focusedEntries.every((e) => Object.keys(e).sort().join(",") === "answer,category,status"), "every trust entry still has exactly answer/category/status — no numeric 'score' field was ever introduced");
+
+  // computeTrustDiagnostic without jiraProjectScope at all (an existing caller that hasn't
+  // been updated) must keep working exactly as before — jiraProjectScope is optional/additive.
+  const legacyCallEntries = computeTrustDiagnostic({ dataHealth: trustHealth, dataSource: "jira", jiraSync: { lastSyncStatus: "success" }, claudeAvailable: true });
+  const legacyJiraEntry = legacyCallEntries.find((e) => e.category === "Jira");
+  ok("V2.3 Trust diagnostic", !!legacyJiraEntry && !/FOCUSED|ALL Jira projects/.test(legacyJiraEntry.answer), "an existing call site that never passes jiraProjectScope gets the unchanged, pre-V2.3 answer text — fully backward compatible");
+}
+
+// ----- Security: no credentials anywhere in the new Focus Project Scope code paths, and the
+// project-discovery route never fetches issues. -----
+{
+  const secRoot = path.resolve(process.cwd());
+  const v23Files = ["src/lib/command-center/jira/project-scope.ts", "src/app/api/command-center/jira/projects/route.ts", "src/lib/command-center/datasource/jira-source.ts"];
+  const forbidden = [/JIRA_API_TOKEN/, /process\.env\.JIRA/, /Authorization["']?\s*:/, /Basic\s+[A-Za-z0-9+/=]{8,}/];
+  for (const rel of v23Files) {
+    const content = fs.readFileSync(path.join(secRoot, rel), "utf8");
+    ok("V2.3 Security re-scan", !forbidden.some((re) => re.test(content)), `${rel} contains no credential-reading or Authorization-header code`);
+  }
+  const projectsRouteSrc = fs.readFileSync(path.join(secRoot, "src/app/api/command-center/jira/projects/route.ts"), "utf8");
+  ok("V2.3 Security re-scan", !/fetchJiraIssues\b/.test(projectsRouteSrc), "the project-discovery route never calls the issue-fetching function — it only discovers projects, never downloads issue data (§5, §21)");
+  ok("V2.3 Security re-scan", /server-only|from "@\/lib\/server\/jira-client"/.test(projectsRouteSrc), "the project-discovery route reuses the existing server-only Jira client rather than a second credential path");
+
+  const importSrc = fs.readFileSync(path.join(secRoot, "src/lib/command-center/import.ts"), "utf8");
+  ok("V2.3 Security re-scan", !/sourceType:\s*["']jira["']/.test(importSrc), "Local Import never fabricates a Jira sourceType on imported records — confirming applyProjectScope correctly treats all imported data as non-Jira and therefore never touches it");
+}
+
+// ----- Accessibility & UI (static source checks, mirroring the existing V1.8 pattern):
+// project selector semantics, honest empty-state copy, and the scope-vs-filter distinction. -----
+{
+  const dataSettingsSrc = fs.readFileSync(path.join(process.cwd(), "src/app/data-settings/page.tsx"), "utf8");
+  ok("V2.3 UI", /Jira Project Scope/.test(dataSettingsSrc), "Data & Settings renders a 'Jira Project Scope' section — integrated into the existing settings page, not a new page");
+  ok("V2.3 UI", /role="radiogroup"/.test(dataSettingsSrc), "the ALL/FOCUSED mode selector exposes radiogroup semantics");
+  ok("V2.3 UI", /aria-expanded=\{pickerOpen\}/.test(dataSettingsSrc), "the project picker toggle exposes aria-expanded state, consistent with this codebase's existing WhyDrawer pattern");
+  ok("V2.3 UI", /role="group" aria-label="Focus project selection"/.test(dataSettingsSrc), "the checkbox list exposes an accessible group label");
+  ok("V2.3 UI", /aria-label=\{`\$\{p\.name\} \(\$\{p\.key\}\)`\}/.test(dataSettingsSrc), "each project checkbox has an accessible label combining name and key");
+  ok("V2.3 UI", /Search projects/.test(dataSettingsSrc), "the picker supports search/filter, required for large Jira environments (§5, §21)");
+  ok("V2.3 UI", /selected/.test(dataSettingsSrc) && /Save Focus/.test(dataSettingsSrc), "the selected-count summary and an explicit Save action are both present — selection is never auto-applied per click");
+  ok("V2.3 UI", /No Focus Projects selected/.test(dataSettingsSrc), "the honest empty-focused-scope message from §23 is rendered, not a silent fallback to ALL");
+  ok("V2.3 UI", /Project scope is available for Jira data/.test(dataSettingsSrc), "when Jira isn't configured, the scope picker honestly says so rather than pretending to work (§12)");
+
+  const filterBarSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/FilterBar.tsx"), "utf8");
+  ok("V2.3 UI", /Jira Scope:/.test(filterBarSrc), "the Current-View FilterBar visibly distinguishes itself from Jira Project Scope (§13) rather than presenting a single ambiguous filter surface");
+  ok("V2.3 UI", !/setJiraProjectScope/.test(filterBarSrc), "the FilterBar can only DISPLAY the current Jira scope, never change it — a temporary view filter can never silently mutate the persisted scope (§13)");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

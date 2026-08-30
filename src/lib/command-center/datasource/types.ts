@@ -3,7 +3,7 @@
 // the app. The store only ever talks to a DataSourceProvider, never to Jira or the import
 // pipeline directly.
 
-import type { CommandCenterData, DataSourceType, JiraErrorKind } from "../types";
+import type { CommandCenterData, DataSourceType, JiraErrorKind, JiraProjectScopeMode } from "../types";
 
 export interface DataSourceSyncResult {
   ok: boolean;
@@ -20,9 +20,13 @@ export interface DataSourceSyncResult {
   // V1.8 §17 — additive sync diagnostics.
   pages?: number;
   changelogRequests?: number;
+  // V2.3 §9, §20 — Focus Project Scope diagnostics, additive/optional.
+  scopeMode?: JiraProjectScopeMode;
+  focusedProjectCount?: number;
+  focusedProjects?: string[];
 }
 
 export interface DataSourceProvider {
   readonly type: DataSourceType;
-  sync(options?: { sinceIso?: string }): Promise<DataSourceSyncResult>;
+  sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[] }): Promise<DataSourceSyncResult>;
 }

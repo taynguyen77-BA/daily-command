@@ -10,6 +10,7 @@ import { getAIProvider } from "./ai";
 import { todayLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
+import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
 import { computeActionEffectiveness } from "./action-effectiveness";
 import { computeDecisionRadar } from "./decision-radar";
 import { computeDeliveryDrift } from "./delivery-drift";
@@ -38,6 +39,7 @@ import type {
   DecisionEffectivenessClass,
   DecisionOption,
   GlobalFilters,
+  JiraProjectScope,
   JiraSyncState,
   MemoryEvent,
   PersonalFocusCandidate,
@@ -79,6 +81,10 @@ export interface StoreState {
   dataSource: DataSourceType;
   jiraSync: JiraSyncState;
   filters: GlobalFilters;
+  // V2.3 — Focus Project Scope. ALL (the default, matching pre-V2.3 behavior) means every
+  // discoverable Jira project is synced/analyzed; FOCUSED restricts to `projectKeys`. See
+  // jira/project-scope.ts for the enforcement and parsing logic.
+  jiraProjectScope: JiraProjectScope;
   // V1.4 §39-41 — attention lifecycle (deliberately separate from any Jira status) and a
   // small set of meaningful proactive-intelligence events. Both additive/optional-safe.
   attentionState: Record<string, AttentionItemState>;
@@ -116,6 +122,7 @@ function initialState(): StoreState {
     dataSource: "demo", // §30 — demo is the default when Jira is not configured
     jiraSync: initialJiraSync(),
     filters: {},
+    jiraProjectScope: { ...DEFAULT_JIRA_PROJECT_SCOPE },
     attentionState: {},
     memoryEvents: [],
     ownerName: undefined,
@@ -197,6 +204,7 @@ export function parseStoredState(raw: string): StoreState {
       dataSource: dataSourceValue,
       jiraSync: asPlainObject(parsed.jiraSync, initialJiraSync()),
       filters: asPlainObject(parsed.filters, {}),
+      jiraProjectScope: parseJiraProjectScope(parsed.jiraProjectScope),
       attentionState: asPlainObject(parsed.attentionState, {}),
       memoryEvents: Array.isArray(parsed.memoryEvents) ? parsed.memoryEvents : [],
       ownerName: typeof parsed.ownerName === "string" ? parsed.ownerName : undefined,
@@ -360,6 +368,20 @@ export class CommandCenterStore {
     this.set({ ...this.state, filters: { ...this.state.filters, ...patch } });
   }
 
+  /** V2.3 §3-4, §32 — the ONLY place Focus Project Scope is ever set. Always explicit and
+   *  user-driven (no inference from owner/assignee/recent activity/labels — §32); switching
+   *  ALL -> FOCUSED or narrowing an existing focused set never deletes any already-synced
+   *  data (§10) — it only changes what the derived view (use-command-center.ts) shows.
+   *  `projectKeys` is de-duplicated defensively even though the UI never produces
+   *  duplicates itself. */
+  setJiraProjectScope(mode: JiraProjectScope["mode"], projectKeys?: string[]) {
+    const nextKeys = projectKeys ? Array.from(new Set(projectKeys.filter((k) => k.trim().length > 0))) : this.state.jiraProjectScope.projectKeys;
+    this.set({
+      ...this.state,
+      jiraProjectScope: { mode, projectKeys: mode === "FOCUSED" ? nextKeys : this.state.jiraProjectScope.projectKeys, updatedAt: new Date().toISOString() },
+    });
+  }
+
   /**
    * V1.3 §10-12 — manual Jira sync. Incremental by default (uses the last successful sync
    * timestamp as the JQL `updated >=` bound); pass `full: true` to re-pull everything.
@@ -371,6 +393,30 @@ export class CommandCenterStore {
     const startedAt = new Date().toISOString();
     this.set({ ...this.state, jiraSync: { ...this.state.jiraSync, lastSyncStartedAt: startedAt } });
 
+    const scope = this.state.jiraProjectScope;
+
+    // V2.3 §23 — a FOCUSED scope with nothing selected must never silently become ALL. This
+    // is refused here, before any network call, so it can never even accidentally send an
+    // unbounded query — and the sync route (§7) refuses it too as defense in depth.
+    if (scope.mode === "FOCUSED" && scope.projectKeys.length === 0) {
+      const error = "No Focus Projects selected. Select at least one project in Data & Settings before syncing.";
+      this.set({
+        ...this.state,
+        jiraSync: {
+          ...this.state.jiraSync,
+          lastSyncStartedAt: startedAt,
+          lastSyncStatus: "failed",
+          lastSyncError: error,
+          lastSyncErrorKind: "not-configured",
+          previousDataPreserved: true,
+          scopeMode: scope.mode,
+          focusedProjectCount: 0,
+          focusedProjects: [],
+        },
+      });
+      return { ok: false, error };
+    }
+
     // V1.7 §10 — the raw ISO datetime is sent as-is; the server route (which alone knows
     // any configured JIRA_TIMEZONE_OFFSET_MINUTES) is responsible for turning it into the
     // actual JQL cursor via buildIncrementalSinceParam. See jira/http.ts for the safety
@@ -379,7 +425,7 @@ export class CommandCenterStore {
     const sinceIso =
       !options?.full && this.state.dataSource === "jira" && this.state.jiraSync.lastSyncCompletedAt ? this.state.jiraSync.lastSyncCompletedAt : undefined;
 
-    const result = await new JiraDataSource().sync({ sinceIso });
+    const result = await new JiraDataSource().sync({ sinceIso, scopeMode: scope.mode, projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined });
 
     if (!result.ok || !result.data) {
       this.set({
@@ -391,6 +437,9 @@ export class CommandCenterStore {
           lastSyncError: result.error,
           lastSyncErrorKind: result.errorKind,
           previousDataPreserved: true,
+          scopeMode: scope.mode,
+          focusedProjectCount: scope.mode === "FOCUSED" ? scope.projectKeys.length : undefined,
+          focusedProjects: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
         },
       });
       return { ok: false, error: result.error };
@@ -411,13 +460,38 @@ export class CommandCenterStore {
     const prevSnapshot = this.state.loaded ? toSnapshot(this.state.data, getTodayIso()) : null;
     const isFullSync = sinceIso === undefined;
 
+    // V2.3 §10 — a full re-sync's pre-existing "drop all old Jira data, replace with the
+    // fresh fetch" semantics is safe in ALL mode (the fresh fetch covers everything, so
+    // nothing legitimate is lost) but would newly become destructive in FOCUSED mode, since
+    // the fetch itself is now scope-restricted: replacing ALL old Jira data with only the
+    // focused subset would silently erase every out-of-scope project's data. Scope must only
+    // ever control what's operated on, never trigger deletion (§10) — so in FOCUSED mode,
+    // only records belonging to a CURRENTLY-focused project are replaced; anything from a
+    // project outside the current scope is left exactly as it was, never touched by this
+    // sync (it simply stays out of the scoped view — see jira/project-scope.ts).
+    const focusedProjectIds = scope.mode === "FOCUSED" ? new Set(scope.projectKeys.map((k) => `jira-project-${k}`)) : null;
+    const staysUntouched = (projectId: string) => focusedProjectIds !== null && !focusedProjectIds.has(projectId);
+
     const merged: CommandCenterData = {
       clients: mergeById(this.state.data.clients, incoming.clients),
-      projects: isFullSync ? [...this.state.data.projects.filter((p) => p.sourceType !== "jira"), ...incoming.projects] : mergeById(this.state.data.projects, incoming.projects),
-      workItems: isFullSync ? [...this.state.data.workItems.filter((w) => w.sourceType !== "jira"), ...incoming.workItems] : mergeById(this.state.data.workItems, incoming.workItems),
+      projects: isFullSync
+        ? [...this.state.data.projects.filter((p) => p.sourceType !== "jira" || staysUntouched(p.id)), ...incoming.projects]
+        : mergeById(this.state.data.projects, incoming.projects),
+      workItems: isFullSync
+        ? [...this.state.data.workItems.filter((w) => w.sourceType !== "jira" || staysUntouched(w.projectId)), ...incoming.workItems]
+        : mergeById(this.state.data.workItems, incoming.workItems),
       requirements: this.state.data.requirements, // Jira does not feed requirements (§6 — only ingest fields required for intelligence)
       risks: this.state.data.risks, // manually-logged risks are preserved; auto-detected risks recompute live from the merged work items
-      dependencies: isFullSync ? [...this.state.data.dependencies.filter((d) => !d.id.startsWith("jira-dep-")), ...incoming.dependencies] : mergeById(this.state.data.dependencies, incoming.dependencies),
+      // Dependencies are keyed by workItemId, not projectId, so a per-project untouched-set
+      // can't be applied as precisely as above without guessing at the Jira key embedded in
+      // an issue key. In FOCUSED mode this simply never bulk-drops (merge-only, same as
+      // incremental sync) — the one accepted, documented, non-destructive trade-off: a
+      // dependency Jira has since resolved for an IN-scope project may not get cleaned up
+      // until scope returns to ALL, but nothing is ever silently deleted.
+      dependencies:
+        isFullSync && scope.mode !== "FOCUSED"
+          ? [...this.state.data.dependencies.filter((d) => !d.id.startsWith("jira-dep-")), ...incoming.dependencies]
+          : mergeById(this.state.data.dependencies, incoming.dependencies),
       decisions: this.state.data.decisions,
       actions: this.state.data.actions,
       communications: this.state.data.communications,
@@ -450,6 +524,9 @@ export class CommandCenterStore {
         pages: result.pages,
         changelogRequests: result.changelogRequests,
         previousDataPreserved: false,
+        scopeMode: scope.mode,
+        focusedProjectCount: scope.mode === "FOCUSED" ? scope.projectKeys.length : undefined,
+        focusedProjects: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
       },
     });
     return { ok: true };
@@ -875,10 +952,14 @@ export class CommandCenterStore {
     const today = getTodayIso();
     const { data, snapshotHistory } = this.state;
     const previous = previousSnapshotOf(this.state);
-    const completed = data.actions.filter((a) => a.status === "completed" && a.completedAt === today);
-    const deferred = data.actions.filter((a) => a.status === "deferred");
-    const blocked = data.actions.filter((a) => a.status === "blocked");
-    const newRisks = data.risks.filter((r) => r.status === "open" && r.detectedAt === today);
+    // V2.3 §16 — the End-of-Day AI summary must never see an out-of-scope Jira project's
+    // actions/risks; the archival snapshot below intentionally still records the full
+    // dataset (snapshotHistory is the whole operational record over time, not a scoped view).
+    const scopedForAi = applyProjectScope(data, this.state.jiraProjectScope);
+    const completed = scopedForAi.actions.filter((a) => a.status === "completed" && a.completedAt === today);
+    const deferred = scopedForAi.actions.filter((a) => a.status === "deferred");
+    const blocked = scopedForAi.actions.filter((a) => a.status === "blocked");
+    const newRisks = scopedForAi.risks.filter((r) => r.status === "open" && r.detectedAt === today);
     const summary = await getAIProvider().generateEndOfDaySummary(completed, deferred, blocked, newRisks);
     const entry: EodEntry = { date: today, summary };
 

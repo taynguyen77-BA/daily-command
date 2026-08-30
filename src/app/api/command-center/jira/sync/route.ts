@@ -9,10 +9,16 @@ import { fetchJiraIssueChangelog, fetchJiraIssues, fetchJiraProjects, getConfigu
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
 import { buildIncrementalSinceParam, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
+import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
 
 export const runtime = "nodejs";
 
-const syncRequestSchema = z.object({ sinceIso: z.string().optional() });
+const syncRequestSchema = z.object({
+  sinceIso: z.string().optional(),
+  // V2.3 §7 — Focus Project Scope, enforced BEFORE issue ingestion (never fetch-then-filter).
+  scopeMode: z.enum(["ALL", "FOCUSED"]).optional(),
+  projectKeys: z.array(z.string()).optional(),
+});
 
 export async function POST(req: Request) {
   const config = getJiraConfig();
@@ -32,9 +38,32 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Request did not match the expected shape.", errorKind: "malformed-response" }, { status: 400 });
   }
 
+  const scopeMode = parsedRequest.data.scopeMode ?? "ALL";
+  // §23 — a FOCUSED request with zero project keys must never be reinterpreted as
+  // unrestricted. The client (store.ts syncJira) already refuses to call this route in that
+  // state, but the route itself must not trust that — an empty `project in ()` clause would
+  // be invalid JQL anyway, so this is refused explicitly with an honest error rather than
+  // silently falling through to an unbounded sync.
+  if (scopeMode === "FOCUSED" && (!parsedRequest.data.projectKeys || parsedRequest.data.projectKeys.length === 0)) {
+    return NextResponse.json(
+      { ok: false, error: "No Focus Projects selected. Select at least one project in Data & Settings before syncing.", errorKind: "not-configured" },
+      { status: 400 }
+    );
+  }
+
   const syncStartedAt = Date.now();
   const today = new Date().toISOString().slice(0, 10);
-  const projectKeys = getConfiguredProjectKeys() ?? undefined;
+  const projectKeys = resolveEffectiveProjectKeys(getConfiguredProjectKeys(), { mode: scopeMode, projectKeys: parsedRequest.data.projectKeys ?? [] });
+  // §7 — the same "never send an unbounded query when a real restriction was intended" logic
+  // as above, this time for the merged (env ∩ focus) case: an operator-configured
+  // JIRA_PROJECT_KEYS with zero overlap against the user's focus selection is a real,
+  // reportable misconfiguration, not silently treated as "no restriction".
+  if (scopeMode === "FOCUSED" && projectKeys && projectKeys.length === 0) {
+    return NextResponse.json(
+      { ok: false, error: "The selected Focus Projects have no overlap with this server's configured JIRA_PROJECT_KEYS restriction.", errorKind: "not-configured" },
+      { status: 400 }
+    );
+  }
 
   const projectsResult = await fetchJiraProjects(config);
   if (!projectsResult.ok) {
@@ -95,5 +124,10 @@ export async function POST(req: Request) {
     // (jira/http.ts), never a separately-tracked/duplicated counter.
     pages: Math.ceil(issuesResult.recordsFetched / JIRA_PAGE_SIZE) || (issuesResult.recordsFetched === 0 ? 0 : 1),
     changelogRequests: prioritizedKeys.length,
+    // V2.3 §9, §20 — honest scope diagnostics: exactly what this sync actually requested,
+    // never implying every discovered project was fetched when scope narrowed it.
+    scopeMode,
+    focusedProjectCount: scopeMode === "FOCUSED" ? projectKeys?.length ?? 0 : undefined,
+    focusedProjects: scopeMode === "FOCUSED" ? projectKeys : undefined,
   });
 }

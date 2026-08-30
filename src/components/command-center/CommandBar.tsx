@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { answerFromRoute, classifyQuery, familyForIntent, isArtifactIntent, type QueryIntent } from "@/lib/command-center/query-router";
+import { findOutOfScopeMention } from "@/lib/command-center/jira/project-scope";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
 import { buildDecisionBriefDraft, buildReleaseUpdateDraft, buildStakeholderUpdateDraft, buildStatusUpdateDraft, buildTodaysUpdateDraft } from "@/lib/command-center/communicate";
 import { computeReleaseHealth } from "@/lib/command-center/release-health";
@@ -50,6 +51,29 @@ export function CommandBar() {
     setArtifactNote(null);
     commandCenterStore.bumpUsage(USAGE_KEYS.COMMAND_BAR_USED);
     const route = classifyQuery(q, filteredData);
+
+    // V2.3 §15 — Command Bar cannot escape scope. `route.target` failed to resolve within
+    // the already-scoped `filteredData` above; before treating that as "no match"/
+    // "unrecognized", check whether the query actually names a Jira project this browser
+    // knows about (from a prior sync) that the CURRENT Focus Project Scope excludes. This is
+    // a purely local check against already-stored data — it never queries Jira for an
+    // out-of-scope project.
+    if (!route.target) {
+      const outOfScope = findOutOfScopeMention(q, state.data, state.jiraProjectScope);
+      if (outOfScope) {
+        const focusList = state.jiraProjectScope.projectKeys.length > 0 ? state.jiraProjectScope.projectKeys.join(", ") : "(none selected)";
+        setIntent(route.intent === "unrecognized" ? null : route.intent);
+        setResult({
+          answer: `${outOfScope.name} (${outOfScope.key}) is outside your current Jira focus scope.\n\nCurrent focus: ${focusList}.\n\nUpdate Project Scope in Data & Settings to include ${outOfScope.name}.`,
+          evidence: [],
+          recommendedAction: "Update Project Scope in Data & Settings.",
+          confidence: 1,
+        });
+        setLoading(false);
+        return;
+      }
+    }
+
     setIntent(route.intent);
     if (route.intent === "unrecognized") {
       // V1.7 §36 — never silently route to a random intent; say so explicitly.

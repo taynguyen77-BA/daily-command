@@ -14,8 +14,18 @@ export const runtime = "nodejs";
 // the on-demand "Run Conformance Check" button.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
   const config = getJiraConfig();
-  const report = config ? await runJiraConformance({ fetchImpl: fetch, config }) : await runJiraConformance();
+  // V2.3 §19 — the client sends the currently-configured Focus Project Scope (read-only
+  // query params, no server-side state) so a live conformance run honestly restricts itself
+  // to it, same as production sync — this route never fetches beyond what the app itself
+  // would ever request.
+  const url = new URL(req.url);
+  const scopeModeParam = url.searchParams.get("scopeMode");
+  const scope =
+    scopeModeParam === "FOCUSED" || scopeModeParam === "ALL"
+      ? { mode: scopeModeParam as "ALL" | "FOCUSED", projectKeys: url.searchParams.getAll("projectKey") }
+      : undefined;
+  const report = config ? await runJiraConformance({ fetchImpl: fetch, config, scope }) : await runJiraConformance();
   return NextResponse.json(report);
 }

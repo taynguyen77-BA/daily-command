@@ -4,6 +4,7 @@ import { useEffect, useMemo, useSyncExternalStore } from "react";
 import { commandCenterStore, getTodayIso, previousSnapshotOf } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
 import { applyFilters } from "@/lib/command-center/filters";
+import { applyProjectScope } from "@/lib/command-center/jira/project-scope";
 import { computeProactiveIntelligence } from "@/lib/command-center/proactive";
 import { computePersonalFocus } from "@/lib/command-center/personal-focus";
 
@@ -16,13 +17,24 @@ export function useCommandCenter() {
   const today = getTodayIso();
   const previousSnapshot = previousSnapshotOf(state);
 
+  // V2.3 §11 — Focus Project Scope is enforced at this same data boundary, BEFORE the
+  // existing Client/Project/Release/Time-range filter runs — a distinct concept (which Jira
+  // projects enter the Command Center at all) from that filter (which already-ingested
+  // projects are currently displayed). Every screen built on `derived`/`filteredData` below
+  // inherits scope automatically, with no per-engine `if focusedProject` checks (§11).
+  const scopedData = useMemo(
+    () => applyProjectScope(state.data, state.jiraProjectScope),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.data, state.jiraProjectScope]
+  );
+
   // V1.3 §9 — the global filter is applied once here; every screen built on `derived`
   // (and `filteredData`, for anything that needs the raw filtered records) automatically
   // inherits it without configuring its own filter UI.
   const filteredData = useMemo(
-    () => applyFilters(state.data, state.filters, today),
+    () => applyFilters(scopedData, state.filters, today),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [state.data, state.filters, today]
+    [scopedData, state.filters, today]
   );
 
   const derived = useMemo(

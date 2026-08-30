@@ -27,23 +27,26 @@ function renderReview(text: string) {
 }
 
 export default function WeeklyReviewPage() {
-  const { state, today, personalFocus, proactive, store } = useCommandCenter();
+  const { state, today, filteredData, personalFocus, proactive, store } = useCommandCenter();
   const [reviewText, setReviewText] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // V1.6 §46-49 — "My Delivery Review". Purely deterministic — arithmetic over
   // PersonalPlanItem history, no AI, no productivity scoring.
+  // V2.3 §11, §16 — reads `filteredData` (Focus Project Scope + the global filter already
+  // applied), not raw `state.data`, so an out-of-scope Jira project never reaches this
+  // AI-context-feeding fact builder.
   const personalReview = useMemo(
-    () => (personalFocus && proactive ? buildPersonalDeliveryReviewFacts(state.personalPlan, personalFocus.candidates, proactive.actionEffectiveness, state.data, 7, today) : null),
-    [personalFocus, proactive, state.personalPlan, state.data, today]
+    () => (personalFocus && proactive ? buildPersonalDeliveryReviewFacts(state.personalPlan, personalFocus.candidates, proactive.actionEffectiveness, filteredData, 7, today) : null),
+    [personalFocus, proactive, state.personalPlan, filteredData, today]
   );
 
   // V2.0 §17 — DELIVERY section data. This is the same deterministic fact-building the AI
   // narrative below is grounded in, computed eagerly (no AI call) so DELIVERY renders
   // immediately without requiring "Generate Weekly Review" first.
   const facts: WeeklyReviewFacts | null = useMemo(
-    () => (state.loaded ? buildWeeklyReviewFacts(state.data, state.snapshotHistory, today, state.isDemo ? "demo" : "manual") : null),
-    [state.loaded, state.data, state.snapshotHistory, today, state.isDemo]
+    () => (state.loaded ? buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual") : null),
+    [state.loaded, filteredData, state.snapshotHistory, today, state.isDemo]
   );
   const stalledLoopsCount = proactive?.deliveryLoops.filter((l) => l.health === "STALLED").length ?? 0;
 
@@ -60,7 +63,7 @@ export default function WeeklyReviewPage() {
   async function generate() {
     setLoading(true);
     const today = getTodayIso();
-    const builtFacts = buildWeeklyReviewFacts(state.data, state.snapshotHistory, today, state.isDemo ? "demo" : "manual");
+    const builtFacts = buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual");
     const text = await getAIProvider().generateWeeklyReview(builtFacts);
     setReviewText(text);
     setLoading(false);

@@ -406,7 +406,10 @@ export type JiraErrorKind =
  *  pre-V1.7 persisted state loads unchanged; `warnings` is populated only for real,
  *  specific conditions (e.g. result-set truncation), never a generic catch-all.
  *  V1.8 §17 additions — pages/changelogRequests/previousDataPreserved, same optionality
- *  guarantee for pre-V1.8 state. Raw Jira responses are never persisted here or anywhere. */
+ *  guarantee for pre-V1.8 state. Raw Jira responses are never persisted here or anywhere.
+ *  V2.3 §9, §20 additions — scopeMode/focusedProjectCount/focusedProjects record what
+ *  Focus Project Scope (see JiraProjectScope below) this sync actually ran under, so the
+ *  report is never mistaken for "everything was synced" when only a focused subset was. */
 export interface JiraSyncState {
   lastSyncStartedAt?: string;
   lastSyncCompletedAt?: string;
@@ -425,6 +428,37 @@ export interface JiraSyncState {
   changelogRequests?: number;
   /** true only on a FAILED sync — confirms existing local data was left untouched (§16). */
   previousDataPreserved?: boolean;
+  scopeMode?: JiraProjectScopeMode;
+  focusedProjectCount?: number;
+  focusedProjects?: string[];
+}
+
+// ===== V2.3 — Focus Project Scope =====
+// A user-controlled allowlist of Jira projects that Daily Command Center should ingest and
+// analyze. Additive/backward-compatible: `mode` defaults to "ALL" whenever no scope has been
+// configured, which reproduces exactly the pre-V2.3 behavior (every discoverable Jira
+// project is synced) — nothing about existing sync/normalize/intelligence code changes for a
+// user who never opens the new "Jira Project Scope" setting. FOCUSED with an empty
+// `projectKeys` is a distinct, deliberately restrictive state (never silently reinterpreted
+// as ALL) — see jira/project-scope.ts.
+export type JiraProjectScopeMode = "ALL" | "FOCUSED";
+
+/** Stored identifier is the Jira project KEY (e.g. "JPMC") — already the stable identifier
+ *  this codebase uses throughout (Project.sourceId, WorkItem.projectId, the JIRA_PROJECT_KEYS
+ *  env var, buildIssuesJql's `project in (...)` clause), so no second identity scheme is
+ *  introduced for the same concept. */
+export interface JiraProjectScope {
+  mode: JiraProjectScopeMode;
+  projectKeys: string[];
+  updatedAt?: string;
+}
+
+/** One row from live Jira project discovery (GET /api/command-center/jira/projects) — never
+ *  persisted wholesale; only the selected `projectKeys` above are saved. */
+export interface JiraProjectSummary {
+  id?: string;
+  key: string;
+  name: string;
 }
 
 /** V1.3 §9 — the compact global context filter. All fields undefined = "All". */
@@ -1161,6 +1195,11 @@ export interface JiraConformanceReport {
   dataContract?: JiraDataContractReport;
   shapeDiscovery?: ShapeDiscoveryReport;
   mappingDrift?: MappingDriftReport;
+  // V2.3 §19 — honest scope reporting: the report must never imply every discovered project
+  // was checked when only a focused subset was actually requested.
+  scopeMode?: JiraProjectScopeMode;
+  focusedProjectCount?: number;
+  focusedProjectKeys?: string[];
 }
 
 /** V1.7 §20-21 — a deterministic observation, never a productivity judgment (§21). Only

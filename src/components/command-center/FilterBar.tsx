@@ -53,8 +53,19 @@ export function FilterBar() {
 
   if (clients.length === 0) return null;
 
+  // V2.3 §13 — Jira Project Scope ("which Jira projects enter Daily Command Center") is a
+  // distinct concept from this bar ("which already-ingested projects are currently
+  // displayed"). Shown here read-only, purely so the distinction is visible side-by-side —
+  // this never becomes a selectable filter; changing it happens only in Data & Settings.
+  const scope = state.jiraProjectScope;
+
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-3 py-2">
+      {state.dataSource === "jira" && (
+        <span className="rounded border border-border bg-surface2 px-2 py-1 text-xs text-text3">
+          Jira Scope: {scope.mode === "FOCUSED" ? `${scope.projectKeys.length} focused project${scope.projectKeys.length === 1 ? "" : "s"}` : "All projects"}
+        </span>
+      )}
       <Select
         label="Client"
         value={filters.clientId ?? ""}
