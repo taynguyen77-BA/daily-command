@@ -3,16 +3,30 @@
 import { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { answerFromRoute, classifyQuery, familyForIntent, isArtifactIntent, type QueryIntent } from "@/lib/command-center/query-router";
-import { findOutOfScopeMention } from "@/lib/command-center/jira/project-scope";
+import { detectExplicitProjectMention, knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
 import { buildDecisionBriefDraft, buildReleaseUpdateDraft, buildStakeholderUpdateDraft, buildStatusUpdateDraft, buildTodaysUpdateDraft } from "@/lib/command-center/communicate";
 import { computeReleaseHealth } from "@/lib/command-center/release-health";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { commandUsageKey, USAGE_KEYS } from "@/lib/command-center/usage";
-import type { ArtifactDraft, QueryAnswer } from "@/lib/command-center/types";
-import { useCommandCenter } from "./use-command-center";
+import type { ArtifactDraft, CommandCenterData, JiraProjectSummary, PersonalDeliveryReviewFacts, PersonalFocusResult, QueryAnswer } from "@/lib/command-center/types";
+import { useCommandCenter, buildProjectOverrideView } from "./use-command-center";
+import type { DerivedData } from "@/lib/command-center/selectors";
+import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { ConfidenceTag, Panel, TrustLabel } from "./ui";
+
+/** V2.4 §19-20, §22 — the data one Command Bar query actually answers against: either the
+ *  current global scope (the default) or a one-time explicit-project override built by
+ *  buildProjectOverrideView. Kept as one bundle so classifyQuery/answerFromRoute/artifact
+ *  builders never have to know which case they're in. */
+interface CommandView {
+  filteredData: CommandCenterData;
+  derived: DerivedData;
+  proactive: ProactiveIntelligence | null;
+  personalFocus: PersonalFocusResult | null;
+  personalReview: PersonalDeliveryReviewFacts | undefined;
+}
 
 const EXAMPLES = [
   "What should I focus on today?",
@@ -36,6 +50,9 @@ export function CommandBar() {
   const [intent, setIntent] = useState<QueryIntent | null>(null);
   const [artifactDraft, setArtifactDraft] = useState<ArtifactDraft | null>(null);
   const [artifactNote, setArtifactNote] = useState<string | null>(null);
+  // V2.4 §20 — set only while the LAST run() answered under a temporary explicit-project
+  // override; never written to the store, so the global scope is unaffected either way.
+  const [overrideProject, setOverrideProject] = useState<JiraProjectSummary | null>(null);
 
   const personalReview = useMemo(
     () => (proactive && personalFocus ? buildPersonalDeliveryReviewFacts(state.personalPlan, personalFocus.candidates, proactive.actionEffectiveness, filteredData, 7, today) : undefined),
@@ -49,31 +66,41 @@ export function CommandBar() {
     setResult(null);
     setArtifactDraft(null);
     setArtifactNote(null);
+    setOverrideProject(null);
     commandCenterStore.bumpUsage(USAGE_KEYS.COMMAND_BAR_USED);
-    const route = classifyQuery(q, filteredData);
 
-    // V2.3 §15 — Command Bar cannot escape scope. `route.target` failed to resolve within
-    // the already-scoped `filteredData` above; before treating that as "no match"/
-    // "unrecognized", check whether the query actually names a Jira project this browser
-    // knows about (from a prior sync) that the CURRENT Focus Project Scope excludes. This is
-    // a purely local check against already-stored data — it never queries Jira for an
-    // out-of-scope project.
-    if (!route.target) {
-      const outOfScope = findOutOfScopeMention(q, state.data, state.jiraProjectScope);
-      if (outOfScope) {
-        const focusList = state.jiraProjectScope.projectKeys.length > 0 ? state.jiraProjectScope.projectKeys.join(", ") : "(none selected)";
-        setIntent(route.intent === "unrecognized" ? null : route.intent);
-        setResult({
-          answer: `${outOfScope.name} (${outOfScope.key}) is outside your current Jira focus scope.\n\nCurrent focus: ${focusList}.\n\nUpdate Project Scope in Data & Settings to include ${outOfScope.name}.`,
-          evidence: [],
-          recommendedAction: "Update Project Scope in Data & Settings.",
-          confidence: 1,
-        });
-        setLoading(false);
-        return;
-      }
+    // V2.4 §19-21 — an explicit project mention always wins, checked against every Jira
+    // project this browser knows about (not just the currently-focused ones), so a query
+    // naming a project OUTSIDE the current scope is answered directly instead of rejected.
+    // Two/more known projects matching the same query is reported as ambiguous, never
+    // guessed (§21). This is a per-query override only — it never calls
+    // store.setJiraProjectScope, so the global scope is unchanged once run() returns (§20).
+    const mention = detectExplicitProjectMention(q, knownJiraProjects(state.data));
+    if (mention && "ambiguous" in mention) {
+      setResult({
+        answer: `I found multiple projects matching "${q}": ${mention.ambiguous.map((p) => `${p.name} (${p.key})`).join(", ")}. Please name one specifically — e.g. by its Jira key.`,
+        evidence: [],
+        recommendedAction: "Name a single project.",
+        confidence: 1,
+      });
+      setLoading(false);
+      return;
     }
 
+    let view: CommandView = { filteredData, derived, proactive, personalFocus, personalReview };
+    if (mention) {
+      const override = buildProjectOverrideView(state, today, mention.match.key);
+      view = {
+        ...override,
+        personalReview:
+          override.proactive && override.personalFocus
+            ? buildPersonalDeliveryReviewFacts(state.personalPlan, override.personalFocus.candidates, override.proactive.actionEffectiveness, override.filteredData, 7, today)
+            : undefined,
+      };
+      setOverrideProject(mention.match);
+    }
+
+    const route = classifyQuery(q, view.filteredData);
     setIntent(route.intent);
     if (route.intent === "unrecognized") {
       // V1.7 §36 — never silently route to a random intent; say so explicitly.
@@ -90,20 +117,20 @@ export function CommandBar() {
 
     if (isArtifactIntent(route.intent)) {
       commandCenterStore.bumpUsage(commandUsageKey(route.intent));
-      await runArtifactIntent(route.intent, route.target);
+      await runArtifactIntent(route.intent, route.target, view, mention ? mention.match : undefined);
       setLoading(false);
       return;
     }
 
     const { facts, evidence, recommendedAction } = answerFromRoute(
       route,
-      filteredData,
-      derived,
+      view.filteredData,
+      view.derived,
       today,
       state.isDemo ? "demo" : "manual",
-      proactive ?? undefined,
-      personalFocus ?? undefined,
-      personalReview
+      view.proactive ?? undefined,
+      view.personalFocus ?? undefined,
+      view.personalReview
     );
     const answer = await getAIProvider().answerQuery(q, facts, evidence, recommendedAction);
     setResult(answer);
@@ -112,17 +139,23 @@ export function CommandBar() {
 
   // V2.2 §10 — a distinct, non-narrated outcome: builds the artifact directly from
   // communicate.ts (no answerQuery/AI narration) and opens the Artifact Editor.
-  async function runArtifactIntent(artifactIntent: QueryIntent, target: string | undefined) {
+  // V2.4 §22 — `view` is either the global scope or a one-time project override (see run()
+  // above); every attention/decision item this pulls from `view.proactive` is therefore
+  // already the named project's own evidence, not whichever project happened to sort first
+  // globally.
+  async function runArtifactIntent(artifactIntent: QueryIntent, target: string | undefined, view: CommandView, overrideProjectForLabel: JiraProjectSummary | undefined) {
+    const { filteredData: viewData, derived: viewDerived, proactive, personalFocus: viewPersonalFocus } = view;
     if (!proactive) {
       setArtifactNote("Proactive intelligence is not available yet.");
       return;
     }
+    const sourceContext = overrideProjectForLabel ? `Command Bar: ${overrideProjectForLabel.name}` : target ? `Command Bar: draft update for ${target}` : "Command Bar";
     if (artifactIntent === "create-status-update") {
-      setArtifactDraft(buildStatusUpdateDraft(filteredData, derived, proactive, personalFocus ?? null, today, "Command Bar"));
+      setArtifactDraft(buildStatusUpdateDraft(viewData, viewDerived, proactive, viewPersonalFocus ?? null, today, sourceContext));
       return;
     }
     if (artifactIntent === "summarize-today") {
-      setArtifactDraft(buildTodaysUpdateDraft(filteredData, proactive, personalFocus ?? null, today));
+      setArtifactDraft(buildTodaysUpdateDraft(viewData, proactive, viewPersonalFocus ?? null, today));
       return;
     }
     if (artifactIntent === "create-stakeholder-update") {
@@ -131,16 +164,16 @@ export function CommandBar() {
         setArtifactNote("Nothing currently needs attention to draft a stakeholder update from.");
         return;
       }
-      setArtifactDraft(buildStakeholderUpdateDraft({ kind: "attention", item }, target ? `Command Bar: draft update for ${target}` : "Command Bar"));
+      setArtifactDraft(buildStakeholderUpdateDraft({ kind: "attention", item }, sourceContext));
       return;
     }
     if (artifactIntent === "create-release-update") {
-      const version = target ?? filteredData.workItems.find((w) => w.fixVersion)?.fixVersion;
+      const version = target ?? viewData.workItems.find((w) => w.fixVersion)?.fixVersion;
       if (!version) {
         setArtifactNote("No release/fix version found in the current data.");
         return;
       }
-      setArtifactDraft(buildReleaseUpdateDraft(computeReleaseHealth(filteredData, version, today), filteredData, "Command Bar"));
+      setArtifactDraft(buildReleaseUpdateDraft(computeReleaseHealth(viewData, version, today), viewData, sourceContext));
       return;
     }
     if (artifactIntent === "create-decision-brief") {
@@ -155,7 +188,7 @@ export function CommandBar() {
         return;
       }
       const options = await getAIProvider().generateDecisionOptions(attentionItem.what, [attentionItem.why, attentionItem.impact], attentionItem.evidence);
-      setArtifactDraft(buildDecisionBriefDraft(attentionItem, options, "Command Bar"));
+      setArtifactDraft(buildDecisionBriefDraft(attentionItem, options, sourceContext));
     }
   }
 
@@ -195,6 +228,12 @@ export function CommandBar() {
             </button>
           ))}
         </div>
+      )}
+
+      {overrideProject && (result || artifactDraft || artifactNote) && (
+        <p className="mt-3 text-xs text-accent2">
+          Showing: {overrideProject.name} ({overrideProject.key}) only — one-time override for this query. Your current focus scope is unchanged.
+        </p>
       )}
 
       {artifactNote && <p className="mt-3 border-t border-border pt-3 text-sm text-text3">{artifactNote}</p>}

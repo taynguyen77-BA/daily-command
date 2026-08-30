@@ -1,11 +1,14 @@
 "use client";
 
 import { buildExecutiveView } from "@/lib/command-center/executive";
+import { computeProjectAttentionMap } from "@/lib/command-center/client-attention-map";
+import { formatScopeLabel, knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import type { DerivedData } from "@/lib/command-center/selectors";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { CommandCenterData, MemoryEvent, PersonalFocusResult } from "@/lib/command-center/types";
 import { DriftBadge, FocusCategoryBadge, HeatBadge, LoopHealthBadge, Panel, RiskBadge, SectionHeading, TrajectoryBadge, TrustLabel } from "./ui";
 import { ProjectStory } from "./ProjectStory";
+import { useCommandCenter } from "./use-command-center";
 
 export function ExecutiveView({
   data,
@@ -20,8 +23,16 @@ export function ExecutiveView({
   personalFocus?: PersonalFocusResult | null;
   memoryEvents: MemoryEvent[];
 }) {
+  // V2.4 §16-17 — `data` here is already the caller's scoped `filteredData`; `state` is
+  // only needed for the full (unscoped) project list, to name any project the current scope
+  // excludes, and for the scope label itself.
+  const { state, today } = useCommandCenter();
   const view = buildExecutiveView(data, derived.scores, derived.risks, derived.changes, derived.kpis.overdue);
   const confidenceColor = view.deliveryConfidence >= 80 ? "text-green" : view.deliveryConfidence >= 60 ? "text-yellow" : view.deliveryConfidence >= 40 ? "text-orange" : "text-red";
+
+  const portfolio = computeProjectAttentionMap(data, today);
+  const inScopeKeys = new Set(portfolio.map((p) => p.jiraKey));
+  const excludedProjects = knownJiraProjects(state.data).filter((p) => !inScopeKeys.has(p.key));
 
   const topDrift = proactive?.attentionQueue.find((a) => a.category === "DRIFT");
   const topDrifts = proactive?.attentionQueue.filter((a) => a.category === "DRIFT").slice(0, 3) ?? [];
@@ -33,7 +44,31 @@ export function ExecutiveView({
 
   return (
     <div className="space-y-6">
+      {/* V2.4 §16-17 — the scope this whole Executive Mode view is computed over, stated
+          explicitly rather than left implicit. */}
+      <p className="text-xs text-text3">Scope: {formatScopeLabel(state.jiraProjectScope, state.data)}</p>
+
       <ProjectStory events={memoryEvents} />
+
+      {portfolio.length > 0 && (
+        <section>
+          <SectionHeading title="Portfolio View" subtitle="Each in-scope project's own Delivery Confidence — never averaged or blended into a single portfolio score." />
+          <div className="grid gap-2 md:grid-cols-3">
+            {portfolio.map((p) => (
+              <Panel key={p.projectId} className="p-4">
+                <p className="font-display text-sm text-text">{p.projectName}</p>
+                <p className="mt-1 text-2xl font-semibold text-text">{p.deliveryConfidence}</p>
+                <p className="mt-1 text-xs uppercase tracking-wide text-text3">Status: {p.status}</p>
+              </Panel>
+            ))}
+          </div>
+          {excludedProjects.length > 0 && (
+            <p className="mt-2 text-xs text-text3">
+              {excludedProjects.map((p) => p.name).join(", ")} not shown — outside the current focus scope.
+            </p>
+          )}
+        </section>
+      )}
 
       {/* V1.6 §41 — compact only, 1-3 items. Executive Mode stays project/portfolio-oriented. */}
       {personalFocus && personalFocus.top3.length > 0 && (

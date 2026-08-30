@@ -320,6 +320,38 @@ export class CommandCenterStore {
   // ===== V1.4 §39-40, V1.5 §22-24 — Attention lifecycle =====
   // Persisted separately from any Jira/business status; never touches `data`.
 
+  /** V2.4 §14 — an AttentionItem's project, resolved ONLY through its explicit
+   *  `sourceRef` (risk/dependency/decision/action/communication each carry their own
+   *  already-explicit project FK, reused via the resolvers above). A "release" sourceRef —
+   *  or no sourceRef at all — is left undefined: a release can legitimately span multiple
+   *  projects, so a single projectId would misrepresent it rather than help (§14 "must not
+   *  be silently assigned"). */
+  private projectIdForAttentionItem(item: AttentionItem): string | undefined {
+    const ref = item.sourceRef;
+    if (!ref) return undefined;
+    switch (ref.type) {
+      // A RISK sourceRef's `id` is the risk's TITLE, not its `Risk.id` — see
+      // attention-queue.ts's buildRawItems (`sourceRef: { type: "risk", id: esc.riskTitle }`),
+      // an existing pre-V2.4 quirk this resolver has to match, not invent.
+      case "risk":
+        return this.state.data.risks.find((r) => r.title === ref.id)?.projectId;
+      case "dependency": {
+        const dep = this.state.data.dependencies.find((d) => d.id === ref.id);
+        return dep ? this.state.data.workItems.find((w) => w.id === dep.workItemId)?.projectId : undefined;
+      }
+      case "decision":
+        return this.state.data.decisions.find((d) => d.id === ref.id)?.projectId;
+      case "action":
+        return this.projectIdForAction(this.state.data.actions.find((a) => a.id === ref.id));
+      case "communication": {
+        const comm = this.state.data.communications.find((c) => c.id === ref.id);
+        return comm?.workItemId ? this.state.data.workItems.find((w) => w.id === comm.workItemId)?.projectId : undefined;
+      }
+      default:
+        return undefined;
+    }
+  }
+
   /** Called after each recompute of the Attention Queue to persist any lifecycle
    *  transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED, RE_ESCALATED, etc). No-op if
    *  unchanged. `items` (the freshly computed queue) is only used to build a readable
@@ -335,6 +367,7 @@ export class CommandCenterStore {
       title: `Re-escalated: ${item.what}`,
       impact: item.why,
       evidence: item.evidence,
+      projectId: this.projectIdForAttentionItem(item),
     }));
 
     this.set({
@@ -545,13 +578,23 @@ export class CommandCenterStore {
     this.set({ ...this.state, data: { ...this.state.data, actions } });
   }
 
+  /** V2.4 §14 — an Action's project association, ONLY when it can be traced through the
+   *  explicit `relatedWorkItemId` foreign key it already carries; undefined (never guessed)
+   *  when the action has no linked work item. Used to tag ACTION_* memory events below. */
+  private projectIdForAction(action: Action | undefined): string | undefined {
+    if (!action?.relatedWorkItemId) return undefined;
+    return this.state.data.workItems.find((w) => w.id === action.relatedWorkItemId)?.projectId;
+  }
+
   completeAction(id: string) {
     this.updateAction(id, { status: "completed", completedAt: getTodayIso() });
+    const action = this.state.data.actions.find((a) => a.id === id);
     this.appendMemoryEvent({
       kind: "ACTION_COMPLETED",
-      title: `Action completed: ${this.state.data.actions.find((a) => a.id === id)?.title ?? id}`,
+      title: `Action completed: ${action?.title ?? id}`,
       impact: "Awaiting outcome confirmation.",
       evidence: [],
+      projectId: this.projectIdForAction(action),
     });
     this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
   }
@@ -580,11 +623,13 @@ export class CommandCenterStore {
    *  can observe when work on an action actually began. */
   startAction(id: string) {
     this.updateAction(id, { status: "in-progress" });
+    const action = this.state.data.actions.find((a) => a.id === id);
     this.appendMemoryEvent({
       kind: "ACTION_STARTED",
-      title: `Action started: ${this.state.data.actions.find((a) => a.id === id)?.title ?? id}`,
+      title: `Action started: ${action?.title ?? id}`,
       impact: "Work has begun on this action.",
       evidence: [],
+      projectId: this.projectIdForAction(action),
     });
   }
 
@@ -598,6 +643,7 @@ export class CommandCenterStore {
       title: `Action outcome recorded: ${action?.title ?? id} — ${outcomeStatus}`,
       impact: note ?? `Classified ${outcomeStatus}.`,
       evidence: note ? [note] : [],
+      projectId: this.projectIdForAction(action),
     });
     this.bumpUsage(USAGE_KEYS.OUTCOME_CAPTURED);
   }
@@ -675,6 +721,7 @@ export class CommandCenterStore {
       title: `Decision made: ${input.title}`,
       impact: input.expectedOutcome,
       evidence: selected?.evidence ?? [],
+      projectId: input.projectId,
     });
     this.bumpUsage(USAGE_KEYS.DECISION_CONFIRMED);
     return id;
@@ -685,11 +732,13 @@ export class CommandCenterStore {
    *  once the user confirms, same pattern as Decision Radar's Review/Keep/Supersede. */
   confirmDecisionOutcome(id: string, outcomeStatus: DecisionEffectivenessClass, note?: string) {
     this.updateDecision(id, { outcomeStatus, ...(note ? { outcome: note } : {}) });
+    const decision = this.state.data.decisions.find((d) => d.id === id);
     this.appendMemoryEvent({
       kind: "DECISION_OUTCOME",
-      title: `Decision outcome confirmed: ${this.state.data.decisions.find((d) => d.id === id)?.title ?? id} — ${outcomeStatus}`,
+      title: `Decision outcome confirmed: ${decision?.title ?? id} — ${outcomeStatus}`,
       impact: note ?? `Classified ${outcomeStatus}.`,
       evidence: note ? [note] : [],
+      projectId: decision?.projectId,
     });
   }
 
@@ -718,7 +767,7 @@ export class CommandCenterStore {
     const releaseHealths = computeAllReleaseHealth(dataAfter, today);
     const releaseDrift = computeReleaseDrift(releaseHealths, lastPrior ?? null, today);
 
-    const events = deriveMemoryEvents(previousDrift, currentDrift, riskEscalations, dependencyRadar, releaseDrift, today);
+    const events = deriveMemoryEvents(previousDrift, currentDrift, riskEscalations, dependencyRadar, releaseDrift, today, dataAfter);
 
     // V1.5 §44 — LOOP_STALLED, computed at the same once-per-close/sync cadence as the
     // events above (never continuously — avoids daily-repeat noise beyond that cadence).

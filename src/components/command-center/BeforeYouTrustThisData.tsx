@@ -15,14 +15,16 @@ const STATUS_STYLES: Record<TrustSummary["rows"][number]["status"], string> = {
   LIMITED: "text-red",
 };
 
-export function BeforeYouTrustThisData({ summary }: { summary: TrustSummary }) {
+// V2.4 §24 — `label` distinguishes "Global Data Health" from "Current Scope Data Health"
+// when both are shown (see page.tsx); omitted, this renders exactly as before V2.4.
+export function BeforeYouTrustThisData({ summary, label }: { summary: TrustSummary; label?: string }) {
   if (!summary.hasData) return null;
 
   return (
     <Panel className="p-4">
       <div className="mb-2 flex items-center gap-2">
         <TrustLabel kind="calculated" />
-        <span className="text-xs uppercase tracking-wide text-text3">Before You Trust This Data</span>
+        <span className="text-xs uppercase tracking-wide text-text3">Before You Trust This Data{label ? ` — ${label}` : ""}</span>
       </div>
       <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-3">
         {summary.rows.map((r) => (

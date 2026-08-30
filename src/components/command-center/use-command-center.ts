@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useSyncExternalStore } from "react";
-import { commandCenterStore, getTodayIso, previousSnapshotOf } from "@/lib/command-center/store";
+import { commandCenterStore, getTodayIso, previousSnapshotOf, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
 import { applyFilters } from "@/lib/command-center/filters";
 import { applyProjectScope } from "@/lib/command-center/jira/project-scope";
@@ -68,4 +68,23 @@ export function useCommandCenter() {
   );
 
   return { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, store: commandCenterStore };
+}
+
+/** V2.4 §19-20, §23 — Command Bar / Meeting Mode explicit project override. Runs the exact
+ *  same pipeline useCommandCenter() runs above (applyProjectScope -> applyFilters ->
+ *  deriveData -> computeProactiveIntelligence -> computePersonalFocus) for ONE explicit
+ *  project key instead of the persisted `state.jiraProjectScope` — so a query/meeting
+ *  session can be temporarily scoped to a project outside (or narrower than) the current
+ *  global focus without ever calling store.setJiraProjectScope (§20 "the global application
+ *  selection does NOT change"). No new intelligence — every function called here is the
+ *  same one the hook above already uses. */
+export function buildProjectOverrideView(state: StoreState, today: string, projectKey: string) {
+  const scopedData = applyProjectScope(state.data, { mode: "FOCUSED", projectKeys: [projectKey] });
+  const filteredData = applyFilters(scopedData, state.filters, today);
+  const previousSnapshot = previousSnapshotOf(state);
+  const derived = deriveData(filteredData, previousSnapshot, today);
+  const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
+  const proactive = state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today) : null;
+  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today) : null;
+  return { filteredData, derived, proactive, personalFocus };
 }

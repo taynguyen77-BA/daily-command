@@ -81,9 +81,24 @@ export default function CommandCenterPage() {
       <CommandBar />
 
       {/* V2.1 §10 — data quality visible BEFORE strong personal recommendations, only once
-          a real Jira sync has actually completed (demo/local-import data doesn't need this). */}
+          a real Jira sync has actually completed (demo/local-import data doesn't need this).
+          V2.4 §24 — under a FOCUSED scope, Global and Current Scope data health can genuinely
+          differ (e.g. one out-of-scope project dragging down global ownership coverage), so
+          both are shown, each explicitly labeled; under ALL scope they're identical, so only
+          one is shown to avoid a redundant duplicate panel. */}
       {state.dataSource === "jira" && state.jiraSync.lastSyncStatus === "success" && (
-        <BeforeYouTrustThisData summary={buildBeforeYouTrustSummary(computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt))} />
+        <>
+          <BeforeYouTrustThisData
+            summary={buildBeforeYouTrustSummary(computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt))}
+            label={state.jiraProjectScope.mode === "FOCUSED" ? "Global" : undefined}
+          />
+          {state.jiraProjectScope.mode === "FOCUSED" && (
+            <BeforeYouTrustThisData
+              summary={buildBeforeYouTrustSummary(computeDataHealth(filteredData, state.dataSource, state.jiraSync.lastSyncCompletedAt))}
+              label="Current Scope"
+            />
+          )}
+        </>
       )}
 
       {proactive && (

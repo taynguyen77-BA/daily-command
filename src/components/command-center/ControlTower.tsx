@@ -10,6 +10,7 @@ import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { Freshness } from "@/lib/command-center/types";
 import { FRESHNESS_LABEL } from "@/lib/command-center/freshness";
 import { buildStatusUpdateDraft } from "@/lib/command-center/communicate";
+import { formatScopeLabel } from "@/lib/command-center/jira/project-scope";
 import { useCommandCenter } from "./use-command-center";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { DriftBadge, HeatBadge, Panel, TrajectoryBadge, TrustLabel } from "./ui";
@@ -40,7 +41,7 @@ export function ControlTower({
   const topDependency = proactive.dependencyRadar[0];
   const topDecision = proactive.decisionRadar[0];
   const topIneffectiveAction = proactive.attentionQueue.find((a) => a.category === "ACTION");
-  const { filteredData, derived, personalFocus, today } = useCommandCenter();
+  const { state, filteredData, derived, personalFocus, today } = useCommandCenter();
   const [creatingUpdate, setCreatingUpdate] = useState(false);
 
   return (
@@ -49,6 +50,12 @@ export function ControlTower({
         <div className="flex items-center gap-2">
           <TrustLabel kind="calculated" />
           <span className="text-xs text-text3">Control tower</span>
+          {/* V2.4 §16 — the current Focus Project Scope is always visible on this surface,
+              not just buried in the FilterBar, so a 30-second scan also answers "what am I
+              even looking at?" */}
+          <span className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">
+            Scope: {formatScopeLabel(state.jiraProjectScope, state.data)}
+          </span>
         </div>
         <button
           onClick={() => setCreatingUpdate(true)}

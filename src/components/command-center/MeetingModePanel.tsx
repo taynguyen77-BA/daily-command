@@ -8,8 +8,9 @@
 import { useState } from "react";
 import { buildMeetingModeBrief, buildStakeholderUpdateDraft, renderMeetingModeText } from "@/lib/command-center/communicate";
 import { commandCenterStore } from "@/lib/command-center/store";
+import { formatScopeLabel, knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import { USAGE_KEYS } from "@/lib/command-center/usage";
-import { useCommandCenter } from "./use-command-center";
+import { useCommandCenter, buildProjectOverrideView } from "./use-command-center";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { EmptyState, Panel, SectionHeading } from "./ui";
 
@@ -17,28 +18,61 @@ export function MeetingModePanel() {
   const { state, today, derived, proactive, filteredData, store } = useCommandCenter();
   const [copied, setCopied] = useState(false);
   const [editingArtifact, setEditingArtifact] = useState(false);
+  // V2.4 §23 — a session-only project scope for THIS meeting, distinct from (and never
+  // writing to) the global Focus Project Scope in Data & Settings. "" means "use the
+  // current global scope", matching every other surface.
+  const [sessionProjectKey, setSessionProjectKey] = useState("");
 
   if (!state.loaded) {
     return <EmptyState title="No data yet" description="Load the demo dataset to see Meeting Mode in action." onLoadDemo={() => store.loadDemoData()} />;
   }
-  if (!proactive) {
+
+  const knownProjects = knownJiraProjects(state.data);
+  const override = sessionProjectKey ? buildProjectOverrideView(state, today, sessionProjectKey) : null;
+  const meetingProactive = override ? override.proactive : proactive;
+  const meetingFilteredData = override ? override.filteredData : filteredData;
+  const meetingDerived = override ? override.derived : derived;
+  const scopeLabel = sessionProjectKey
+    ? `${knownProjects.find((p) => p.key === sessionProjectKey)?.name ?? sessionProjectKey} (this meeting only)`
+    : formatScopeLabel(state.jiraProjectScope, state.data);
+
+  if (!meetingProactive) {
     return <Panel className="p-6 text-sm text-text3">Proactive intelligence is not available yet.</Panel>;
   }
 
-  const brief = buildMeetingModeBrief(filteredData, derived, proactive, today);
+  const brief = buildMeetingModeBrief(meetingFilteredData, meetingDerived, meetingProactive, today);
 
   async function copySummary() {
     await navigator.clipboard.writeText(renderMeetingModeText(brief));
     setCopied(true);
   }
 
-  const stakeholderDraft = proactive.attentionQueue[0]
-    ? buildStakeholderUpdateDraft({ kind: "attention", item: proactive.attentionQueue[0] }, "Meeting Mode")
+  const stakeholderDraft = meetingProactive.attentionQueue[0]
+    ? buildStakeholderUpdateDraft({ kind: "attention", item: meetingProactive.attentionQueue[0] }, "Meeting Mode")
     : null;
 
   return (
     <div className="space-y-4 pb-16">
-      <SectionHeading title="Meeting Mode" subtitle="Before a stand-up or status meeting — six questions, each backed by evidence you can inspect." />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SectionHeading title="Meeting Mode" subtitle="Before a stand-up or status meeting — six questions, each backed by evidence you can inspect." />
+        <label className="flex items-center gap-1.5 text-xs text-text3">
+          Meeting scope
+          <select
+            value={sessionProjectKey}
+            onChange={(e) => setSessionProjectKey(e.target.value)}
+            aria-label="Meeting scope"
+            className="rounded border border-border bg-surface2 px-2 py-1 text-xs text-text2"
+          >
+            <option value="">Current focus ({formatScopeLabel(state.jiraProjectScope, state.data)})</option>
+            {knownProjects.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.name} ({p.key})
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <p className="text-xs text-text3">Scope: {scopeLabel}</p>
       <div className="space-y-3">
         {brief.questions.map((q, i) => (
           <Panel key={q.question} className="p-4">

@@ -714,6 +714,18 @@ export interface ClientAttentionRow {
   criticalDependenciesCount: number;
 }
 
+/** V2.4 §17 — Executive Mode "Portfolio View": one row per in-scope Jira project, using the
+ *  exact same deliveryConfidence formula as ClientAttentionRow above (scoreAllWorkItems +
+ *  computeDeliveryConfidence), just grouped by Project instead of Client. Deliberately NOT a
+ *  blended "Portfolio Health" score — each project's own number stands alone (§17). */
+export interface ProjectAttentionRow {
+  projectId: string;
+  projectName: string;
+  jiraKey: string;
+  deliveryConfidence: number;
+  status: "healthy" | "manageable" | "at risk" | "critical";
+}
+
 /** V1.4 §41-42 — a meaningful, human-readable Project Memory event. Not every recomputed
  *  UI value — only transitions worth remembering. */
 export interface MemoryEvent {
@@ -748,6 +760,12 @@ export interface MemoryEvent {
   title: string;
   impact: string;
   evidence: string[];
+  // V2.4 §14 — the internal Project.id this event can be safely traced to via an explicit,
+  // already-present foreign key (Risk.projectId, Dependency.workItemId -> WorkItem.projectId,
+  // Decision.projectId, Action.relatedWorkItemId -> WorkItem.projectId). Never inferred from
+  // title/text — left undefined (rendered as Global/Unscoped) when no such FK exists, e.g.
+  // portfolio-wide drift or personal-plan events. See jira/project-scope.ts.
+  projectId?: string;
 }
 
 /** V1.4 §32-33 — a single labeled Jira changelog field change. Never used to infer actual

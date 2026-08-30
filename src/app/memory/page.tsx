@@ -3,13 +3,18 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
+import { formatScopeLabel } from "@/lib/command-center/jira/project-scope";
 import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { ProjectStory } from "@/components/command-center/ProjectStory";
 
 export default function ProjectMemoryPage() {
   const { state, store } = useCommandCenter();
   const [confirmingClear, setConfirmingClear] = useState(false);
-  const timeline = [...state.memoryEvents].reverse(); // newest first
+  // V2.4 §14 — "Current scope" / "All projects" over the SAME state.memoryEvents array (no
+  // second memory store). Only meaningful under a FOCUSED scope; defaults to showing
+  // everything, matching pre-V2.4 behavior, until the user opts into filtering.
+  const [scopedView, setScopedView] = useState(false);
+  const allEvents = [...state.memoryEvents].reverse(); // newest first
 
   if (!state.loaded) {
     return (
@@ -20,6 +25,20 @@ export default function ProjectMemoryPage() {
       />
     );
   }
+
+  const isFocused = state.jiraProjectScope.mode === "FOCUSED";
+  // Jira project KEY -> internal Project.id, so `event.projectId` (an internal id) can be
+  // checked against the persisted scope's project KEYS.
+  const inScopeProjectIds = new Set(
+    state.data.projects.filter((p) => p.sourceType === "jira" && p.sourceId && state.jiraProjectScope.projectKeys.includes(p.sourceId)).map((p) => p.id)
+  );
+  const globalEvents = allEvents.filter((e) => !e.projectId);
+  const projectEvents = allEvents.filter((e) => !!e.projectId);
+  // §14 "only include events that can be safely associated with the selected project" — an
+  // event with no resolvable projectId is NEVER silently assigned to the current scope; it
+  // always lives in the separate Global/Unscoped section below instead.
+  const timeline = isFocused && scopedView ? projectEvents.filter((e) => inScopeProjectIds.has(e.projectId!)) : projectEvents;
+  const projectNameById = new Map(state.data.projects.map((p) => [p.id, p.name]));
 
   const history = [...state.snapshotHistory].reverse(); // newest first
 
@@ -72,12 +91,68 @@ export default function ProjectMemoryPage() {
       <ProjectStory events={state.memoryEvents} />
 
       <section>
-        <SectionHeading title="Timeline" subtitle="V1.4 §41-42 — meaningful proactive-intelligence events only, not every recomputed value." />
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <SectionHeading title="Timeline" subtitle="V1.4 §41-42 — meaningful proactive-intelligence events only, not every recomputed value." />
+          {isFocused && (
+            <div role="group" aria-label="Timeline scope" className="flex gap-1 rounded-md border border-border p-0.5">
+              <button
+                onClick={() => setScopedView(false)}
+                aria-pressed={!scopedView}
+                className={`rounded px-3 py-1 text-xs font-medium ${!scopedView ? "bg-surface2 text-text" : "text-text3 hover:text-text2"}`}
+              >
+                All projects
+              </button>
+              <button
+                onClick={() => setScopedView(true)}
+                aria-pressed={scopedView}
+                className={`rounded px-3 py-1 text-xs font-medium ${scopedView ? "bg-surface2 text-text" : "text-text3 hover:text-text2"}`}
+              >
+                Current scope ({formatScopeLabel(state.jiraProjectScope, state.data)})
+              </button>
+            </div>
+          )}
+        </div>
         {timeline.length === 0 ? (
-          <p className="py-6 text-center text-sm text-text3">No meaningful events recorded yet — drift transitions, risk escalations, and other proactive signals will appear here as they happen.</p>
+          <p className="py-6 text-center text-sm text-text3">
+            {isFocused && scopedView
+              ? "No project-associated events fall inside the current focus scope yet."
+              : "No meaningful events recorded yet — drift transitions, risk escalations, and other proactive signals will appear here as they happen."}
+          </p>
         ) : (
           <div className="space-y-2">
             {timeline.map((e) => (
+              <Panel key={e.id} className="p-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-text3">{e.date}</span>
+                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{e.kind.replace(/-/g, " ")}</span>
+                  {e.projectId && (
+                    <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent2">
+                      {projectNameById.get(e.projectId) ?? e.projectId}
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 font-display text-sm text-text">{e.title}</p>
+                <p className="mt-1 text-xs text-text2">{e.impact}</p>
+                {e.evidence.length > 0 && (
+                  <ul className="mt-1 space-y-0.5 text-xs text-text3">
+                    {e.evidence.map((ev, i) => (
+                      <li key={i}>- {ev}</li>
+                    ))}
+                  </ul>
+                )}
+              </Panel>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <SectionHeading title="Global / Unscoped" subtitle="V2.4 §14 — events with no reliable single-project association (portfolio-wide drift, releases spanning projects, personal-plan activity). Never silently assigned to a project — always visible here regardless of the toggle above." />
+        {globalEvents.length === 0 ? (
+          <p className="py-6 text-center text-sm text-text3">No global/unscoped events recorded yet.</p>
+        ) : (
+          <div className="space-y-2">
+            {globalEvents.map((e) => (
               <Panel key={e.id} className="p-4">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-text3">{e.date}</span>

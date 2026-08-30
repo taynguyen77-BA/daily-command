@@ -27,6 +27,14 @@ export function computeDeliveryConfidence(scores: PriorityScoreResult[], risks: 
   return Math.max(0, Math.min(100, Math.round(confidence)));
 }
 
+/** Shared confidence banding — used by the portfolio summary below and, since V2.4, by
+ *  computeProjectAttentionMap's per-project status label (client-attention-map.ts), so the
+ *  same number always reads the same way everywhere instead of two independently-tuned
+ *  threshold sets. */
+export function deliveryConfidenceBand(confidence: number): "healthy" | "manageable" | "at risk" | "critical" {
+  return confidence >= 80 ? "healthy" : confidence >= 60 ? "manageable" : confidence >= 40 ? "at risk" : "critical";
+}
+
 export function buildExecutiveView(
   data: CommandCenterData,
   scores: PriorityScoreResult[],
@@ -39,7 +47,7 @@ export function buildExecutiveView(
   const majorChanges = changes.filter((c) => /release|blocker|priority|status/i.test(c.field) || c.entityType === "Project").slice(0, 5);
   const decisionsNeeded = data.decisions.filter((d) => d.status === "pending");
 
-  const band = deliveryConfidence >= 80 ? "healthy" : deliveryConfidence >= 60 ? "manageable" : deliveryConfidence >= 40 ? "at risk" : "critical";
+  const band = deliveryConfidenceBand(deliveryConfidence);
   const summary = `Delivery is currently ${band} (${deliveryConfidence}/100), driven by ${majorRisks.length} high risk(s), ` +
     `${scores.filter((s) => s.classification === "CRITICAL" || s.classification === "HIGH").length} attention-needing item(s), ` +
     `and ${decisionsNeeded.length} pending decision(s).`;

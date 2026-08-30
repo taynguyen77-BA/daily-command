@@ -2,10 +2,13 @@
 // multi-client model — not a portfolio management system. Reuses the same per-client
 // ranking that query-router.ts's "client-attention" intent already computes (extracted
 // here into one reusable function so neither place duplicates the logic).
+//
+// V2.4 §17 adds computeProjectAttentionMap below — the identical formula, grouped by
+// Project instead of Client, for Executive Mode's Portfolio View. Not a second engine.
 
-import { computeDeliveryConfidence } from "./executive";
+import { computeDeliveryConfidence, deliveryConfidenceBand } from "./executive";
 import { scoreAllWorkItems } from "./scoring";
-import type { ClientAttentionRow, CommandCenterData, DailySnapshot, DependencyRadarItem, TrendDirection } from "./types";
+import type { ClientAttentionRow, CommandCenterData, DailySnapshot, DependencyRadarItem, ProjectAttentionRow, TrendDirection } from "./types";
 import type { DerivedData } from "./selectors";
 
 const OPEN_DECISION_STATUSES = new Set(["pending", "ACTIVE", "AT_RISK", "REVISIT_REQUIRED"]);
@@ -62,6 +65,34 @@ export function computeClientAttentionMap(
         openDecisionsCount,
         criticalDependenciesCount,
       } satisfies ClientAttentionRow;
+    })
+    .sort((a, b) => a.deliveryConfidence - b.deliveryConfidence);
+}
+
+/** V2.4 §17 — Executive Mode Portfolio View. Same deliveryConfidence formula as
+ *  confidenceForClient above (scoreAllWorkItems + computeDeliveryConfidence, both already
+ *  existing), just grouped by Project instead of Client — no new scoring logic. `data` is
+ *  expected to already be the caller's SCOPED view (filteredData), so this only ever
+ *  produces one row per project currently in scope; the caller is responsible for listing
+ *  any excluded-by-scope project separately (see knownJiraProjects in jira/project-scope.ts). */
+export function computeProjectAttentionMap(data: CommandCenterData, today: string): ProjectAttentionRow[] {
+  return data.projects
+    .filter((p) => p.sourceType === "jira" && p.sourceId)
+    .map((project) => {
+      const projectItems = data.workItems.filter((w) => w.projectId === project.id);
+      const projectItemIds = new Set(projectItems.map((w) => w.id));
+      const scores = scoreAllWorkItems({ ...data, workItems: projectItems }, today);
+      const projectRisks = data.risks.filter((r) => r.status === "open" && r.sourceWorkItemIds.some((id) => projectItemIds.has(id)));
+      const overdue = projectItems.filter((w) => w.status !== "Done" && w.dueDate && w.dueDate < today).length;
+      const deliveryConfidence = computeDeliveryConfidence(scores, projectRisks, overdue);
+
+      return {
+        projectId: project.id,
+        projectName: project.name,
+        jiraKey: project.sourceId!,
+        deliveryConfidence,
+        status: deliveryConfidenceBand(deliveryConfidence),
+      } satisfies ProjectAttentionRow;
     })
     .sort((a, b) => a.deliveryConfidence - b.deliveryConfidence);
 }

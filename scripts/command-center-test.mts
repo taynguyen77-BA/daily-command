@@ -11,7 +11,7 @@ import { detectChanges, toSnapshot } from "../src/lib/command-center/change-dete
 import { buildPlan } from "../src/lib/command-center/action-plan";
 import { importFromJson, importFromCsv, importFromText } from "../src/lib/command-center/import";
 import { buildDemoData } from "../src/lib/command-center/demo-data";
-import { emptyData, type WorkItem } from "../src/lib/command-center/types";
+import { DATA_SCHEMA_VERSION, emptyData, type WorkItem } from "../src/lib/command-center/types";
 import { evidenceForRisk, evidenceForScore, factsForWorkItem, makeEvidence } from "../src/lib/command-center/evidence";
 import { detectGaps } from "../src/lib/command-center/gap-detection";
 import { computeDeliveryConfidence, buildExecutiveView } from "../src/lib/command-center/executive";
@@ -22,7 +22,7 @@ import { buildDailySnapshot, buildSnapshotMetrics, compareSnapshots } from "../s
 import { detectDecisionConflictCandidates } from "../src/lib/command-center/decision-conflicts";
 import { detectRecurringPatterns } from "../src/lib/command-center/pattern-detection";
 import { buildWeeklyReviewFacts } from "../src/lib/command-center/weekly-review";
-import { parseStoredState, commandCenterStore, getTodayIso } from "../src/lib/command-center/store";
+import { parseStoredState, commandCenterStore, getTodayIso, type StoreState } from "../src/lib/command-center/store";
 import type { Decision, DailySnapshot, SnapshotMetrics } from "../src/lib/command-center/types";
 
 // V1.3 — Live Project Intelligence
@@ -49,7 +49,7 @@ import { computeDecisionRadar } from "../src/lib/command-center/decision-radar";
 import { computeActionEffectiveness, ineffectiveActions } from "../src/lib/command-center/action-effectiveness";
 import { computeStakeholderAttention, rankCommunicationPriority } from "../src/lib/command-center/stakeholder-radar";
 import { computeReleaseDrift } from "../src/lib/command-center/release-drift";
-import { computeClientAttentionMap } from "../src/lib/command-center/client-attention-map";
+import { computeClientAttentionMap, computeProjectAttentionMap } from "../src/lib/command-center/client-attention-map";
 import { buildAttentionQueue, slug } from "../src/lib/command-center/attention-queue";
 import { buildFirst30Minutes } from "../src/lib/command-center/first-30-minutes";
 import { deriveMemoryEvents } from "../src/lib/command-center/memory-events";
@@ -127,7 +127,8 @@ import type { WhyShouldICareContent } from "../src/lib/command-center/why-should
 import type { DecisionOptionsResult, Project } from "../src/lib/command-center/types";
 
 // V2.3 — Focus Project Scope & Jira Ingestion Guard
-import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, findOutOfScopeMention, knownJiraProjects, parseJiraProjectScope, resolveEffectiveProjectKeys } from "../src/lib/command-center/jira/project-scope";
+import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, detectExplicitProjectMention, findOutOfScopeMention, formatScopeLabel, knownJiraProjects, parseJiraProjectScope, resolveEffectiveProjectKeys } from "../src/lib/command-center/jira/project-scope";
+import { buildProjectOverrideView } from "../src/components/command-center/use-command-center";
 import type { JiraProjectScope } from "../src/lib/command-center/types";
 
 let failures = 0;
@@ -1028,6 +1029,9 @@ function makeDependencyRadarItem(overrides: Partial<DependencyRadarItem> = {}): 
 function makeRiskEscalation(overrides: Partial<RiskEscalation> = {}): RiskEscalation {
   return { riskId: "r-1", riskTitle: "Test risk", currentSeverity: "MEDIUM", daysOpen: 1, evidenceCount: 1, trend: "stable", reopened: false, ...overrides };
 }
+function makeDependency(overrides: Partial<Dependency> = {}): Dependency {
+  return { id: "dep-1", workItemId: "wi-1", description: "test dependency", dependsOnTeam: "Team", status: "unresolved", raisedDate: TODAY, ...overrides };
+}
 function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
   return { id: "CAT:x", category: "RISK", severity: "MEDIUM", what: "test", why: "test", impact: "test", nowWhat: "test", evidence: [], lifecycle: "ACTIVE", firstSeenDate: TODAY, lastSeenDate: TODAY, ...overrides };
 }
@@ -1288,15 +1292,40 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
     drift1, drift2,
     [makeRiskEscalation({ riskTitle: "Escalating risk", trend: "worsening", previousSeverity: "MEDIUM", currentSeverity: "HIGH", escalationReason: "Severity increased." })],
     [makeDependencyRadarItem({ heat: "CRITICAL" })],
-    [], TODAY
+    [], TODAY, emptyData()
   );
   ok("Memory events", events.some((e) => e.kind === "drift-transition"), "a drift-level change produces a drift-transition memory event");
   ok("Memory events", events.some((e) => e.kind === "risk-escalation"), "a worsening risk severity change produces a risk-escalation memory event");
   ok("Memory events", events.some((e) => e.kind === "dependency-escalation"), "a dependency reaching CRITICAL heat produces a dependency-escalation memory event");
   ok("Memory events", events.every((e) => e.title.length > 0), "every memory event carries a non-empty title");
 
-  const noChangeEvents = deriveMemoryEvents(drift1, drift1, [], [], [], TODAY);
+  const noChangeEvents = deriveMemoryEvents(drift1, drift1, [], [], [], TODAY, emptyData());
   ok("Memory events", noChangeEvents.length === 0, "no meaningful transition produces no memory events — not every recomputed value is stored (§41)");
+
+  // ===== V2.4 §14 — Memory events resolve projectId ONLY through an explicit FK =====
+  const memRisk = makeRisk({ id: "risk-jpmc-mem", title: "JPMC memory risk", projectId: "p-jpmc" });
+  const memDep = makeDependency({ id: "dep-jpmc-mem", workItemId: "wi-jpmc-mem" });
+  const memWorkItem = makeItem({ id: "wi-jpmc-mem", projectId: "p-jpmc" });
+  const memData = { ...emptyData(), risks: [memRisk], dependencies: [memDep], workItems: [memWorkItem] };
+  const scopedEvents = deriveMemoryEvents(
+    drift1, drift2,
+    [makeRiskEscalation({ riskId: "risk-jpmc-mem", riskTitle: "JPMC memory risk", trend: "worsening", previousSeverity: "MEDIUM", currentSeverity: "HIGH" })],
+    [makeDependencyRadarItem({ dependencyId: "dep-jpmc-mem", heat: "CRITICAL" })],
+    [], TODAY, memData
+  );
+  const riskEvent = scopedEvents.find((e) => e.kind === "risk-escalation");
+  const depEvent = scopedEvents.find((e) => e.kind === "dependency-escalation");
+  ok("Memory events V2.4", riskEvent?.projectId === "p-jpmc", "a risk-escalation event resolves projectId via the risk's own explicit projectId field");
+  ok("Memory events V2.4", depEvent?.projectId === "p-jpmc", "a dependency-escalation event resolves projectId via Dependency.workItemId -> WorkItem.projectId");
+  const driftEvent = scopedEvents.find((e) => e.kind === "drift-transition");
+  ok("Memory events V2.4", driftEvent !== undefined && driftEvent.projectId === undefined, "a portfolio-wide drift-transition event is never assigned a projectId — no single reliable FK exists (§14)");
+
+  const orphanEvents = deriveMemoryEvents(
+    drift1, drift1,
+    [makeRiskEscalation({ riskId: "risk-unknown", riskTitle: "Unknown risk", trend: "worsening", previousSeverity: "MEDIUM", currentSeverity: "HIGH" })],
+    [], [], TODAY, emptyData()
+  );
+  ok("Memory events V2.4", orphanEvents.every((e) => e.projectId === undefined), "a risk-escalation for a risk no longer present in data never guesses a projectId");
 }
 
 // ===== Proactive intelligence — end-to-end + insufficient/limited evidence =====
@@ -4645,6 +4674,246 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   }
 
   ok("V2.3.1 Jira project pagination", JIRA_PROJECT_PAGE_SIZE === 50, "the project page size matches Jira's own default page size for /rest/api/3/project/search");
+}
+
+// ================= V2.4 — CONTEXT & FOCUS =================
+// V2.4 makes the existing V2.3 Focus Project Scope pervasive across the rest of the app.
+// No new selection state, no new intelligence engine — every function under test here is
+// either an existing one (applyProjectScope, computeDeliveryConfidence, scoreAllWorkItems,
+// computeDataHealth) or a small, pure composition of them (detectExplicitProjectMention,
+// buildProjectOverrideView, computeProjectAttentionMap).
+
+function makeStoreState(overrides: Partial<StoreState> = {}): StoreState {
+  return {
+    schemaVersion: DATA_SCHEMA_VERSION,
+    data: emptyData(),
+    snapshotHistory: [],
+    loaded: true,
+    isDemo: false,
+    eodHistory: [],
+    dataSource: "jira",
+    jiraSync: { lastSyncStatus: "never" },
+    filters: {},
+    jiraProjectScope: { mode: "ALL", projectKeys: [] },
+    attentionState: {},
+    memoryEvents: [],
+    personalPlan: [],
+    artifacts: [],
+    usageCounters: {},
+    ...overrides,
+  };
+}
+
+// A 3-Jira-project fixture (JPMC/UBS/WF, matching the spec's own examples) — each project
+// has exactly one blocked work item and one HIGH risk explicitly tied to it via
+// sourceWorkItemIds/projectId, so computeProactiveIntelligence always surfaces exactly one
+// distinguishable RISK attention item per project (needed for the cross-project evidence
+// isolation checks below).
+function makeThreeProjectFixture() {
+  const proj = (key: string) => `proj-${key.toLowerCase()}`;
+  const cli = (key: string) => `cli-${key.toLowerCase()}`;
+  const projects = ["JPMC", "UBS", "WF"].map((key) => ({
+    id: proj(key), name: `${key} Delivery`, clientId: cli(key), status: "on-track" as const, sourceType: "jira" as const, sourceId: key,
+  }));
+  const clients = ["JPMC", "UBS", "WF"].map((key) => ({ id: cli(key), name: key }));
+  const workItems = ["JPMC", "UBS", "WF"].map((key) =>
+    makeItem({
+      id: `wi-${key.toLowerCase()}-x`, key: `${key}-900`, title: `${key} blocked item`, projectId: proj(key), clientId: cli(key),
+      sourceType: "jira" as const, sourceId: `${key}-900`, status: "Blocked", blocked: true, blockerReason: `${key} blocker`, priority: "P1", riskIds: [`risk-${key.toLowerCase()}-x`],
+    })
+  );
+  const risks = ["JPMC", "UBS", "WF"].map((key) =>
+    makeRisk({ id: `risk-${key.toLowerCase()}-x`, projectId: proj(key), title: `${key} critical risk`, level: "HIGH", sourceWorkItemIds: [`wi-${key.toLowerCase()}-x`] })
+  );
+  return { ...emptyData(), clients, projects, workItems, risks };
+}
+
+// ----- detectExplicitProjectMention (§19-21): exact/case-insensitive name-or-key match,
+// no fuzzy matching, explicit ambiguity reporting. -----
+{
+  const known = knownJiraProjects(makeThreeProjectFixture());
+
+  const byKey = detectExplicitProjectMention("what's blocking JPMC?", known);
+  ok("V2.4 Project mention", !!byKey && "match" in byKey && byKey.match.key === "JPMC", "a query naming a project by its Jira key is matched");
+
+  const byName = detectExplicitProjectMention("any update on UBS Delivery today", known);
+  ok("V2.4 Project mention", !!byName && "match" in byName && byName.match.key === "UBS", "a query naming a project by its (multi-word) name is matched via substring, same convention as query-router.ts's existing findTarget()");
+
+  const caseInsensitive = detectExplicitProjectMention("what changed in wf?", known);
+  ok("V2.4 Project mention", !!caseInsensitive && "match" in caseInsensitive && caseInsensitive.match.key === "WF", "key matching is case-insensitive");
+
+  const noMatch = detectExplicitProjectMention("what should I do next?", known);
+  ok("V2.4 Project mention", noMatch === undefined, "a query naming no known project returns undefined rather than guessing");
+
+  const noFalseSubstring = detectExplicitProjectMention("this is awful, nothing works", known);
+  ok("V2.4 Project mention", noFalseSubstring === undefined, "§21 no fuzzy matching — a short key (WF) never accidentally matches as a substring inside an unrelated word (\"awful\")");
+
+  const ambiguous = detectExplicitProjectMention("compare JPMC and UBS today", known);
+  ok("V2.4 Project mention", !!ambiguous && "ambiguous" in ambiguous && ambiguous.ambiguous.length === 2, "a query naming two known projects is reported as ambiguous, never guessed at (§21)");
+}
+
+// ----- buildProjectOverrideView (§19-20, §23): a per-query/per-meeting override that never
+// touches the persisted global scope. -----
+{
+  const fixtureData = makeThreeProjectFixture();
+  const globalScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: ["JPMC"] };
+  const state = makeStoreState({ data: fixtureData, jiraProjectScope: globalScope });
+
+  const override = buildProjectOverrideView(state, TODAY, "UBS");
+  ok("V2.4 Project override", override.filteredData.projects.length === 1 && override.filteredData.projects[0].sourceId === "UBS", "an override for UBS returns ONLY UBS's own project, regardless of the persisted global scope being JPMC");
+  ok("V2.4 Project override", !override.filteredData.workItems.some((w) => w.key.startsWith("JPMC") || w.key.startsWith("WF")), "the override's work items never include another project's items");
+  ok("V2.4 Project override", !!override.proactive && override.proactive.attentionQueue.some((a) => /UBS/i.test(a.what)), "the override's proactive intelligence is computed FROM the override-scoped data, surfacing UBS's own attention item");
+
+  ok("V2.4 Project override", state.jiraProjectScope.mode === "FOCUSED" && JSON.stringify(state.jiraProjectScope.projectKeys) === JSON.stringify(["JPMC"]), "§20 — building an override never mutates the input state's global scope object; it stays exactly JPMC as before the call");
+}
+
+// ----- Artifact per-project evidence targeting (§22) + no cross-project AI leakage (§36):
+// inspect the actual fact/evidence payload, not just the rendered prose. -----
+{
+  const fixtureData = makeThreeProjectFixture();
+  const state = makeStoreState({ data: fixtureData, jiraProjectScope: { mode: "ALL", projectKeys: [] } });
+
+  const jpmcOverride = buildProjectOverrideView(state, TODAY, "JPMC");
+  const jpmcItem = jpmcOverride.proactive!.attentionQueue.find((a) => a.category === "RISK");
+  ok("V2.4 Artifact targeting", !!jpmcItem, "an explicit JPMC override surfaces JPMC's own risk as an attention item even though the global scope is ALL");
+  const draft = buildStakeholderUpdateDraft({ kind: "attention", item: jpmcItem! }, "Command Bar: JPMC Delivery");
+  const payloadText = JSON.stringify(draft.sections) + JSON.stringify(draft.evidence);
+  ok("V2.4 Artifact targeting", /JPMC/i.test(payloadText), "the stakeholder update's actual fact/evidence payload references the targeted project");
+  ok("V2.4 Artifact targeting", !/UBS critical risk|WF critical risk/i.test(payloadText), "the actual fact/evidence payload (not just the rendered summary) contains zero trace of another project's risk — no cross-project evidence leakage into an explicitly-targeted artifact (§22, §36)");
+}
+
+// ----- computeProjectAttentionMap / Executive Portfolio View (§16-17): per-project
+// deliveryConfidence, no blended portfolio score, correct in-scope/excluded split. -----
+{
+  const fixtureData = makeThreeProjectFixture();
+
+  const allRows = computeProjectAttentionMap(fixtureData, TODAY);
+  ok("V2.4 Portfolio view", allRows.length === 3, "one row per Jira project when nothing is excluded");
+  ok("V2.4 Portfolio view", allRows.every((r) => typeof r.deliveryConfidence === "number" && r.deliveryConfidence >= 0 && r.deliveryConfidence <= 100), "each row carries its own bounded 0-100 deliveryConfidence — never a blended cross-project number");
+  ok("V2.4 Portfolio view", new Set(allRows.map((r) => r.deliveryConfidence)).size >= 1, "computeProjectAttentionMap runs end-to-end without crashing across all three projects");
+
+  // Cross-check against the pre-existing per-client formula on this same 1:1 client<->project
+  // fixture — same underlying scoreAllWorkItems/computeDeliveryConfidence math, just grouped
+  // by a different key, so the two numbers must agree exactly.
+  const derivedAll = deriveData(fixtureData, null, TODAY);
+  const clientRows = computeClientAttentionMap(fixtureData, derivedAll, [], null, TODAY);
+  const jpmcProjectRow = allRows.find((r) => r.jiraKey === "JPMC")!;
+  const jpmcClientRow = clientRows.find((r) => r.clientId === "cli-jpmc")!;
+  ok("V2.4 Portfolio view", jpmcProjectRow.deliveryConfidence === jpmcClientRow.deliveryConfidence, "on a 1:1 client<->project fixture, computeProjectAttentionMap's number for a project exactly matches computeClientAttentionMap's number for its client — proving it's the same formula, not a new one");
+
+  const focusedScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] };
+  const scoped = applyProjectScope(fixtureData, focusedScope);
+  const scopedRows = computeProjectAttentionMap(scoped, TODAY);
+  ok("V2.4 Portfolio view", scopedRows.length === 2 && !scopedRows.some((r) => r.jiraKey === "WF"), "under a FOCUSED scope, the portfolio view only computes rows for in-scope projects");
+
+  const inScopeKeys = new Set(scopedRows.map((r) => r.jiraKey));
+  const excluded = knownJiraProjects(fixtureData).filter((p) => !inScopeKeys.has(p.key));
+  ok("V2.4 Portfolio view", excluded.length === 1 && excluded[0].key === "WF", "the excluded-by-scope project is identifiable by name from the full (unscoped) known-projects list, for the 'not shown — outside current focus' caption");
+}
+
+// ----- formatScopeLabel (§16-17, §23): one shared label, ALL/FOCUSED/empty-selection. -----
+{
+  const fixtureData = makeThreeProjectFixture();
+  ok("V2.4 Scope label", formatScopeLabel({ mode: "ALL", projectKeys: [] }, fixtureData) === "All Projects", "ALL mode reads as 'All Projects'");
+  ok("V2.4 Scope label", formatScopeLabel({ mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] }, fixtureData) === "JPMC Delivery + UBS Delivery", "FOCUSED mode joins the focused projects' own names, matching the spec's own 'Focus: JPMC + UBS' example");
+  ok("V2.4 Scope label", formatScopeLabel({ mode: "FOCUSED", projectKeys: [] }, fixtureData) === "No projects selected", "an empty FOCUSED selection is stated honestly, never silently shown as ALL");
+  ok("V2.4 Scope label", formatScopeLabel({ mode: "FOCUSED", projectKeys: ["DELETED"] }, fixtureData) === "DELETED", "a focused key no longer present in local data falls back to showing the raw key rather than crashing or hiding it");
+}
+
+// ----- Data Health: Global vs Current Scope (§24) — reuses computeDataHealth verbatim,
+// just called against two different (already-existing) data views. -----
+{
+  const fixtureData = makeThreeProjectFixture();
+  // makeItem() defaults every item to owner "Alice" — override so only WF's item has an
+  // owner; JPMC/UBS's items don't. Excluding WF from scope should then change the
+  // global-vs-scoped ownership percentage (global: 1/3 owned; JPMC+UBS scoped: 0/2 owned).
+  fixtureData.workItems = fixtureData.workItems.map((w) => ({ ...w, owner: w.projectId === "proj-wf" ? "Someone" : undefined }));
+
+  const globalHealth = computeDataHealth(fixtureData, "jira", undefined);
+  const scoped = applyProjectScope(fixtureData, { mode: "FOCUSED", projectKeys: ["JPMC", "UBS"] });
+  const scopedHealth = computeDataHealth(scoped, "jira", undefined);
+  ok("V2.4 Data health scope", globalHealth.ownershipCoveragePct !== scopedHealth.ownershipCoveragePct, "Global and Current Scope Data Health can genuinely differ when an out-of-scope project's items drag the global coverage number in a different direction");
+
+  const allScopeHealth = computeDataHealth(applyProjectScope(fixtureData, { mode: "ALL", projectKeys: [] }), "jira", undefined);
+  ok("V2.4 Data health scope", allScopeHealth.ownershipCoveragePct === globalHealth.ownershipCoveragePct, "under ALL scope, Global and Current Scope Data Health are identical, matching the UI's rule to only show one panel in that case");
+}
+
+// ----- Project Memory: MemoryEvent.projectId is populated ONLY via an explicit FK,
+// exercised through the real store (§14). -----
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const before = commandCenterStore.getSnapshot();
+  const jpmcAction = before.data.actions.find((a) => a.relatedWorkItemId && before.data.workItems.find((w) => w.id === a.relatedWorkItemId)?.projectId === "p-jpmc");
+  ok("V2.4 Memory scoping", !!jpmcAction, "the demo dataset has at least one action linked to a JPMC work item (fixture precondition)");
+
+  if (jpmcAction) {
+    commandCenterStore.completeAction(jpmcAction.id);
+    const afterComplete = commandCenterStore.getSnapshot();
+    const completedEvent = [...afterComplete.memoryEvents].reverse().find((e) => e.kind === "ACTION_COMPLETED");
+    ok("V2.4 Memory scoping", completedEvent?.projectId === "p-jpmc", "completing an action linked to a JPMC work item tags the resulting ACTION_COMPLETED memory event with JPMC's projectId, via the action's own relatedWorkItemId -> WorkItem.projectId FK");
+  }
+
+  const confirmedId = commandCenterStore.confirmDecisionFromOptions({
+    projectId: "p-ubs",
+    title: "Test UBS decision",
+    options: [{ id: "opt-1", label: "Option A", rationale: "x", upside: "x", downside: "x", dependencies: [], risks: [], evidence: [], confidence: 0.8 }],
+    selectedOptionId: "opt-1",
+    expectedOutcome: "x",
+  });
+  ok("V2.4 Memory scoping", !!confirmedId, "confirmDecisionFromOptions succeeds against the demo dataset");
+  const decisionEvent = [...commandCenterStore.getSnapshot().memoryEvents].reverse().find((e) => e.kind === "DECISION_MADE" && e.title.includes("Test UBS decision"));
+  ok("V2.4 Memory scoping", decisionEvent?.projectId === "p-ubs", "confirming a decision tags the DECISION_MADE memory event with the decision's own explicit projectId — no lookup or inference needed, it's already on the input");
+
+  const unlinkedActionId = commandCenterStore.addAction({ title: "Unlinked test action", why: "test", estimateMinutes: 5 });
+  commandCenterStore.startAction(unlinkedActionId);
+  const startedEvent = [...commandCenterStore.getSnapshot().memoryEvents].reverse().find((e) => e.kind === "ACTION_STARTED");
+  ok("V2.4 Memory scoping", startedEvent !== undefined && startedEvent.projectId === undefined, "an action with no relatedWorkItemId produces an ACTION_STARTED event with projectId left undefined — never guessed");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- State safety (§10, §27, §33): changing project scope never mutates lifecycle,
+// actions, decisions, or memory — it only changes the derived view. -----
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const beforeActions = JSON.stringify(commandCenterStore.getSnapshot().data.actions);
+  const beforeDecisions = JSON.stringify(commandCenterStore.getSnapshot().data.decisions);
+  const beforeAttention = JSON.stringify(commandCenterStore.getSnapshot().attentionState);
+  const beforeMemory = JSON.stringify(commandCenterStore.getSnapshot().memoryEvents);
+
+  commandCenterStore.setJiraProjectScope("FOCUSED", ["JPMC"]);
+  commandCenterStore.setJiraProjectScope("ALL");
+  commandCenterStore.setJiraProjectScope("FOCUSED", ["UBS", "WF"]);
+
+  ok("V2.4 State safety", JSON.stringify(commandCenterStore.getSnapshot().data.actions) === beforeActions, "changing Focus Project Scope (any number of times, any mode) never mutates data.actions");
+  ok("V2.4 State safety", JSON.stringify(commandCenterStore.getSnapshot().data.decisions) === beforeDecisions, "changing Focus Project Scope never mutates data.decisions");
+  ok("V2.4 State safety", JSON.stringify(commandCenterStore.getSnapshot().attentionState) === beforeAttention, "changing Focus Project Scope never mutates attention lifecycle state");
+  ok("V2.4 State safety", JSON.stringify(commandCenterStore.getSnapshot().memoryEvents) === beforeMemory, "changing Focus Project Scope never mutates memoryEvents");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- Performance (§29): Set-based membership, no O(n^2) blowup on a large synthetic
+// catalog. -----
+{
+  const bigProjects = Array.from({ length: 300 }, (_, i) => ({
+    id: `big-proj-${i}`, name: `Big Project ${i}`, clientId: `big-client-${i}`, status: "on-track" as const, sourceType: "jira" as const, sourceId: `BIG${i}`,
+  }));
+  const bigClients = Array.from({ length: 300 }, (_, i) => ({ id: `big-client-${i}`, name: `Client ${i}` }));
+  const bigWorkItems = Array.from({ length: 3000 }, (_, i) =>
+    makeItem({ id: `big-wi-${i}`, key: `BIG${i % 300}-${i}`, projectId: `big-proj-${i % 300}`, clientId: `big-client-${i % 300}`, sourceType: "jira" as const })
+  );
+  const bigData = { ...emptyData(), projects: bigProjects, clients: bigClients, workItems: bigWorkItems };
+
+  const focusedKeys = Array.from({ length: 150 }, (_, i) => `BIG${i}`);
+  const start = Date.now();
+  const bigScoped = applyProjectScope(bigData, { mode: "FOCUSED", projectKeys: focusedKeys });
+  computeProjectAttentionMap(bigScoped, TODAY);
+  const elapsedMs = Date.now() - start;
+  ok("V2.4 Performance", bigScoped.projects.length === 150 && bigScoped.workItems.length === 1500, "a large (300-project/3000-item) catalog scopes down to exactly the focused half");
+  ok("V2.4 Performance", elapsedMs < 2000, `applyProjectScope + computeProjectAttentionMap over 300 projects/3000 items completes well within a generous bound (${elapsedMs}ms) — consistent with Set-based membership, not O(n^2) array.includes() scans`);
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
