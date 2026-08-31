@@ -7,6 +7,8 @@ import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/compon
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
+import { collectObservedStatuses, WORK_RELEVANCE_EXPLANATIONS } from "@/lib/command-center/jira/work-relevance";
+import { WORK_RELEVANCE_VALUES, type WorkRelevance } from "@/lib/command-center/types";
 import { computeDataHealth } from "@/lib/command-center/data-health";
 import { getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
 import { getCacheStats } from "@/lib/command-center/ai/ai-cache";
@@ -257,6 +259,119 @@ function JiraProjectScopePanel({
   );
 }
 
+const RELEVANCE_SELECT_STYLE: Record<WorkRelevance, string> = {
+  ACTIONABLE: "text-green",
+  WAITING: "text-yellow",
+  OBSERVE: "text-accent2",
+  COMPLETED: "text-text3",
+  EXCLUDED: "text-red",
+  UNKNOWN: "text-text3",
+};
+
+// V2.5 — Work Relevance & Jira Status Policy. Lives inside Data & Settings, right beside
+// Jira Project Scope (§8 "no new settings page"). One project at a time, statuses derived
+// from OBSERVED Jira data (§6), grouped by their current classification so the layout
+// matches the spec's own worked example. A plain <select> per status — no drag-and-drop.
+// Every change is immediate and local (store.setJiraStatusRelevance), no Jira write.
+function JiraWorkRelevancePolicyPanel({
+  state,
+  store,
+  jiraConfigured,
+}: {
+  state: ReturnType<typeof useCommandCenter>["state"];
+  store: ReturnType<typeof useCommandCenter>["store"];
+  jiraConfigured: boolean | undefined;
+}) {
+  const projects = useMemo(() => knownJiraProjects(state.data), [state.data]);
+  const [selectedProject, setSelectedProject] = useState<string>("");
+  const activeProjectKey = selectedProject || projects[0]?.key || "";
+
+  const observedStatuses = useMemo(() => (activeProjectKey ? collectObservedStatuses(state.data, activeProjectKey) : []), [state.data, activeProjectKey]);
+  const statusMap = state.jiraWorkRelevancePolicy[activeProjectKey]?.statusMap ?? {};
+
+  const groups: Record<WorkRelevance, string[]> = { ACTIONABLE: [], WAITING: [], OBSERVE: [], COMPLETED: [], EXCLUDED: [], UNKNOWN: [] };
+  for (const status of observedStatuses) groups[statusMap[status] ?? "UNKNOWN"].push(status);
+
+  if (!jiraConfigured) {
+    return (
+      <Panel className="p-5">
+        <SectionHeading
+          title="Jira Work Relevance Policy"
+          subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status per project so Daily Command Center knows the difference."
+        />
+        <p className="text-sm text-text3">Work Relevance Policy is available for Jira data. Configure Jira above to enable it.</p>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel className="p-5">
+      <SectionHeading
+        title="Jira Work Relevance Policy"
+        subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status per project so Daily Command Center knows the difference."
+      />
+      {projects.length === 0 ? (
+        <p className="text-sm text-text3">No Jira projects known yet — sync Jira first, then return here to classify its statuses.</p>
+      ) : (
+        <div className="space-y-3 text-sm">
+          <label className="flex items-center gap-2 text-xs text-text2">
+            Project
+            <select
+              value={activeProjectKey}
+              onChange={(e) => setSelectedProject(e.target.value)}
+              className="rounded-md border border-border bg-surface2 px-2 py-1 text-xs text-text"
+            >
+              {projects.map((p) => (
+                <option key={p.key} value={p.key}>
+                  {p.name} ({p.key})
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {observedStatuses.length === 0 ? (
+            <p className="text-xs text-text3">No Jira statuses observed yet for {activeProjectKey} — sync Jira to populate this list.</p>
+          ) : (
+            <div className="space-y-3">
+              {WORK_RELEVANCE_VALUES.map((relevance) => {
+                const statuses = groups[relevance];
+                if (statuses.length === 0) return null;
+                return (
+                  <div key={relevance} className="rounded-md border border-border bg-surface2 p-3">
+                    <p className={`text-xs font-semibold uppercase tracking-wide ${RELEVANCE_SELECT_STYLE[relevance]}`}>
+                      {relevance === "UNKNOWN" ? "UNMAPPED" : relevance}
+                    </p>
+                    <p className="mt-0.5 text-xs text-text3">{WORK_RELEVANCE_EXPLANATIONS[relevance]}</p>
+                    <div className="mt-2 space-y-1.5">
+                      {statuses.map((status) => (
+                        <div key={status} className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-surface px-2.5 py-1.5">
+                          <span className="font-mono text-xs text-text">{status}</span>
+                          <select
+                            value={statusMap[status] ?? "UNKNOWN"}
+                            onChange={(e) => store.setJiraStatusRelevance(activeProjectKey, status, e.target.value as WorkRelevance)}
+                            aria-label={`Classify Jira status "${status}" for ${activeProjectKey}`}
+                            className="rounded border border-border bg-surface2 px-2 py-1 text-xs text-text"
+                          >
+                            {WORK_RELEVANCE_VALUES.map((v) => (
+                              <option key={v} value={v}>
+                                {v === "UNKNOWN" ? "Unclassified" : v}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
   good: "text-green",
   warn: "text-yellow",
@@ -276,7 +391,7 @@ const JIRA_ERROR_HELP: Record<string, string> = {
 };
 
 export default function DataSettingsPage() {
-  const { state, store, filteredData, derived, proactive, personalFocus, today } = useCommandCenter();
+  const { state, store, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex } = useCommandCenter();
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
@@ -303,7 +418,10 @@ export default function DataSettingsPage() {
   const aiTraceSummary = useMemo(() => getAiTraceSummary(getTodayIso()), [aiTraceTick]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const cacheStats = useMemo(() => getCacheStats(), [aiTraceTick]);
-  const dataHealth = useMemo(() => computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt), [state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt]);
+  const dataHealth = useMemo(
+    () => computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex),
+    [state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt, workRelevanceIndex]
+  );
   const trustDiagnostic = useMemo(
     () =>
       computeTrustDiagnostic({
@@ -593,6 +711,8 @@ export default function DataSettingsPage() {
 
       <JiraProjectScopePanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
 
+      <JiraWorkRelevancePolicyPanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
+
       <Panel className="p-5">
         <SectionHeading title="Jira Conformance" subtitle="Runs the same connector code (pagination, mapping, error classification) against fixtures — or, when Jira is configured, the real API — never a reimplementation." />
         <button onClick={runConformance} disabled={conformanceLoading} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-60">
@@ -797,6 +917,12 @@ export default function DataSettingsPage() {
             <p className="text-text3">Open work items</p>
             <p className="font-display text-text">{dataHealth.totalWorkItems}</p>
           </div>
+          {dataHealth.unclassifiedJiraStatusCount !== undefined && (
+            <div className="rounded-md border border-border bg-surface2 px-3 py-2">
+              <p className="text-text3">Unclassified Jira statuses</p>
+              <p className={`font-display ${dataHealth.unclassifiedJiraStatusCount > 0 ? "text-yellow" : "text-text"}`}>{dataHealth.unclassifiedJiraStatusCount}</p>
+            </div>
+          )}
         </div>
         {/* V2.3 §17 — makes scope visible in Data Health without introducing a blended
             "scope score"; a plain fact, styled like the trust-diagnostic rows above. */}

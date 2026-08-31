@@ -8,6 +8,7 @@ import { buildPlan } from "./action-plan";
 import { computeReleaseHealth } from "./release-health";
 import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
+import { explainWorkItemRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, Evidence, EvidenceSourceType, PersonalDeliveryReviewFacts } from "./types";
 import type { DerivedData } from "./selectors";
 import type { ProactiveIntelligence } from "./proactive";
@@ -50,6 +51,11 @@ export type QueryIntent =
   | "where-spending-time"
   | "whats-blocking-focus"
   | "what-should-i-defer"
+  // V2.5 §17 — Work Relevance & Jira Status Policy intents. Deterministic lookups over
+  // WorkItem.jiraStatusName + the Work Relevance Policy index — never routed through AI.
+  | "jira-status-context"
+  | "jira-status-waiting"
+  | "jira-statuses-unclassified"
   // V2.2 §10 — Command Bar artifact intents. Deliberately NOT narrated through
   // answerFromRoute/answerQuery (see isArtifactIntent below) — these open the Artifact
   // Editor with a communicate.ts-built draft instead of an AI-narrated answer, so Command
@@ -92,6 +98,10 @@ const QUERY_FAMILY: Record<Exclude<QueryIntent, "unrecognized">, QueryFamily> = 
   "whats-blocking-focus": "PRIORITY",
   "what-should-i-defer": "PRIORITY",
   "personal-can-wait": "PRIORITY",
+
+  "jira-status-context": "STATUS",
+  "jira-status-waiting": "STATUS",
+  "jira-statuses-unclassified": "STATUS",
 
   "decisions-to-revisit": "DECISION",
   "decisions-blocked": "DECISION",
@@ -218,8 +228,11 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   if (/finish.*30.?min|30.?min.*finish|complete.*30.?min|30.?min.*plan|plan.*30.?min|my 30.?min/.test(q)) {
     return { intent: "personal-thirty-min" };
   }
+  // V2.5 §18 — capture a mentioned Jira issue key (e.g. "why isn't JPMC-123 on my list?")
+  // so answerFromRoute can answer via the deterministic Work Relevance explanation when the
+  // item isn't a personal-focus candidate at all, not just explain items already on it.
   if (/why (is this|.*on my list)/.test(q)) {
-    return { intent: "why-on-my-list" };
+    return { intent: "why-on-my-list", target: findTarget(q, data.workItems.map((w) => w.key)) };
   }
   if (/am i overloaded|too much (on my plate|to do)/.test(q)) {
     return { intent: "am-i-overloaded" };
@@ -245,6 +258,20 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   if (/what should i defer/.test(q)) {
     return { intent: "what-should-i-defer" };
   }
+  // V2.5 §17 — checked before the generic patterns below (e.g. "what should i do") so
+  // status-context/waiting/unclassified questions are never misrouted to next-actions.
+  if (/not classified|unclassified/.test(q)) {
+    return { intent: "jira-statuses-unclassified" };
+  }
+  if (/what('s| is) waiting|waiting on (me|us)|things? (are )?waiting/.test(q)) {
+    return { intent: "jira-status-waiting" };
+  }
+  {
+    const statusContextMatch = q.match(/what('s| is) in ([a-z0-9 /_-]+)\??$/);
+    if (statusContextMatch) {
+      return { intent: "jira-status-context", target: statusContextMatch[2].trim() };
+    }
+  }
   if (/who.*(contact|need to know)|contact.*who/.test(q)) {
     return { intent: "who-to-contact" };
   }
@@ -267,7 +294,9 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   if (/risk/.test(q)) {
     return { intent: "risks-for", target: findTarget(q, [...clientNames, ...projectNames]) };
   }
-  if (/what should i do|next \d+\s*min/.test(q)) {
+  // V2.5 §17 — "What do I need to work on?" is the spec's own worked example for the
+  // ACTIONABLE-only surface; it didn't match the existing "what should i do" phrasing.
+  if (/what should i do|next \d+\s*min|what do i need to (work on|do)|what.*need.*work on/.test(q)) {
     const minutesMatch = q.match(/(\d+)\s*min/);
     return { intent: "next-actions", minutes: minutesMatch ? Number(minutesMatch[1]) : 30 };
   }
@@ -291,7 +320,8 @@ export function answerFromRoute(
   sourceType: EvidenceSourceType,
   proactive?: ProactiveIntelligence,
   personalFocus?: PersonalFocusResult,
-  personalReview?: PersonalDeliveryReviewFacts
+  personalReview?: PersonalDeliveryReviewFacts,
+  workRelevanceIndex?: WorkRelevanceIndex
 ): QueryFacts {
   const none = (msg: string): QueryFacts => ({ facts: [msg], evidence: [], recommendedAction: "No action needed right now." });
   if (!proactive && route.intent !== "unrecognized" && isProactiveIntent(route.intent)) {
@@ -474,12 +504,66 @@ export function answerFromRoute(
       };
     }
     case "why-on-my-list": {
+      // V2.5 §18 — a named Jira issue not on personal-focus at all (the common case: its
+      // status was classified OBSERVE/WAITING/etc.) gets the deterministic Work Relevance
+      // explanation instead of a generic "nothing is on your list" — this is the trust
+      // requirement the whole feature exists for ("why isn't Daily Command showing my
+      // ticket?" -> "because this status is classified as delivery context").
+      if (route.target) {
+        const item = data.workItems.find((w) => w.key.toLowerCase() === route.target!.toLowerCase());
+        if (item && item.sourceType === "jira") {
+          const explanation = explainWorkItemRelevance(item, workRelevanceIndex ?? new Map());
+          return {
+            facts: [explanation.answer],
+            evidence: [],
+            recommendedAction: explanation.relevance === "UNKNOWN" ? "Classify this status in Data & Settings → Jira Work Relevance Policy." : "",
+          };
+        }
+      }
       const top = personalFocus!.candidates.slice(0, 5);
       if (top.length === 0) return none("Nothing is currently on your personal focus list.");
       return {
         facts: top.map((c) => `${c.title}: ${c.whyOnMyList}`),
         evidence: [],
         recommendedAction: "",
+      };
+    }
+    // V2.5 §17 — status-context/waiting/unclassified: plain deterministic lookups over
+    // WorkItem.jiraStatusName + the Work Relevance Policy index. Never routed through AI,
+    // and distinct from "next-actions" below, which asks a completely different question
+    // ("what do I need to work on?" vs. "what's in this delivery/process state?").
+    case "jira-status-context": {
+      const idx = workRelevanceIndex ?? new Map();
+      const observeItems = workItemsByRelevance(data, idx, "OBSERVE");
+      const keyword = route.target?.trim().toLowerCase();
+      const matched = keyword ? observeItems.filter((w) => (w.jiraStatusName ?? "").toLowerCase().includes(keyword)) : observeItems;
+      if (matched.length === 0) {
+        return none(keyword ? `No items are currently classified OBSERVE matching "${route.target}".` : "No items are currently classified OBSERVE.");
+      }
+      return {
+        facts: matched.slice(0, 8).map((w) => `${w.key} — ${w.title} (${w.jiraStatusName})`),
+        evidence: matched.slice(0, 8).map((w) => makeEvidence(`${w.key}: ${w.jiraStatusName}`, sourceType, w.id)),
+        recommendedAction: "This is delivery/process context — not a personal task.",
+      };
+    }
+    case "jira-status-waiting": {
+      const idx = workRelevanceIndex ?? new Map();
+      const items = workItemsByRelevance(data, idx, "WAITING");
+      if (items.length === 0) return none("Nothing is currently classified WAITING.");
+      return {
+        facts: items.slice(0, 8).map((w) => `${w.key} — ${w.title} (${w.jiraStatusName})`),
+        evidence: items.slice(0, 8).map((w) => makeEvidence(`${w.key}: ${w.jiraStatusName}`, sourceType, w.id)),
+        recommendedAction: "Waiting on another party or process — no immediate action required.",
+      };
+    }
+    case "jira-statuses-unclassified": {
+      const idx = workRelevanceIndex ?? new Map();
+      const rows = listUnclassifiedJiraStatuses(data, idx);
+      if (rows.length === 0) return none("Every observed Jira status is currently classified.");
+      return {
+        facts: rows.map((r) => `${r.projectKey}: "${r.status}" has not been classified.`),
+        evidence: [],
+        recommendedAction: "Classify these in Data & Settings → Jira Work Relevance Policy.",
       };
     }
     case "am-i-overloaded": {
@@ -583,7 +667,7 @@ export function answerFromRoute(
       };
     }
     case "next-actions": {
-      const plan = buildPlan(data, today, (route.minutes ?? 30) as 15 | 30 | 60 | 120 | 480);
+      const plan = buildPlan(data, today, (route.minutes ?? 30) as 15 | 30 | 60 | 120 | 480, workRelevanceIndex);
       if (plan.length === 0) return { facts: ["No candidates fit this time window."], evidence: [], recommendedAction: "Try a longer time budget." };
       return {
         facts: plan.map((c) => `${c.title} (${c.estimateMinutes} min)`),

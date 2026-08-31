@@ -11,6 +11,7 @@ import { todayLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
+import { DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
 import { computeActionEffectiveness } from "./action-effectiveness";
 import { computeDecisionRadar } from "./decision-radar";
 import { computeDeliveryDrift } from "./delivery-drift";
@@ -40,6 +41,7 @@ import type {
   DecisionOption,
   GlobalFilters,
   JiraProjectScope,
+  JiraStatusPolicy,
   JiraSyncState,
   MemoryEvent,
   PersonalFocusCandidate,
@@ -48,6 +50,7 @@ import type {
   PersonalPlanItemSnapshot,
   PersonalPlanItemStatus,
   PlanItemOrigin,
+  WorkRelevance,
 } from "./types";
 import { DATA_SCHEMA_VERSION, emptyData } from "./types";
 import type { ImportResult } from "./import";
@@ -85,6 +88,11 @@ export interface StoreState {
   // discoverable Jira project is synced/analyzed; FOCUSED restricts to `projectKeys`. See
   // jira/project-scope.ts for the enforcement and parsing logic.
   jiraProjectScope: JiraProjectScope;
+  // V2.5 — Work Relevance & Jira Status Policy. Keyed by Jira project KEY, same identifier
+  // as jiraProjectScope. Empty map (the default) means no status has been classified for any
+  // project yet — every Jira status is conservatively UNKNOWN until the user classifies it
+  // in Data & Settings. See jira/work-relevance.ts.
+  jiraWorkRelevancePolicy: Record<string, JiraStatusPolicy>;
   // V1.4 §39-41 — attention lifecycle (deliberately separate from any Jira status) and a
   // small set of meaningful proactive-intelligence events. Both additive/optional-safe.
   attentionState: Record<string, AttentionItemState>;
@@ -123,6 +131,7 @@ function initialState(): StoreState {
     jiraSync: initialJiraSync(),
     filters: {},
     jiraProjectScope: { ...DEFAULT_JIRA_PROJECT_SCOPE },
+    jiraWorkRelevancePolicy: { ...DEFAULT_WORK_RELEVANCE_POLICY_MAP },
     attentionState: {},
     memoryEvents: [],
     ownerName: undefined,
@@ -205,6 +214,7 @@ export function parseStoredState(raw: string): StoreState {
       jiraSync: asPlainObject(parsed.jiraSync, initialJiraSync()),
       filters: asPlainObject(parsed.filters, {}),
       jiraProjectScope: parseJiraProjectScope(parsed.jiraProjectScope),
+      jiraWorkRelevancePolicy: parseWorkRelevancePolicyMap(parsed.jiraWorkRelevancePolicy),
       attentionState: asPlainObject(parsed.attentionState, {}),
       memoryEvents: Array.isArray(parsed.memoryEvents) ? parsed.memoryEvents : [],
       ownerName: typeof parsed.ownerName === "string" ? parsed.ownerName : undefined,
@@ -413,6 +423,15 @@ export class CommandCenterStore {
       ...this.state,
       jiraProjectScope: { mode, projectKeys: mode === "FOCUSED" ? nextKeys : this.state.jiraProjectScope.projectKeys, updatedAt: new Date().toISOString() },
     });
+  }
+
+  /** V2.5 — the ONLY place a Jira status classification is ever set. Always explicit and
+   *  user-driven (no automatic status classification, no AI — see jira/work-relevance.ts).
+   *  A configuration change, not a delivery event — deliberately does not emit a memory
+   *  event (§23 "a status classification change is configuration, not a delivery event"). */
+  setJiraStatusRelevance(projectKey: string, status: string, relevance: WorkRelevance) {
+    if (!projectKey.trim() || !status.trim()) return;
+    this.set({ ...this.state, jiraWorkRelevancePolicy: withStatusRelevance(this.state.jiraWorkRelevancePolicy, projectKey, status, relevance) });
   }
 
   /**

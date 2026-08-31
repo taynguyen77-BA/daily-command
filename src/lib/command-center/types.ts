@@ -213,6 +213,12 @@ export interface WorkItem {
   sourceType?: EvidenceSourceType;
   sourceId?: string; // e.g. Jira issue key
   sourceUrl?: string; // never fabricated — only set when a real base URL is configured
+  // V2.5 — the raw Jira status NAME (e.g. "Ready for UAT/Business Test"), distinct from the
+  // collapsed `status` enum above. Only ever set for sourceType "jira" (never fabricated for
+  // demo/local-import data); this is what jira/work-relevance.ts classifies against, since
+  // the 5-value WorkItemStatus enum is too coarse to distinguish "In Progress" from
+  // "Ready for UAT" — both map to "In Progress" today.
+  jiraStatusName?: string;
 }
 
 export interface DailySnapshot {
@@ -459,6 +465,30 @@ export interface JiraProjectSummary {
   id?: string;
   key: string;
   name: string;
+}
+
+// ===== V2.5 — Work Relevance & Jira Status Policy =====
+// A Jira workflow status is delivery/process state, not automatically "work the user needs
+// to do". This is a deterministic semantic layer over the existing Jira ingestion — no new
+// task system, no new scoring engine, no AI classification. `JiraStatusPolicy` is additional
+// per-project configuration, keyed by the same Jira project KEY used throughout this codebase
+// (JiraProjectScope.projectKeys, Project.sourceId, WorkItem.projectId's `jira-project-${key}`
+// prefix) — see jira/work-relevance.ts for the enforcement/parsing logic.
+export type WorkRelevance = "ACTIONABLE" | "WAITING" | "OBSERVE" | "COMPLETED" | "EXCLUDED" | "UNKNOWN";
+
+/** Every classification the user can explicitly choose in Data & Settings, plus the
+ *  system-computed UNKNOWN state for anything not yet classified — UNKNOWN is never a
+ *  selectable option (it simply means "no explicit choice has been made"). */
+export const WORK_RELEVANCE_VALUES: WorkRelevance[] = ["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED", "UNKNOWN"];
+
+/** One project's status→relevance map. `statusMap` keys are the raw Jira status NAME exactly
+ *  as observed (e.g. "Ready for UAT/Business Test") — never normalized/fuzzy-matched, and
+ *  never assumed to mean the same thing in a different project (§6 "prefer project-specific
+ *  classification"). A status absent from `statusMap` is UNKNOWN, not guessed. */
+export interface JiraStatusPolicy {
+  projectKey: string;
+  statusMap: Record<string, WorkRelevance>;
+  updatedAt?: string;
 }
 
 /** V1.3 §9 — the compact global context filter. All fields undefined = "All". */
@@ -1317,6 +1347,11 @@ export interface DataHealth {
   scopeHistoryCoverage: "full" | "partial" | "none";
   totalWorkItems: number;
   remediation?: DataHealthRemediationItem[];
+  // V2.5 — count of distinct (project, Jira status) pairs currently UNKNOWN under the Work
+  // Relevance Policy, among in-scope open Jira work items. Optional/additive; undefined for
+  // non-Jira sources where the concept doesn't apply. Surfaced as its own remediation entry,
+  // never blended into any other dimension (§19 "do not reduce Delivery Confidence").
+  unclassifiedJiraStatusCount?: number;
 }
 
 // ===== V2.2 — Evidence -> Delivery Artifact (the COMMUNICATE layer) =====

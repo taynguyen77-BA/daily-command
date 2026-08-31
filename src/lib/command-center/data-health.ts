@@ -7,6 +7,7 @@
 // real WorkItem ids already in the domain model — never invented work.
 
 import { computeFreshness } from "./freshness";
+import { countUnclassifiedJiraStatuses, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, DataHealth, DataHealthRemediationItem, DataSourceType, WorkItem } from "./types";
 
 function pct(numerator: number, denominator: number): number {
@@ -18,7 +19,7 @@ function idsOf(items: WorkItem[]): string[] {
   return items.map((w) => w.id);
 }
 
-export function computeDataHealth(data: CommandCenterData, sourceType: DataSourceType, lastSyncedAtIso: string | undefined, nowMs?: number): DataHealth {
+export function computeDataHealth(data: CommandCenterData, sourceType: DataSourceType, lastSyncedAtIso: string | undefined, nowMs?: number, workRelevanceIndex?: WorkRelevanceIndex): DataHealth {
   const openItems = data.workItems.filter((w) => w.status !== "Done");
   const totalWorkItems = openItems.length;
 
@@ -77,6 +78,19 @@ export function computeDataHealth(data: CommandCenterData, sourceType: DataSourc
       affectedItemIds: idsOf(withoutScopeSignal),
     });
   }
+  // V2.5 §19 — its own dimension, never blended into any other score or into Delivery
+  // Confidence. Only meaningful when a Work Relevance Policy index was actually supplied
+  // (data-health.ts is also called from contexts with no Jira concept at all).
+  const unclassifiedJiraStatusCount = workRelevanceIndex ? countUnclassifiedJiraStatuses(data, workRelevanceIndex) : undefined;
+  if (sourceType === "jira" && unclassifiedJiraStatusCount !== undefined && unclassifiedJiraStatusCount > 0) {
+    remediation.push({
+      dimension: "Unclassified Jira statuses",
+      what: `${unclassifiedJiraStatusCount} Jira status(es) observed in your data have not been classified under the Work Relevance Policy.`,
+      whyItMatters: "Daily Command Center excludes unclassified statuses from actionable work surfaces (Personal Focus, Next Actions, First 30 Minutes) until they're classified — this is intentional, not a bug.",
+      whatToDo: "Review Jira Work Relevance Policy in Data & Settings and classify each status as ACTIONABLE, WAITING, OBSERVE, COMPLETED, or EXCLUDED.",
+      affectedItemIds: [],
+    });
+  }
   if (freshness === "stale" || freshness === "aging") {
     remediation.push({
       dimension: "Freshness",
@@ -96,5 +110,6 @@ export function computeDataHealth(data: CommandCenterData, sourceType: DataSourc
     scopeHistoryCoverage,
     totalWorkItems,
     remediation,
+    unclassifiedJiraStatusCount,
   };
 }

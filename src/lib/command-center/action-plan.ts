@@ -3,6 +3,7 @@
 // the AI provider only narrates the result (see ai/provider.ts generateActionPlan).
 
 import { scoreWorkItem } from "./scoring";
+import { isPersonalWorkEligibleItem, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { Action, CommandCenterData, PriorityScoreResult, WorkItem } from "./types";
 
 export type TimeBudget = 15 | 30 | 60 | 120 | 480;
@@ -33,7 +34,7 @@ function estimateForWorkItem(item: WorkItem): number {
   return minutes;
 }
 
-export function buildCandidates(data: CommandCenterData, today: string): PlanCandidate[] {
+export function buildCandidates(data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex): PlanCandidate[] {
   const candidates: PlanCandidate[] = [];
   const coveredItemIds = new Set(
     data.actions.filter((a) => a.status === "open" && a.relatedWorkItemId).map((a) => a.relatedWorkItemId!)
@@ -55,8 +56,16 @@ export function buildCandidates(data: CommandCenterData, today: string): PlanCan
     });
   }
 
+  // V2.5 — a bare Jira work item only earns an auto-suggested candidate slot here when its
+  // Work Relevance is ACTIONABLE (or the concept doesn't apply — demo/local-import data).
+  // This is the ONE place in the codebase where a raw WorkItem (as opposed to an explicit,
+  // human- or system-created Action above) becomes a personal task candidate — an OBSERVE/
+  // WAITING/COMPLETED/EXCLUDED/UNKNOWN Jira status must never surface here regardless of
+  // score/ownership/priority (§10-11). An Action a user has explicitly created and linked to
+  // such an item is untouched — that's the user's own explicit decision, not an inference.
   for (const item of data.workItems) {
     if (item.status === "Done" || coveredItemIds.has(item.id)) continue;
+    if (workRelevanceIndex && !isPersonalWorkEligibleItem(item, workRelevanceIndex)) continue;
     const result = scoreWorkItem(item, data, today);
     if (result.score < 40) continue; // LOW-priority items don't earn a slot in a time-boxed plan
     candidates.push({
@@ -74,8 +83,8 @@ export function buildCandidates(data: CommandCenterData, today: string): PlanCan
 }
 
 /** Greedy fill: highest priority first, skip anything that doesn't fit the remaining budget. */
-export function buildPlan(data: CommandCenterData, today: string, budgetMinutes: TimeBudget): PlanCandidate[] {
-  const candidates = buildCandidates(data, today);
+export function buildPlan(data: CommandCenterData, today: string, budgetMinutes: TimeBudget, workRelevanceIndex?: WorkRelevanceIndex): PlanCandidate[] {
+  const candidates = buildCandidates(data, today, workRelevanceIndex);
   const plan: PlanCandidate[] = [];
   let remaining = budgetMinutes;
   for (const c of candidates) {

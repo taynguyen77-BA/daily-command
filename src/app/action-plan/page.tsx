@@ -107,10 +107,10 @@ function CandidateRow({ candidate }: { candidate: PlanCandidate }) {
 }
 
 export default function ActionPlanPage() {
-  const { state, today, filteredData, store } = useCommandCenter();
+  const { state, today, filteredData, workRelevanceIndex, store } = useCommandCenter();
   const [budget, setBudget] = useState<TimeBudget>(30);
 
-  const plan = useMemo(() => (state.loaded ? buildPlan(filteredData, today, budget) : []), [state.loaded, filteredData, today, budget]);
+  const plan = useMemo(() => (state.loaded ? buildPlan(filteredData, today, budget, workRelevanceIndex) : []), [state.loaded, filteredData, today, budget, workRelevanceIndex]);
 
   if (!state.loaded) {
     return (

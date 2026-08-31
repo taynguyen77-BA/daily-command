@@ -97,6 +97,10 @@ export function normalizeIssue(issue: JiraIssue, options: NormalizeOptions): { w
     sourceType: "jira",
     sourceId: issue.key,
     sourceUrl: issueUrl(options.baseUrl, issue.key),
+    // V2.5 — the raw Jira status name, never fabricated/normalized. This is what the Work
+    // Relevance Policy classifies against; the collapsed `status` enum above is too coarse
+    // (e.g. "Ready for UAT" and "In Progress" both map to "In Progress").
+    jiraStatusName: f.status?.name,
   };
 
   return { workItem, dependencies };

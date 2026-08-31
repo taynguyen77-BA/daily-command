@@ -5,6 +5,7 @@ import { commandCenterStore, getTodayIso, previousSnapshotOf, type StoreState } 
 import { deriveData } from "@/lib/command-center/selectors";
 import { applyFilters } from "@/lib/command-center/filters";
 import { applyProjectScope } from "@/lib/command-center/jira/project-scope";
+import { buildWorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { computeProactiveIntelligence } from "@/lib/command-center/proactive";
 import { computePersonalFocus } from "@/lib/command-center/personal-focus";
 
@@ -43,12 +44,21 @@ export function useCommandCenter() {
     [filteredData, previousSnapshot, today]
   );
 
+  // V2.5 — Work Relevance Policy index, built once per render from the persisted per-project
+  // status maps. Threaded into computeProactiveIntelligence (which uses it for First 30
+  // Minutes' action-plan fallback) and exposed directly for surfaces that classify a raw
+  // WorkItem themselves (Command Bar, action-plan page, Data & Settings).
+  const workRelevanceIndex = useMemo(
+    () => buildWorkRelevanceIndex(state.jiraWorkRelevancePolicy),
+    [state.jiraWorkRelevancePolicy]
+  );
+
   // V1.4 — one composed bundle for every proactive engine, mirroring `derived` above.
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
   const proactive = useMemo(
-    () => (state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today) : null),
+    () => (state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, workRelevanceIndex) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -67,7 +77,7 @@ export function useCommandCenter() {
     [filteredData, proactive, state.ownerName, today]
   );
 
-  return { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, store: commandCenterStore };
+  return { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, store: commandCenterStore };
 }
 
 /** V2.4 §19-20, §23 — Command Bar / Meeting Mode explicit project override. Runs the exact
@@ -84,7 +94,8 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const previousSnapshot = previousSnapshotOf(state);
   const derived = deriveData(filteredData, previousSnapshot, today);
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
-  const proactive = state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today) : null;
+  const workRelevanceIndex = buildWorkRelevanceIndex(state.jiraWorkRelevancePolicy);
+  const proactive = state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, workRelevanceIndex) : null;
   const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today) : null;
-  return { filteredData, derived, proactive, personalFocus };
+  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex };
 }

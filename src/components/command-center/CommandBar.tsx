@@ -9,6 +9,7 @@ import { buildDecisionBriefDraft, buildReleaseUpdateDraft, buildStakeholderUpdat
 import { computeReleaseHealth } from "@/lib/command-center/release-health";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { commandUsageKey, USAGE_KEYS } from "@/lib/command-center/usage";
+import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { ArtifactDraft, CommandCenterData, JiraProjectSummary, PersonalDeliveryReviewFacts, PersonalFocusResult, QueryAnswer } from "@/lib/command-center/types";
 import { useCommandCenter, buildProjectOverrideView } from "./use-command-center";
 import type { DerivedData } from "@/lib/command-center/selectors";
@@ -26,6 +27,7 @@ interface CommandView {
   proactive: ProactiveIntelligence | null;
   personalFocus: PersonalFocusResult | null;
   personalReview: PersonalDeliveryReviewFacts | undefined;
+  workRelevanceIndex: WorkRelevanceIndex;
 }
 
 const EXAMPLES = [
@@ -42,7 +44,7 @@ const EXAMPLES = [
 /** V1.3 §26 — NOT a generic chatbot. Every query is routed deterministically
  *  (query-router.ts) to a known intent; Claude only narrates the retrieved facts. */
 export function CommandBar() {
-  const { state, today, filteredData, derived, proactive, personalFocus } = useCommandCenter();
+  const { state, today, filteredData, derived, proactive, personalFocus, workRelevanceIndex } = useCommandCenter();
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QueryAnswer | null>(null);
@@ -87,7 +89,7 @@ export function CommandBar() {
       return;
     }
 
-    let view: CommandView = { filteredData, derived, proactive, personalFocus, personalReview };
+    let view: CommandView = { filteredData, derived, proactive, personalFocus, personalReview, workRelevanceIndex };
     if (mention) {
       const override = buildProjectOverrideView(state, today, mention.match.key);
       view = {
@@ -130,7 +132,8 @@ export function CommandBar() {
       state.isDemo ? "demo" : "manual",
       view.proactive ?? undefined,
       view.personalFocus ?? undefined,
-      view.personalReview
+      view.personalReview,
+      view.workRelevanceIndex
     );
     const answer = await getAIProvider().answerQuery(q, facts, evidence, recommendedAction);
     setResult(answer);

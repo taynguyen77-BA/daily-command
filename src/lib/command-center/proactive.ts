@@ -12,6 +12,7 @@ import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
 import { computeDeliveryDrift, computeTrajectory } from "./delivery-drift";
 import { buildFirst30Minutes } from "./first-30-minutes";
+import type { WorkRelevanceIndex } from "./jira/work-relevance";
 import { buildDailySnapshot } from "./memory";
 import { computeOutcomeScorecard } from "./outcome-scorecard";
 import { computeAllReleaseHealth } from "./release-health";
@@ -54,7 +55,8 @@ export function computeProactiveIntelligence(
   previousSnapshot: DailySnapshot | null,
   attentionState: Record<string, AttentionItemState>,
   sourceType: EvidenceSourceType,
-  today: string
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
 
@@ -94,7 +96,7 @@ export function computeProactiveIntelligence(
     today
   );
 
-  const first30Minutes = buildFirst30Minutes(attentionQueue, data, today);
+  const first30Minutes = buildFirst30Minutes(attentionQueue, data, today, workRelevanceIndex);
   // V2.1 §4 — fixes a confirmed bug: this used to pass the full-history `actionEffectiveness`
   // array (every completed action ever) into a parameter literally named "actionsToday",
   // which is why the Outcome Scorecard's counts and Close Day's ACTIONS section could

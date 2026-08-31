@@ -8,7 +8,7 @@
 import { scoreWorkItem, isOverdue, daysBetween, classify } from "../src/lib/command-center/scoring";
 import { detectRisks } from "../src/lib/command-center/risk-detection";
 import { detectChanges, toSnapshot } from "../src/lib/command-center/change-detection";
-import { buildPlan } from "../src/lib/command-center/action-plan";
+import { buildCandidates, buildPlan } from "../src/lib/command-center/action-plan";
 import { importFromJson, importFromCsv, importFromText } from "../src/lib/command-center/import";
 import { buildDemoData } from "../src/lib/command-center/demo-data";
 import { DATA_SCHEMA_VERSION, emptyData, type WorkItem } from "../src/lib/command-center/types";
@@ -130,6 +130,24 @@ import type { DecisionOptionsResult, Project } from "../src/lib/command-center/t
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, detectExplicitProjectMention, findOutOfScopeMention, formatScopeLabel, knownJiraProjects, parseJiraProjectScope, resolveEffectiveProjectKeys } from "../src/lib/command-center/jira/project-scope";
 import { buildProjectOverrideView } from "../src/components/command-center/use-command-center";
 import type { JiraProjectScope } from "../src/lib/command-center/types";
+
+// V2.5 — Work Relevance & Jira Status Policy
+import {
+  buildWorkRelevanceIndex,
+  collectObservedStatuses,
+  countUnclassifiedJiraStatuses,
+  explainWorkItemRelevance,
+  isPersonalWorkEligible,
+  isPersonalWorkEligibleItem,
+  jiraProjectKeyForWorkItem,
+  listUnclassifiedJiraStatuses,
+  parseWorkRelevancePolicyMap,
+  resolveWorkRelevance,
+  withStatusRelevance,
+  workItemsByRelevance,
+  WORK_RELEVANCE_EXPLANATIONS,
+} from "../src/lib/command-center/jira/work-relevance";
+import type { JiraStatusPolicy, WorkRelevance } from "../src/lib/command-center/types";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -4695,6 +4713,7 @@ function makeStoreState(overrides: Partial<StoreState> = {}): StoreState {
     jiraSync: { lastSyncStatus: "never" },
     filters: {},
     jiraProjectScope: { mode: "ALL", projectKeys: [] },
+    jiraWorkRelevancePolicy: {},
     attentionState: {},
     memoryEvents: [],
     personalPlan: [],
@@ -4914,6 +4933,309 @@ function makeThreeProjectFixture() {
   const elapsedMs = Date.now() - start;
   ok("V2.4 Performance", bigScoped.projects.length === 150 && bigScoped.workItems.length === 1500, "a large (300-project/3000-item) catalog scopes down to exactly the focused half");
   ok("V2.4 Performance", elapsedMs < 2000, `applyProjectScope + computeProjectAttentionMap over 300 projects/3000 items completes well within a generous bound (${elapsedMs}ms) — consistent with Set-based membership, not O(n^2) array.includes() scans`);
+}
+
+// ===== V2.5 — Work Relevance & Jira Status Policy =====
+
+function jiraItem(overrides: Partial<WorkItem> = {}): WorkItem {
+  return makeItem({
+    sourceType: "jira",
+    projectId: "jira-project-JPMC",
+    jiraStatusName: "Ready for UAT/Business Test",
+    status: "In Progress",
+    ...overrides,
+  });
+}
+
+function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Record<string, JiraStatusPolicy> {
+  const out: Record<string, JiraStatusPolicy> = {};
+  for (const [projectKey, statusMap] of Object.entries(entries)) out[projectKey] = { projectKey, statusMap };
+  return out;
+}
+
+// ----- Policy model: parsing, project isolation, unknown project/status -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE", "Waiting for Client": "WAITING", Done: "COMPLETED", "Pending PCI Evidence": "EXCLUDED" } }));
+
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "To Do" }), idx) === "ACTIONABLE", "a status mapped ACTIONABLE resolves to ACTIONABLE");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Waiting for Client" }), idx) === "WAITING", "a status mapped WAITING resolves to WAITING");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Ready for UAT/Business Test" }), idx) === "OBSERVE", "a status mapped OBSERVE resolves to OBSERVE");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Done" }), idx) === "COMPLETED", "a status mapped COMPLETED resolves to COMPLETED");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Pending PCI Evidence" }), idx) === "EXCLUDED", "a status mapped EXCLUDED resolves to EXCLUDED");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Some Custom Status" }), idx) === "UNKNOWN", "an unmapped status on a KNOWN project resolves to UNKNOWN, never guessed");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ projectId: "jira-project-UNKNOWNPROJ", jiraStatusName: "To Do" }), idx) === "UNKNOWN", "a status on a project with NO policy at all resolves to UNKNOWN, not a crash");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ sourceType: undefined, jiraStatusName: undefined }), idx) === "NOT_APPLICABLE", "a non-Jira work item (demo/local-import) is NOT_APPLICABLE — the policy never applies to it");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: undefined }), idx) === "NOT_APPLICABLE", "a Jira-sourced item with no captured status name is NOT_APPLICABLE rather than guessed");
+
+  const empty = buildWorkRelevanceIndex({});
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem(), empty) === "UNKNOWN", "an entirely missing/empty policy (fresh install, nothing classified yet) is conservative — UNKNOWN, never ACTIONABLE");
+
+  ok("V2.5 Policy", isPersonalWorkEligible("ACTIONABLE") === true, "ACTIONABLE is personal-work eligible");
+  ok("V2.5 Policy", isPersonalWorkEligible("NOT_APPLICABLE") === true, "NOT_APPLICABLE (non-Jira) is personal-work eligible — preserves pre-V2.5 behavior");
+  ok(
+    "V2.5 Policy",
+    (["WAITING", "OBSERVE", "COMPLETED", "EXCLUDED", "UNKNOWN"] as const).every((r) => isPersonalWorkEligible(r) === false),
+    "WAITING/OBSERVE/COMPLETED/EXCLUDED/UNKNOWN are all never personal-work eligible"
+  );
+
+  ok("V2.5 Policy", jiraProjectKeyForWorkItem(jiraItem()) === "JPMC", "the Jira project key is derived from the WorkItem's own projectId FK, no second lookup");
+  ok("V2.5 Policy", jiraProjectKeyForWorkItem(jiraItem({ sourceType: undefined })) === undefined, "a non-Jira item has no Jira project key");
+
+  // Project isolation (§37-38, §5): the SAME raw status string classified differently in
+  // two different projects must never leak across them.
+  const twoProjectIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" }, UBS: { "Ready for UAT/Business Test": "ACTIONABLE" } }));
+  ok("V2.5 Project isolation", resolveWorkRelevance(jiraItem({ projectId: "jira-project-JPMC" }), twoProjectIdx) === "OBSERVE", "JPMC's own classification of the status applies to JPMC");
+  ok(
+    "V2.5 Project isolation",
+    resolveWorkRelevance(jiraItem({ projectId: "jira-project-UBS" }), twoProjectIdx) === "ACTIONABLE",
+    "the identical status string classified differently in UBS resolves independently — JPMC's OBSERVE classification never leaks into UBS"
+  );
+  const wfUnclassifiedIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  ok(
+    "V2.5 Project isolation",
+    resolveWorkRelevance(jiraItem({ projectId: "jira-project-WF" }), wfUnclassifiedIdx) === "UNKNOWN",
+    "a third project (WF) with no policy of its own is UNKNOWN, unaffected by JPMC's configured policy"
+  );
+}
+
+// ----- Malformed / missing policy state must never throw (§26, §29) -----
+{
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(undefined)).length === 0, "undefined policy state parses to an empty map rather than crashing");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(null)).length === 0, "null policy state parses to an empty map");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap("garbage")).length === 0, "a wrong-typed (string) policy value parses to an empty map rather than crashing");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(42)).length === 0, "a wrong-typed (number) policy value parses to an empty map");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap([])).length === 0, "a wrong-typed (array) policy value parses to an empty map");
+
+  const messy = parseWorkRelevancePolicyMap({
+    JPMC: { projectKey: "JPMC", statusMap: { "To Do": "ACTIONABLE", "Bad Value": "NOT_A_REAL_RELEVANCE", 42: "WAITING" } },
+    "": { statusMap: { "To Do": "ACTIONABLE" } }, // blank project key — dropped
+    UBS: "not-an-object", // dropped entirely
+    WF: { statusMap: "not-an-object" }, // survives as an empty statusMap
+  });
+  ok("V2.5 Backward compatibility", messy.JPMC?.statusMap["To Do"] === "ACTIONABLE", "a well-formed entry survives parsing alongside malformed siblings");
+  ok("V2.5 Backward compatibility", messy.JPMC?.statusMap["Bad Value"] === undefined, "an invalid WorkRelevance value is dropped, never trusted as-is");
+  ok("V2.5 Backward compatibility", Object.keys(messy).includes("") === false, "a blank project key is dropped");
+  ok("V2.5 Backward compatibility", messy.UBS === undefined, "a non-object project policy value is dropped entirely rather than crashing");
+  ok("V2.5 Backward compatibility", messy.WF !== undefined && Object.keys(messy.WF.statusMap).length === 0, "a non-object statusMap degrades to an empty map rather than crashing");
+
+  // parseStoredState — a pre-V2.5 blob has no jiraWorkRelevancePolicy key at all.
+  const preV25Blob = JSON.stringify({ schemaVersion: 5, data: emptyData(), loaded: true, isDemo: false, dataSource: "jira", jiraSync: { lastSyncStatus: "success" } });
+  const migrated = parseStoredState(preV25Blob);
+  ok("V2.5 Backward compatibility", Object.keys(migrated.jiraWorkRelevancePolicy).length === 0, "a pre-V2.5 stored blob with no jiraWorkRelevancePolicy key loads with the safe empty default");
+  ok("V2.5 Backward compatibility", migrated.dataSource === "jira" && migrated.jiraSync.lastSyncStatus === "success", "every other pre-V2.5 field still loads unchanged alongside the new default policy");
+
+  const malformedBlob = JSON.stringify({ ...JSON.parse(preV25Blob), jiraWorkRelevancePolicy: "not-an-object" });
+  ok("V2.5 Backward compatibility", Object.keys(parseStoredState(malformedBlob).jiraWorkRelevancePolicy).length === 0, "a malformed jiraWorkRelevancePolicy value never crashes parseStoredState");
+}
+
+// ----- Personal Focus / action-plan gating (§10-11, §29 Personal Focus + Ownership) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE", "Waiting for Client": "WAITING", Done: "COMPLETED", "Pending PCI Evidence": "EXCLUDED", "To Do": "ACTIONABLE" } }));
+
+  // §11 Critical Example — even a HIGH priority item explicitly OWNED by the configured
+  // identity must never become a personal task when its status is OBSERVE. Ownership must
+  // never override the Work Relevance Policy.
+  const observeOwnedByMe = jiraItem({ id: "wi-observe", key: "JPMC-123", owner: "Minh Tran", priority: "P1", businessImpact: 5, dueDate: TODAY, blocked: true, jiraStatusName: "Ready for UAT/Business Test" });
+  const actionableOwnedByMe = jiraItem({ id: "wi-actionable", key: "JPMC-124", owner: "Minh Tran", priority: "P1", businessImpact: 5, dueDate: TODAY, blocked: true, jiraStatusName: "To Do" });
+  const waitingItem = jiraItem({ id: "wi-waiting", key: "JPMC-125", jiraStatusName: "Waiting for Client" });
+  const completedItem = jiraItem({ id: "wi-completed", key: "JPMC-126", jiraStatusName: "Done", status: "Done" });
+  const excludedItem = jiraItem({ id: "wi-excluded", key: "JPMC-127", jiraStatusName: "Pending PCI Evidence" });
+  const unknownItem = jiraItem({ id: "wi-unknown", key: "JPMC-128", jiraStatusName: "Some Brand New Status" });
+  const demoItem = makeItem({ id: "wi-demo", key: "DEMO-1", jiraStatusName: undefined, sourceType: undefined, priority: "P1", businessImpact: 5, dueDate: TODAY, blocked: true });
+
+  const gatingData = { ...emptyData(), workItems: [observeOwnedByMe, actionableOwnedByMe, waitingItem, completedItem, excludedItem, unknownItem, demoItem] };
+  const gatedCandidates = buildCandidates(gatingData, TODAY, idx);
+  const gatedIds = new Set(gatedCandidates.map((c) => c.item?.id).filter(Boolean));
+
+  ok("V2.5 Personal Focus", !gatedIds.has("wi-observe"), "OBSERVE status never becomes a personal-work candidate, even when explicitly owned by the configured identity (§11)");
+  ok("V2.5 Personal Focus", !gatedIds.has("wi-waiting"), "WAITING status never becomes a personal-work candidate");
+  ok("V2.5 Personal Focus", !gatedIds.has("wi-completed"), "COMPLETED status never becomes a personal-work candidate (also excluded by status !== Done already)");
+  ok("V2.5 Personal Focus", !gatedIds.has("wi-excluded"), "EXCLUDED status never becomes a personal-work candidate");
+  ok("V2.5 Personal Focus", !gatedIds.has("wi-unknown"), "an UNCLASSIFIED (UNKNOWN) status never becomes a personal-work candidate — conservative by default");
+  ok("V2.5 Personal Focus", gatedIds.has("wi-actionable"), "ACTIONABLE status remains eligible for existing Personal Focus/priority logic to decide on");
+  ok("V2.5 Personal Focus", gatedIds.has("wi-demo"), "a non-Jira (demo/local-import) work item is completely unaffected by the Work Relevance Policy");
+
+  // No index at all (e.g. a call site that hasn't been updated) preserves pre-V2.5 behavior
+  // exactly — never a silent behavior change for an untouched caller.
+  const ungatedCandidates = buildCandidates(gatingData, TODAY, undefined);
+  const ungatedIds = new Set(ungatedCandidates.map((c) => c.item?.id).filter(Boolean));
+  ok("V2.5 Personal Focus", ungatedIds.has("wi-observe"), "omitting the Work Relevance index entirely is a no-op — matches pre-V2.5 behavior for any caller not yet passing it");
+
+  // An explicit, user-created Action linked to a non-ACTIONABLE work item is NOT touched by
+  // this gate — that's the user's own decision, not an automatic inference from Jira status.
+  const explicitAction: Action = { id: "action-explicit", title: "Manually track UAT signoff", why: "test", status: "open", estimateMinutes: 10, createdAt: TODAY, relatedWorkItemId: "wi-observe" };
+  const withExplicitAction = { ...gatingData, actions: [explicitAction] };
+  const candidatesWithAction = buildCandidates(withExplicitAction, TODAY, idx);
+  ok(
+    "V2.5 Personal Focus",
+    candidatesWithAction.some((c) => c.action?.id === "action-explicit"),
+    "an explicit, human-created Action linked to an OBSERVE work item is still shown — the gate only stops AUTOMATIC WorkItem-to-candidate inference, never a user's own explicit Action"
+  );
+
+  // First 30 Minutes / next-actions (Command Bar) must respect the same gate.
+  const plan30 = buildPlan(gatingData, TODAY, 30, idx);
+  ok("V2.5 Personal Focus", !plan30.some((c) => c.item?.id === "wi-observe"), "the 30-minute action plan (used by First 30 Minutes and Command Bar next-actions) also respects the Work Relevance gate");
+}
+
+// ----- Attention: non-actionable status never creates attention merely by existing, but
+// existing risk/dependency/decision attention is never broken by this feature (§14, §29). -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const blockedObserveItem = jiraItem({ id: "wi-risk-observe", key: "JPMC-200", jiraStatusName: "Ready for UAT/Business Test", blocked: true, blockerReason: "Flagged", lastUpdated: "2026-05-01" });
+  const data = { ...emptyData(), workItems: [blockedObserveItem] };
+  const risks = detectRisks(data, TODAY);
+  ok(
+    "V2.5 Attention",
+    risks.length > 0,
+    "risk-detection.ts is untouched by Work Relevance classification — a blocked OBSERVE-status item can still legitimately produce a risk/attention signal (§14 'issue is not actionable' is distinct from 'a related risk requires attention')"
+  );
+  ok("V2.5 Attention", !isPersonalWorkEligibleItem(blockedObserveItem, idx), "meanwhile the SAME item is still correctly excluded from personal-work candidate generation");
+}
+
+// ----- Command Bar (§17, §29) -----
+{
+  // "Pending PCI Evidence" is deliberately left out of the map so it exercises the real
+  // unmapped/UNKNOWN path below.
+  const realIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE", "Waiting for Client": "WAITING" } }));
+
+  const uat1 = jiraItem({ id: "wi-uat-1", key: "JPMC-300", title: "Coverage report", jiraStatusName: "Ready for UAT/Business Test" });
+  const uat2 = jiraItem({ id: "wi-uat-2", key: "JPMC-301", title: "Another UAT item", jiraStatusName: "Ready for UAT/Business Test" });
+  const waiting1 = jiraItem({ id: "wi-wait-1", key: "JPMC-302", title: "Client sign-off", jiraStatusName: "Waiting for Client" });
+  const unmapped1 = jiraItem({ id: "wi-unmapped-1", key: "JPMC-303", title: "PCI evidence bundle", jiraStatusName: "Pending PCI Evidence" });
+  const cbData = { ...emptyData(), workItems: [uat1, uat2, waiting1, unmapped1] };
+
+  ok("V2.5 Command Bar", classifyQuery("What do I need to work on?", cbData).intent === "next-actions", "'what do I need to work on' routes to next-actions (ACTIONABLE-only surface)");
+  ok("V2.5 Command Bar", classifyQuery("What is in UAT?", cbData).intent === "jira-status-context", "'what is in UAT?' routes to the status-context intent");
+  ok("V2.5 Command Bar", classifyQuery("What is in UAT?", cbData).target === "uat", "the status-context intent captures 'UAT' as the keyword target");
+  ok("V2.5 Command Bar", classifyQuery("What is waiting?", cbData).intent === "jira-status-waiting", "'what is waiting?' routes to the waiting intent");
+  ok("V2.5 Command Bar", classifyQuery("Which Jira statuses are not classified?", cbData).intent === "jira-statuses-unclassified", "'which Jira statuses are not classified?' routes to the unclassified intent");
+  ok("V2.5 Command Bar", classifyQuery("Why isn't JPMC-300 on my list?", cbData).intent === "why-on-my-list", "a 'why isn't X on my list' question naming a real issue key still routes to why-on-my-list");
+  ok("V2.5 Command Bar", classifyQuery("Why isn't JPMC-300 on my list?", cbData).target === "JPMC-300", "the issue key is captured as the route target");
+
+  const derived = deriveData(cbData, null, TODAY);
+
+  const uatFacts = answerFromRoute({ intent: "jira-status-context", target: "uat" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, realIdx);
+  ok("V2.5 Command Bar", uatFacts.facts.length === 2, "'what is in UAT?' returns exactly the OBSERVE items whose Jira status matches the keyword");
+  ok("V2.5 Command Bar", uatFacts.facts.every((f) => f.includes("Ready for UAT")), "every returned fact shows the real Jira status, not an invented summary");
+
+  const waitingFacts = answerFromRoute({ intent: "jira-status-waiting" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, realIdx);
+  ok("V2.5 Command Bar", waitingFacts.facts.length === 1 && waitingFacts.facts[0].includes("JPMC-302"), "'what is waiting?' returns exactly the WAITING-classified item");
+
+  const unclassifiedFacts = answerFromRoute({ intent: "jira-statuses-unclassified" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, realIdx);
+  ok("V2.5 Command Bar", unclassifiedFacts.facts.some((f) => f.includes("Pending PCI Evidence")), "'which Jira statuses are not classified?' surfaces the real unmapped status name");
+
+  const whyFacts = answerFromRoute({ intent: "why-on-my-list", target: "JPMC-300" }, cbData, derived, TODAY, "jira", undefined, { candidates: [], top3: [] } as any, undefined, realIdx);
+  ok("V2.5 Command Bar", whyFacts.facts[0].includes("JPMC-300") && whyFacts.facts[0].includes("OBSERVE"), "'why isn't JPMC-300 on my list?' gives the deterministic Work Relevance explanation naming the real status and classification");
+
+  const whyUnknownItem = jiraItem({ id: "wi-unknown-why", key: "JPMC-304", jiraStatusName: "Totally New Status" });
+  const whyUnknownData = { ...emptyData(), workItems: [whyUnknownItem] };
+  const whyUnknownFacts = answerFromRoute({ intent: "why-on-my-list", target: "JPMC-304" }, whyUnknownData, deriveData(whyUnknownData, null, TODAY), TODAY, "jira", undefined, { candidates: [], top3: [] } as any, undefined, realIdx);
+  ok("V2.5 Command Bar", whyUnknownFacts.facts[0].includes("has not been classified"), "an UNCLASSIFIED status gets the honest 'has not been classified yet' explanation, never a fabricated reason");
+}
+
+// ----- Trust / explainability (§18, §29) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const observeExplanation = explainWorkItemRelevance(jiraItem({ key: "JPMC-400" }), idx);
+  ok("V2.5 Trust", observeExplanation.isApplicable && observeExplanation.relevance === "OBSERVE", "explainWorkItemRelevance reports the real classification");
+  ok("V2.5 Trust", observeExplanation.answer.includes("JPMC-400") && observeExplanation.answer.includes("Ready for UAT/Business Test") && observeExplanation.answer.includes("OBSERVE"), "the explanation names the real issue key, real status, and real classification — deterministic, not AI-generated");
+
+  const unknownExplanation = explainWorkItemRelevance(jiraItem({ key: "JPMC-401", jiraStatusName: "Never Seen Before" }), idx);
+  ok("V2.5 Trust", unknownExplanation.relevance === "UNKNOWN" && unknownExplanation.answer.includes("has not been classified"), "an unclassified status explanation is honest about not being classified, never treated as actionable");
+
+  const naExplanation = explainWorkItemRelevance(jiraItem({ sourceType: undefined, jiraStatusName: undefined }), idx);
+  ok("V2.5 Trust", !naExplanation.isApplicable, "a non-Jira item's explanation honestly reports the policy doesn't apply, rather than fabricating a classification");
+
+  ok("V2.5 Trust", Object.values(WORK_RELEVANCE_EXPLANATIONS).every((s) => typeof s === "string" && s.length > 0), "every WorkRelevance value has a concise, non-empty explanation (§9)");
+}
+
+// ----- Data Health / unclassified-status signal (§19) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const items = [jiraItem({ id: "a", jiraStatusName: "To Do" }), jiraItem({ id: "b", jiraStatusName: "Some Unmapped Status" }), jiraItem({ id: "c", projectId: "jira-project-UBS", jiraStatusName: "Some Unmapped Status" })];
+  const data = { ...emptyData(), workItems: items };
+  ok("V2.5 Data Health", countUnclassifiedJiraStatuses(data, idx) === 2, "counts distinct (project, status) UNKNOWN pairs — JPMC's and UBS's identical status string count as two separate unclassified entries, never deduped across projects");
+  const rows = listUnclassifiedJiraStatuses(data, idx);
+  ok("V2.5 Data Health", rows.some((r) => r.projectKey === "JPMC" && r.status === "Some Unmapped Status") && rows.some((r) => r.projectKey === "UBS"), "listUnclassifiedJiraStatuses reports each project's own unclassified status separately");
+
+  const health = computeDataHealth(data, "jira", undefined, undefined, idx);
+  ok("V2.5 Data Health", health.unclassifiedJiraStatusCount === 2, "computeDataHealth surfaces the same count");
+  ok(
+    "V2.5 Data Health",
+    (health.remediation ?? []).some((r) => r.dimension === "Unclassified Jira statuses"),
+    "an actionable remediation entry is added for unclassified statuses"
+  );
+
+  const noIndexHealth = computeDataHealth(data, "jira", undefined);
+  ok("V2.5 Data Health", noIndexHealth.unclassifiedJiraStatusCount === undefined, "omitting the Work Relevance index leaves the new field undefined rather than a fabricated zero");
+
+  const demoHealth = computeDataHealth({ ...emptyData(), workItems: [makeItem()] }, "demo", undefined, undefined, idx);
+  ok("V2.5 Data Health", (demoHealth.unclassifiedJiraStatusCount ?? 0) === 0, "demo/non-Jira data never contributes to the unclassified-status count");
+}
+
+// ----- Store: setJiraStatusRelevance, persistence, no memory-event noise (§23) -----
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const beforeMemory = JSON.stringify(commandCenterStore.getSnapshot().memoryEvents);
+
+  commandCenterStore.setJiraStatusRelevance("JPMC", "Ready for UAT/Business Test", "OBSERVE");
+  const afterFirst = commandCenterStore.getSnapshot();
+  ok("V2.5 Store", afterFirst.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE", "setJiraStatusRelevance persists the classification for the given project/status");
+  ok("V2.5 Store", JSON.stringify(afterFirst.memoryEvents) === beforeMemory, "classifying a status is configuration, not a delivery event — no memory event is emitted (§23)");
+
+  commandCenterStore.setJiraStatusRelevance("JPMC", "To Do", "ACTIONABLE");
+  const afterSecond = commandCenterStore.getSnapshot();
+  ok(
+    "V2.5 Store",
+    afterSecond.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE" && afterSecond.jiraWorkRelevancePolicy.JPMC?.statusMap["To Do"] === "ACTIONABLE",
+    "classifying a second status for the same project preserves the first classification (statusMap merges, never replaces)"
+  );
+
+  commandCenterStore.setJiraStatusRelevance("UBS", "Ready for UAT/Business Test", "ACTIONABLE");
+  const afterThird = commandCenterStore.getSnapshot();
+  ok(
+    "V2.5 Store",
+    afterThird.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE" && afterThird.jiraWorkRelevancePolicy.UBS?.statusMap["Ready for UAT/Business Test"] === "ACTIONABLE",
+    "classifying UBS's copy of the same status string never mutates JPMC's own classification — project isolation holds through the store too"
+  );
+
+  const roundTrip = parseStoredState(JSON.stringify(afterThird));
+  ok("V2.5 Store", roundTrip.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE", "the policy round-trips through JSON serialization/parseStoredState unchanged");
+
+  commandCenterStore.resetAll();
+}
+
+// ----- normalize.ts: the raw Jira status name is captured, never fabricated (§3) -----
+{
+  const issue = {
+    key: "JPMC-999",
+    fields: { summary: "UAT signoff", status: { name: "Ready for UAT/Business Test", statusCategory: { key: "indeterminate" } }, created: TODAY, updated: TODAY, project: { key: "JPMC" } },
+  };
+  const { workItem } = normalizeIssue(issue as JiraIssue, { today: TODAY });
+  ok("V2.5 Normalize", workItem.jiraStatusName === "Ready for UAT/Business Test", "normalizeIssue captures the raw Jira status name verbatim, distinct from the collapsed status enum");
+  ok("V2.5 Normalize", workItem.status === "In Progress", "the collapsed WorkItemStatus enum is computed exactly as before — V2.5 adds a field, it doesn't change existing mapping behavior");
+}
+
+// ----- Performance (§28): Map-based O(1) lookups, no O(n × numberOfStatuses) blowup. -----
+{
+  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF${i}`);
+  const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
+  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigIndex = buildWorkRelevanceIndex(bigPolicy);
+
+  for (const size of [100, 500, 2000]) {
+    const items = Array.from({ length: size }, (_, i) =>
+      jiraItem({ id: `perf-${size}-${i}`, key: `PERF${i % 20}-${i}`, projectId: `jira-project-PERF${i % 20}`, jiraStatusName: statusNames[i % 30] })
+    );
+    const perfData = { ...emptyData(), workItems: items };
+    const start = Date.now();
+    const candidates = buildCandidates(perfData, TODAY, bigIndex);
+    const elapsedMs = Date.now() - start;
+    ok("V2.5 Performance", elapsedMs < 2000, `buildCandidates over ${size} Jira work items with Work Relevance gating completes well within a generous bound (${elapsedMs}ms) — Map-based lookup, not O(n × statuses)`);
+    const actionableCount = items.filter((_, i) => (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5] === "ACTIONABLE").length;
+    ok("V2.5 Performance", candidates.length <= actionableCount, `only ACTIONABLE-classified items (${actionableCount} of ${size}) can possibly appear as auto-suggested candidates`);
+  }
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
