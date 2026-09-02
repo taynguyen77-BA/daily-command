@@ -16,6 +16,7 @@ import {
   computeWorkRelevanceDistribution,
   type PolicyReviewSignal,
 } from "@/lib/command-center/jira/work-relevance-calibration";
+import { computeCandidateGapSignals, computeExecutionPathStatusTable } from "@/lib/command-center/execution-path";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { WORK_RELEVANCE_VALUES, type CommandCenterData, type JiraProjectScope } from "@/lib/command-center/types";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
@@ -55,6 +56,19 @@ export function WorkRelevanceCalibrationPanel({
   const unknown = useMemo(() => (isSyntheticData ? null : computeUnknownVisibility(data, workRelevanceIndex, projectKeys)), [isSyntheticData, data, workRelevanceIndex, projectKeys]);
   const signals = useMemo(() => (isSyntheticData ? [] : computePolicyReviewSignals(data, workRelevanceIndex, projectKeys)), [isSyntheticData, data, workRelevanceIndex, projectKeys]);
   const reviewSignals = signals.filter((s) => s.signalType === "REVIEW");
+  // V2.8 §10 — extends the SAME status table with Candidates/Outcomes columns rather than
+  // a parallel table; keyed the same way (project::status) so it merges cleanly below.
+  const executionPathRows = useMemo(
+    () => (isSyntheticData ? [] : computeExecutionPathStatusTable(data, workRelevanceIndex, today, projectKeys)),
+    [isSyntheticData, data, workRelevanceIndex, today, projectKeys]
+  );
+  const executionPathByKey = useMemo(() => new Map(executionPathRows.map((r) => [`${r.projectKey}::${r.statusName}`, r])), [executionPathRows]);
+  // V2.8 §11 Signal C — a distinct pipeline stage (candidate evaluation) from V2.7's Policy
+  // Review Signals (action evidence); shown separately so the two never blur together.
+  const candidateGapSignals = useMemo(
+    () => (isSyntheticData ? [] : computeCandidateGapSignals(data, workRelevanceIndex, today, projectKeys)),
+    [isSyntheticData, data, workRelevanceIndex, today, projectKeys]
+  );
 
   if (!jiraConfigured) {
     return (
@@ -150,31 +164,38 @@ export function WorkRelevanceCalibrationPanel({
               <TrustLabel kind="calculated" /> Status-level calibration
             </p>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[560px] text-xs">
-                <caption className="sr-only">Per-status calibration: policy, observed item count, linked personal Actions, completions, and any review signal.</caption>
+              <table className="w-full min-w-[720px] text-xs">
+                <caption className="sr-only">Per-status calibration: policy, observed item count, candidate pool entries, linked personal Actions, completions, outcomes, and any review signal.</caption>
                 <thead>
                   <tr className="border-b border-border text-left text-text3">
                     <th scope="col" className="py-1 pr-3 font-semibold">Project</th>
                     <th scope="col" className="py-1 pr-3 font-semibold">Status</th>
                     <th scope="col" className="py-1 pr-3 font-semibold">Policy</th>
                     <th scope="col" className="py-1 pr-3 text-right font-semibold">Items</th>
+                    <th scope="col" className="py-1 pr-3 text-right font-semibold">Candidates</th>
                     <th scope="col" className="py-1 pr-3 text-right font-semibold">Actions</th>
                     <th scope="col" className="py-1 pr-3 text-right font-semibold">Completed</th>
+                    <th scope="col" className="py-1 pr-3 text-right font-semibold">Outcomes</th>
                     <th scope="col" className="py-1 font-semibold">Signal</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {signals.map((s) => (
-                    <tr key={`${s.projectKey}::${s.statusName}`} className="border-b border-border last:border-0">
-                      <td className="py-1 pr-3 font-mono text-text3">{s.projectKey}</td>
-                      <td className="py-1 pr-3 text-text">{s.statusName}</td>
-                      <td className="py-1 pr-3 text-text2">{s.currentRelevance}</td>
-                      <td className="py-1 pr-3 text-right text-text2">{s.observedItemCount}</td>
-                      <td className="py-1 pr-3 text-right text-text2">{s.actionEvidenceCount}</td>
-                      <td className="py-1 pr-3 text-right text-text2">{s.completionEvidenceCount}</td>
-                      <td className={`py-1 ${SIGNAL_STYLE[s.signalType]}`}>{s.signalType === "INSUFFICIENT_EVIDENCE" ? "Insufficient evidence" : s.signalType === "REVIEW" ? "Review" : "—"}</td>
-                    </tr>
-                  ))}
+                  {signals.map((s) => {
+                    const execRow = executionPathByKey.get(`${s.projectKey}::${s.statusName}`);
+                    return (
+                      <tr key={`${s.projectKey}::${s.statusName}`} className="border-b border-border last:border-0">
+                        <td className="py-1 pr-3 font-mono text-text3">{s.projectKey}</td>
+                        <td className="py-1 pr-3 text-text">{s.statusName}</td>
+                        <td className="py-1 pr-3 text-text2">{s.currentRelevance}</td>
+                        <td className="py-1 pr-3 text-right text-text2">{s.observedItemCount}</td>
+                        <td className="py-1 pr-3 text-right text-text2">{execRow?.candidateCount ?? "N/A"}</td>
+                        <td className="py-1 pr-3 text-right text-text2">{s.actionEvidenceCount}</td>
+                        <td className="py-1 pr-3 text-right text-text2">{s.completionEvidenceCount}</td>
+                        <td className="py-1 pr-3 text-right text-text2">{execRow?.outcomeCount ?? 0}</td>
+                        <td className={`py-1 ${SIGNAL_STYLE[s.signalType]}`}>{s.signalType === "INSUFFICIENT_EVIDENCE" ? "Insufficient evidence" : s.signalType === "REVIEW" ? "Review" : "—"}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -191,6 +212,25 @@ export function WorkRelevanceCalibrationPanel({
                   </p>
                   <p className="mt-0.5 text-text3">
                     Current policy: <span className="text-text2">{s.currentRelevance}</span>
+                  </p>
+                  <p className="mt-1 text-text2">{s.explanation}</p>
+                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">
+                    Review Policy
+                  </Link>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* V2.8 §11 Signal C — a distinct pipeline stage from Policy Review Signals above:
+              candidate EVALUATION, not action evidence. Never claims "policy is too broad". */}
+          {candidateGapSignals.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-text3">Candidate evaluation signals</p>
+              {candidateGapSignals.map((s) => (
+                <div key={`${s.projectKey}::${s.statusName}`} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
+                  <p className="font-mono text-text">
+                    {s.projectKey} — {s.statusName}
                   </p>
                   <p className="mt-1 text-text2">{s.explanation}</p>
                   <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">

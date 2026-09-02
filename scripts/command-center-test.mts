@@ -161,6 +161,15 @@ import {
   computeUnknownVisibility,
   computeWorkRelevanceDistribution,
 } from "../src/lib/command-center/jira/work-relevance-calibration";
+// V2.8 — Execution Path & Work Signal Calibration
+import {
+  computeCandidateGapSignals,
+  computeExecutionPathStatusTable,
+  computeExecutionPathTrace,
+  explainExecutionSurface,
+  listCandidatePoolActionableItems,
+  listJiraItemsInPersonalFocus,
+} from "../src/lib/command-center/execution-path";
 import type { JiraStatusPolicy, WorkRelevance } from "../src/lib/command-center/types";
 
 let failures = 0;
@@ -5668,6 +5677,298 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
     ok("V2.7 Performance", elapsedMs < 3000, `full V2.7 calibration pass over ${size} Jira work items completes well within a generous bound (${elapsedMs}ms)`);
     ok("V2.7 Performance", distribution.length > 0 && signals.length > 0 && actionable.actionableItemCount >= 0 && observe.observeItemCount >= 0, `results over ${size} items are well-formed, not degenerate`);
+  }
+}
+
+// ===== V2.8 — Execution Path & Work Signal Calibration =====
+
+function mockAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
+  return {
+    id: "RISK:test-risk",
+    category: "RISK",
+    severity: "HIGH",
+    what: "Test risk",
+    why: "test",
+    impact: "test impact",
+    nowWhat: "mitigate",
+    evidence: [],
+    lifecycle: "ACTIVE",
+    firstSeenDate: TODAY,
+    lastSeenDate: TODAY,
+    sourceRef: { type: "risk", id: "Test risk" },
+    ...overrides,
+  };
+}
+
+function mockProactive(attentionQueue: AttentionItem[], deliveryLoops: any[] = []): any {
+  return { attentionQueue, deliveryLoops };
+}
+
+function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
+  return { candidates, top3: candidates.slice(0, 3) };
+}
+
+// ----- §5-6 Execution Path Trace: a full ACTIONABLE path (candidate -> plan -> action -> focus -> outcome) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const item = jiraItem({ id: "exec-1", key: "JPMC-800", jiraStatusName: "In Progress", status: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY, owner: "Minh Tran" });
+  const linkedAction = calAction({ id: "exec-action-1", relatedWorkItemId: "exec-1", status: "completed" });
+  (linkedAction as any).outcomeStatus = "EFFECTIVE";
+
+  const risk: Risk = { id: "risk-1", projectId: "proj-1", title: "Risk on JPMC-800", level: "HIGH", reason: "test", evidence: [], potentialImpact: "impact", mitigation: "mitigate", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["exec-1"] };
+  const attentionItem = mockAttentionItem({ id: "RISK:risk-on-jpmc-800", sourceRef: { type: "risk", id: "Risk on JPMC-800" } });
+  const focusCandidate = pfc({ id: "focus:attention:RISK:risk-on-jpmc-800", sourceType: "attention", sourceId: "RISK:risk-on-jpmc-800", title: risk.title, whyOnMyList: "Because a HIGH severity risk is linked to this work." });
+
+  const data = { ...emptyData(), workItems: [item], actions: [linkedAction], risks: [risk] };
+  const proactive = mockProactive([attentionItem]);
+  const personalFocus = mockPersonalFocus([focusCandidate]);
+
+  const trace = computeExecutionPathTrace(item, data, TODAY, idx, proactive, personalFocus);
+  ok("V2.8 Execution trace", trace.relevance === "ACTIONABLE", "relevance is read via the real V2.5/V2.6 resolveWorkRelevance(), not reimplemented");
+  ok("V2.8 Execution trace", trace.candidateEvaluation === "ELIGIBLE", "a high-scoring ACTIONABLE item is ELIGIBLE — reuses the real buildCandidates() score >= 40 threshold");
+  ok("V2.8 Execution trace", trace.actionPlan === "SELECTED", "a real candidate with a small enough estimate is SELECTED within the reference 30-minute Action Plan budget");
+  ok("V2.8 Execution trace", trace.actions.state === "EXISTS" && trace.actions.completedCount === 1 && trace.actions.activeCount === 0, "the real linked, completed Action is reflected exactly");
+  ok("V2.8 Execution trace", trace.attention.presentInPersonalFocus === true, "the item is traced to Personal Focus via the REAL Risk.sourceWorkItemIds -> AttentionItem.sourceRef -> PersonalFocusCandidate.sourceId chain, never inferred");
+  ok("V2.8 Execution trace", trace.attention.connectedAttentionItems.some((a) => a.id === attentionItem.id), "the connected AttentionItem is the real one, found via the FK chain");
+  ok("V2.8 Execution trace", trace.attention.personalFocusCandidate?.id === focusCandidate.id, "the matched PersonalFocusCandidate is the real one, not fabricated");
+  ok("V2.8 Execution trace", trace.outcome.recorded === true && trace.outcome.count === 1, "outcome is read from the real Action.outcomeStatus — no new outcome model");
+}
+
+// ----- §5-6 OBSERVE item with an explicit Action: OBSERVE stays OBSERVE, Action stays intact -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" } }));
+  const item = jiraItem({ id: "exec-2", key: "JPMC-801", jiraStatusName: "Ready for Prod Release" });
+  const explicitAction = calAction({ id: "exec-action-2", relatedWorkItemId: "exec-2" });
+  const data = { ...emptyData(), workItems: [item], actions: [explicitAction] };
+
+  const trace = computeExecutionPathTrace(item, data, TODAY, idx, mockProactive([]), mockPersonalFocus([]));
+  ok("V2.8 Execution trace (OBSERVE)", trace.relevance === "OBSERVE", "OBSERVE stays OBSERVE — never changed by the presence of an explicit Action");
+  ok("V2.8 Execution trace (OBSERVE)", trace.candidateEvaluation === "NOT_APPLICABLE" && trace.actionPlan === "NOT_APPLICABLE", "candidate evaluation and Action Plan are NOT_APPLICABLE for a non-ACTIONABLE status — never described as 'did not enter'");
+  ok("V2.8 Execution trace (OBSERVE)", trace.actions.state === "EXISTS" && trace.actions.actions[0].id === "exec-action-2", "the explicit Action remains fully intact and visible on an OBSERVE item (§22)");
+  ok("V2.8 Execution trace (OBSERVE)", trace.attention.presentInPersonalFocus === false && trace.attention.evidenceAvailable === true, "no Attention/Loop evidence connects this item, honestly reported as not present (not an error)");
+}
+
+// ----- §4 Not enough evidence: proactive/personalFocus unavailable -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" } }));
+  const item = jiraItem({ id: "exec-3", key: "JPMC-802", jiraStatusName: "Ready for Prod Release" });
+  const data = { ...emptyData(), workItems: [item] };
+  const trace = computeExecutionPathTrace(item, data, TODAY, idx, null, null);
+  ok("V2.8 Execution trace (no evidence)", trace.attention.evidenceAvailable === false, "when proactive intelligence isn't available, this is reported as 'not enough evidence', never a false 'not present'");
+  ok("V2.8 Execution trace (no evidence)", trace.attention.presentInPersonalFocus === false, "presentInPersonalFocus defaults to false (not fabricated true) when evidence is unavailable");
+}
+
+// ----- §5 UNKNOWN status and non-Jira items remain safe -----
+{
+  const idx = buildWorkRelevanceIndex({});
+  const unknownItem = jiraItem({ id: "exec-4", key: "JPMC-803", jiraStatusName: "Totally New Status" });
+  const data1 = { ...emptyData(), workItems: [unknownItem] };
+  const unknownTrace = computeExecutionPathTrace(unknownItem, data1, TODAY, idx, null, null);
+  ok("V2.8 Execution trace (UNKNOWN)", unknownTrace.relevance === "UNKNOWN", "an unclassified status resolves to UNKNOWN, exactly as V2.5/V2.6 already guarantee");
+  ok("V2.8 Execution trace (UNKNOWN)", unknownTrace.candidateEvaluation === "NOT_APPLICABLE", "UNKNOWN is never treated as eligible for candidate evaluation — conservative by default");
+
+  const demoItem = makeItem({ id: "exec-5", key: "DEMO-1", sourceType: undefined, jiraStatusName: undefined });
+  const data2 = { ...emptyData(), workItems: [demoItem] };
+  const demoTrace = computeExecutionPathTrace(demoItem, data2, TODAY, idx, null, null);
+  ok("V2.8 Execution trace (non-Jira)", demoTrace.relevance === "NOT_APPLICABLE" && demoTrace.candidateEvaluation === "NOT_APPLICABLE" && demoTrace.actionPlan === "NOT_APPLICABLE", "a non-Jira (demo/local-import) item is NOT_APPLICABLE end-to-end, never fabricated ACTIONABLE/OBSERVE behavior");
+}
+
+// ----- §7-8 ExecutionSurfaceExplanation: neutral, evidence-based, never causal -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" } }));
+  const forbidden = /policy is (wrong|incorrect)|should be (actionable|observe|waiting)|you failed|because you didn'?t/i;
+
+  const selectedItem = jiraItem({ id: "why-1", key: "JPMC-810", jiraStatusName: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
+  const dataSelected = { ...emptyData(), workItems: [selectedItem] };
+  const traceSelected = computeExecutionPathTrace(selectedItem, dataSelected, TODAY, idx, null, null);
+  const explainSelected = explainExecutionSurface(selectedItem, traceSelected, "ACTION_PLAN", idx);
+  ok("V2.8 Surface explanation", explainSelected.present === true, "ACTION_PLAN explanation correctly reports present=true when the item was selected");
+  ok("V2.8 Surface explanation", !forbidden.test(explainSelected.explanation), "the 'why in Action Plan' explanation never makes a causal or correctness claim");
+
+  const notEligibleItem = jiraItem({ id: "why-2", key: "JPMC-811", jiraStatusName: "In Progress", businessImpact: 1, priority: "P4" });
+  const dataNotEligible = { ...emptyData(), workItems: [notEligibleItem] };
+  const traceNotEligible = computeExecutionPathTrace(notEligibleItem, dataNotEligible, TODAY, idx, null, null);
+  const explainNotEligible = explainExecutionSurface(notEligibleItem, traceNotEligible, "ACTION_PLAN", idx);
+  ok("V2.8 Surface explanation", explainNotEligible.present === false, "'why isn't this in Action Plan' correctly reports present=false");
+  ok("V2.8 Surface explanation", !forbidden.test(explainNotEligible.explanation), "the 'why isn't this in Action Plan' explanation never claims the policy is wrong");
+
+  const observeItem = jiraItem({ id: "why-3", key: "JPMC-812", jiraStatusName: "Ready for Prod Release" });
+  const dataObserve = { ...emptyData(), workItems: [observeItem] };
+  const traceObserve = computeExecutionPathTrace(observeItem, dataObserve, TODAY, idx, null, null);
+  const explainObserveActionPlan = explainExecutionSurface(observeItem, traceObserve, "ACTION_PLAN", idx);
+  ok("V2.8 Surface explanation", explainObserveActionPlan.explanation.includes("OBSERVE"), "an OBSERVE item's 'why isn't this in Action Plan' explanation reuses the real V2.5 policy explanation, naming the real classification");
+
+  const explainNoFocusNoEvidence = explainExecutionSurface(observeItem, traceObserve, "PERSONAL_FOCUS", idx);
+  ok("V2.8 Surface explanation", explainNoFocusNoEvidence.explanation.toLowerCase().includes("not enough evidence"), "PERSONAL_FOCUS explanation honestly says 'not enough evidence' when proactive/personalFocus were never supplied, rather than claiming absence");
+
+  const traceWithProactive = computeExecutionPathTrace(observeItem, dataObserve, TODAY, idx, mockProactive([]), mockPersonalFocus([]));
+  const explainNotInFocus = explainExecutionSurface(observeItem, traceWithProactive, "PERSONAL_FOCUS", idx);
+  ok(
+    "V2.8 Surface explanation",
+    explainNotInFocus.explanation.includes("Not currently in Personal Focus") && !/\bis missing\b|\bhas failed\b|\ban error occurred\b/i.test(explainNotInFocus.explanation),
+    "absence from Personal Focus is described as a fact ('not currently in Personal Focus'), never as a failure state — and the explanation explicitly says this is not an error"
+  );
+
+  const explainNoAction = explainExecutionSurface(observeItem, traceObserve, "EXPLICIT_ACTION", idx);
+  ok("V2.8 Surface explanation", explainNoAction.present === false && explainNoAction.explanation.includes("never creates"), "the EXPLICIT_ACTION explanation is explicit that Daily Command never creates an Action automatically");
+}
+
+// ----- §22 Explicit Actions remain authoritative through the trace -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" } }));
+  const item = jiraItem({ id: "explicit-exec-1", key: "JPMC-999", jiraStatusName: "Ready for Prod Release" });
+  const explicitAction = { id: "explicit-action-exec", title: "Confirm production release", why: "manual tracking", status: "open" as const, estimateMinutes: 10, createdAt: TODAY, relatedWorkItemId: "explicit-exec-1" };
+  const data = { ...emptyData(), workItems: [item], actions: [explicitAction] };
+  const trace = computeExecutionPathTrace(item, data, TODAY, idx, null, null);
+  ok("V2.8 Explicit Actions", trace.actions.state === "EXISTS" && trace.actions.actions.length === 1 && trace.actions.actions[0].title === "Confirm production release", "an explicit, manually-created Action on an OBSERVE item is reported exactly as-is by the trace — never removed or invalidated");
+}
+
+// ----- §10 Status-level execution path table + §11 Signal C -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE", "Blocked Investigation": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" } }));
+  const highScore = { businessImpact: 5 as const, priority: "P1" as const, blocked: true, dueDate: TODAY };
+  const items = [
+    jiraItem({ id: "st-1", key: "JPMC-900", jiraStatusName: "In Progress", ...highScore }),
+    jiraItem({ id: "st-2", key: "JPMC-901", jiraStatusName: "In Progress", ...highScore }),
+    jiraItem({ id: "st-3", key: "JPMC-902", jiraStatusName: "Blocked Investigation" }), // low score — never enters candidate pool
+    jiraItem({ id: "st-4", key: "JPMC-903", jiraStatusName: "Blocked Investigation" }),
+    jiraItem({ id: "st-5", key: "JPMC-904", jiraStatusName: "Blocked Investigation" }),
+    jiraItem({ id: "st-6", key: "JPMC-905", jiraStatusName: "Ready for Prod Release" }),
+  ];
+  const actionWithOutcome = calAction({ id: "st-action-1", relatedWorkItemId: "st-1" });
+  (actionWithOutcome as any).outcomeStatus = "EFFECTIVE";
+  const data = { ...emptyData(), workItems: items, actions: [actionWithOutcome] };
+
+  const rows = computeExecutionPathStatusTable(data, idx, TODAY);
+  const inProgress = rows.find((r) => r.statusName === "In Progress")!;
+  const blockedInv = rows.find((r) => r.statusName === "Blocked Investigation")!;
+  const observeRow = rows.find((r) => r.statusName === "Ready for Prod Release")!;
+
+  ok("V2.8 Status table", inProgress.candidateCount === 2, "candidateCount for an ACTIONABLE status counts real buildCandidates() membership, not every item");
+  ok("V2.8 Status table", inProgress.outcomeCount === 1, "outcomeCount reflects the one real linked Action carrying a recorded outcome");
+  ok("V2.8 Status table", blockedInv.candidateCount === 0, "a low-scoring ACTIONABLE status can legitimately have 0 candidates");
+  ok("V2.8 Status table", observeRow.candidateCount === undefined, "candidateCount is undefined ('N/A') for a non-ACTIONABLE status — candidate evaluation doesn't apply, never fabricated as 0");
+
+  const gapSignals = computeCandidateGapSignals(data, idx, TODAY);
+  ok("V2.8 Signal C", gapSignals.some((s) => s.statusName === "Blocked Investigation"), "an ACTIONABLE status with enough volume (3) and 0 candidates produces a Signal C row");
+  ok("V2.8 Signal C", !gapSignals.some((s) => s.statusName === "In Progress"), "a status with real candidates never produces a Signal C row");
+  ok("V2.8 Signal C", gapSignals.every((s) => !/too broad|policy is (wrong|incorrect)/i.test(s.explanation)), "Signal C never claims the policy is too broad or wrong — observation only (§11)");
+}
+
+// ----- §17 Command Bar helpers -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const eligible = jiraItem({ id: "cbh-1", key: "JPMC-950", jiraStatusName: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
+  const notEligible = jiraItem({ id: "cbh-2", key: "JPMC-951", jiraStatusName: "In Progress", businessImpact: 1, priority: "P4" });
+  const data = { ...emptyData(), workItems: [eligible, notEligible] };
+  const poolItems = listCandidatePoolActionableItems(data, idx, TODAY);
+  ok("V2.8 Command Bar helper", poolItems.some((w) => w.id === "cbh-1"), "listCandidatePoolActionableItems includes the real high-scoring ACTIONABLE item");
+  ok("V2.8 Command Bar helper", !poolItems.some((w) => w.id === "cbh-2"), "listCandidatePoolActionableItems excludes the real low-scoring ACTIONABLE item");
+
+  const focusedItem = jiraItem({ id: "cbh-3", key: "JPMC-952", jiraStatusName: "In Progress" });
+  const risk: Risk = { id: "cbh-risk", projectId: "proj-1", title: "CBH risk", level: "HIGH", reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["cbh-3"] };
+  const attn = mockAttentionItem({ id: "RISK:cbh-risk", sourceRef: { type: "risk", id: "CBH risk" } });
+  const cand = pfc({ id: "focus:attention:RISK:cbh-risk", sourceType: "attention", sourceId: "RISK:cbh-risk", title: risk.title });
+  const focusData = { ...emptyData(), workItems: [focusedItem, notEligible], risks: [risk] };
+  const focusRows = listJiraItemsInPersonalFocus(focusData, mockProactive([attn]), mockPersonalFocus([cand]));
+  ok("V2.8 Command Bar helper", focusRows.length === 1 && focusRows[0].item.id === "cbh-3", "listJiraItemsInPersonalFocus returns exactly the real, FK-traced item — never every ACTIONABLE item");
+  ok("V2.8 Command Bar helper", listJiraItemsInPersonalFocus(focusData, null, null).length === 0, "no proactive/personalFocus evidence yields an empty list, never a guess");
+}
+
+// ----- §18 Project isolation: identical status, different projects, independent connections -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" }, UBS: { "Ready for Prod Release": "ACTIONABLE" } }));
+  const jpmcItem = jiraItem({ id: "iso-exec-1", key: "JPMC-960", projectId: "jira-project-JPMC", jiraStatusName: "Ready for Prod Release" });
+  const ubsItem = jiraItem({ id: "iso-exec-2", key: "UBS-960", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" });
+  const jpmcRisk: Risk = { id: "iso-risk-jpmc", projectId: "proj-jpmc", title: "JPMC-only risk", level: "HIGH", reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["iso-exec-1"] };
+  const jpmcAttn = mockAttentionItem({ id: "RISK:jpmc-only-risk", sourceRef: { type: "risk", id: "JPMC-only risk" } });
+  const jpmcCand = pfc({ id: "focus:attention:RISK:jpmc-only-risk", sourceType: "attention", sourceId: "RISK:jpmc-only-risk", title: jpmcRisk.title });
+
+  const data = { ...emptyData(), workItems: [jpmcItem, ubsItem], risks: [jpmcRisk] };
+  const proactive = mockProactive([jpmcAttn]);
+  const personalFocus = mockPersonalFocus([jpmcCand]);
+
+  const jpmcTrace = computeExecutionPathTrace(jpmcItem, data, TODAY, idx, proactive, personalFocus);
+  const ubsTrace = computeExecutionPathTrace(ubsItem, data, TODAY, idx, proactive, personalFocus);
+
+  ok("V2.8 Project isolation", jpmcTrace.relevance === "OBSERVE" && ubsTrace.relevance === "ACTIONABLE", "the identical raw status carries independent policies per project, exactly as V2.5/V2.7 already guarantee");
+  ok("V2.8 Project isolation", jpmcTrace.attention.presentInPersonalFocus === true, "JPMC's item is correctly connected to its own real risk/attention/focus evidence");
+  ok("V2.8 Project isolation", ubsTrace.attention.presentInPersonalFocus === false, "UBS's item is NOT connected to JPMC's risk evidence — no cross-project leakage via any foreign key");
+  ok("V2.8 Project isolation", ubsTrace.attention.connectedAttentionItems.length === 0, "UBS's connectedAttentionItems is empty — the FK chain (Risk.sourceWorkItemIds) never crosses items");
+}
+
+// ----- §21 Synthetic data structural safety: demo item never fabricates real behavior -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const demoItem = makeItem({ id: "synth-1", key: "DEMO-2", sourceType: undefined, jiraStatusName: undefined });
+  const data = { ...emptyData(), workItems: [demoItem] };
+  const trace = computeExecutionPathTrace(demoItem, data, TODAY, idx, null, null);
+  ok("V2.8 Synthetic data", trace.relevance === "NOT_APPLICABLE", "a demo/non-Jira item never gets a fabricated Work Relevance classification");
+  const statusRows = computeExecutionPathStatusTable(data, idx, TODAY);
+  ok("V2.8 Synthetic data", statusRows.length === 0, "a demo item contributes no row to the execution-path status table at all");
+}
+
+// ----- §22 Backward compatibility: malformed/missing policy never crashes execution-path code -----
+{
+  const emptyIdx = buildWorkRelevanceIndex({});
+  const item = jiraItem({ id: "bc-exec-1", key: "JPMC-970", jiraStatusName: "To Do" });
+  const data = { ...emptyData(), workItems: [item] };
+  const trace = computeExecutionPathTrace(item, data, TODAY, emptyIdx, null, null);
+  ok("V2.8 Backward compatibility", trace.relevance === "UNKNOWN", "an entirely missing policy map degrades to UNKNOWN, never throws, exactly like V2.5/V2.6/V2.7");
+  const rows = computeExecutionPathStatusTable(data, emptyIdx, TODAY);
+  ok("V2.8 Backward compatibility", rows.length === 0, "UNKNOWN rows are excluded from the execution-path status table (handled by V2.7's Unknown Visibility instead), and nothing throws");
+}
+
+// ----- §17 Command Bar: new intents + near-miss regression matrix -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const item = jiraItem({ id: "cb8-1", key: "JPMC-980", jiraStatusName: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
+  const cbData = { ...emptyData(), workItems: [item] };
+  const derived = deriveData(cbData, null, TODAY);
+
+  ok("V2.8 Command Bar", classifyQuery("What is the execution path for JPMC-980?", cbData).intent === "execution-path-for-item", "'execution path for X' routes to execution-path-for-item");
+  ok("V2.8 Command Bar", classifyQuery("What is the execution path for JPMC-980?", cbData).target === "JPMC-980", "the issue key is captured as the route target");
+  ok("V2.8 Command Bar", classifyQuery("Which actionable items entered the candidate pool?", cbData).intent === "candidate-pool-actionable-items", "'which actionable items entered the candidate pool?' routes correctly, not misrouted to jira-statuses-actionable despite containing 'actionable'");
+  ok("V2.8 Command Bar", classifyQuery("Which items are in Personal Focus because of Jira work?", cbData).intent === "jira-items-in-personal-focus", "'which items are in Personal Focus because of Jira work?' routes correctly");
+
+  const traceFacts = answerFromRoute({ intent: "execution-path-for-item", target: "JPMC-980" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.8 Command Bar", traceFacts.facts[0].includes("JPMC-980") && traceFacts.facts[0].includes("ACTIONABLE"), "execution-path-for-item narrates the real item's real classification");
+
+  const noTargetFacts = answerFromRoute({ intent: "execution-path-for-item" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.8 Command Bar", noTargetFacts.facts[0] === "I need a project, issue key, or status to answer that precisely.", "with no issue key found, execution-path-for-item gives the exact §17 fallback line rather than guessing");
+
+  // Near-miss regression — every V2.5/V2.6/V2.7 phrasing must still route exactly as before.
+  ok("V2.8 Near-miss regression", classifyQuery("Which statuses are actionable?", cbData).intent === "jira-statuses-actionable", "the plain V2.6 'which statuses are actionable?' is unaffected by the new candidate-pool pattern");
+  ok("V2.8 Near-miss regression", classifyQuery("Are any actionable statuses producing little personal work?", cbData).intent === "actionable-low-personal-work", "V2.7's actionable-low-personal-work phrasing is unaffected");
+  ok("V2.8 Near-miss regression", classifyQuery("What should I focus on today?", cbData).intent === "personal-focus-today", "personal-focus-today is unaffected by the new 'items in Personal Focus because of Jira work' pattern");
+  ok("V2.8 Near-miss regression", classifyQuery("What do I need to work on?", cbData).intent === "next-actions", "next-actions remains unaffected");
+  ok("V2.8 Near-miss regression", classifyQuery("Why isn't JPMC-980 on my list?", cbData).intent === "why-on-my-list", "why-on-my-list remains unaffected");
+  ok("V2.8 Near-miss regression", classifyQuery("asdkjfh nonsense query", cbData).intent === "unrecognized", "nonsense input remains unclassified, never misrouted to a V2.8 intent");
+}
+
+// ----- §23 Performance: 100 / 500 / 2000 items, indexed relationships, no O(n²). -----
+{
+  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF8-${i}`);
+  const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
+  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigIndex = buildWorkRelevanceIndex(bigPolicy);
+
+  for (const size of [100, 500, 2000]) {
+    const items = Array.from({ length: size }, (_, i) =>
+      jiraItem({ id: `perf8-${size}-${i}`, key: `PERF8-${i % 20}-${i}`, projectId: `jira-project-PERF8-${i % 20}`, jiraStatusName: statusNames[i % 30] })
+    );
+    const actions = items.filter((_, i) => i % 9 === 0).map((item, i) => calAction({ relatedWorkItemId: item.id, status: i % 2 === 0 ? "completed" : "open" }));
+    const perfData = { ...emptyData(), workItems: items, actions };
+
+    const start = Date.now();
+    const statusRows = computeExecutionPathStatusTable(perfData, bigIndex, TODAY);
+    const gapSignals = computeCandidateGapSignals(perfData, bigIndex, TODAY);
+    const poolItems = listCandidatePoolActionableItems(perfData, bigIndex, TODAY);
+    const oneTrace = computeExecutionPathTrace(items[0], perfData, TODAY, bigIndex, null, null);
+    const elapsedMs = Date.now() - start;
+
+    ok("V2.8 Performance", elapsedMs < 3000, `full execution-path calculation pass over ${size} Jira work items completes well within a generous bound (${elapsedMs}ms)`);
+    ok("V2.8 Performance", statusRows.length > 0 && gapSignals.length >= 0 && poolItems.length >= 0 && !!oneTrace.item, `results over ${size} items are well-formed, not degenerate`);
   }
 }
 

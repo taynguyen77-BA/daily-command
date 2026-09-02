@@ -10,6 +10,7 @@ import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
 import { explainWorkItemRelevance, listStatusesByRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { computePolicyReviewSignals, computeWorkRelevanceDistribution } from "./jira/work-relevance-calibration";
+import { computeExecutionPathTrace, listCandidatePoolActionableItems, listJiraItemsInPersonalFocus } from "./execution-path";
 import type { CommandCenterData, Evidence, EvidenceSourceType, PersonalDeliveryReviewFacts } from "./types";
 import type { DerivedData } from "./selectors";
 import type { ProactiveIntelligence } from "./proactive";
@@ -67,6 +68,11 @@ export type QueryIntent =
   | "policy-review-signals"
   | "actionable-low-personal-work"
   | "observed-statuses-with-actions"
+  // V2.8 §17 — Execution Path & Work Signal Calibration intents. Deterministic reads over
+  // execution-path.ts — never AI, never a mutation, never an automatic Action.
+  | "execution-path-for-item"
+  | "candidate-pool-actionable-items"
+  | "jira-items-in-personal-focus"
   // V2.2 §10 — Command Bar artifact intents. Deliberately NOT narrated through
   // answerFromRoute/answerQuery (see isArtifactIntent below) — these open the Artifact
   // Editor with a communicate.ts-built draft instead of an AI-narrated answer, so Command
@@ -118,6 +124,9 @@ const QUERY_FAMILY: Record<Exclude<QueryIntent, "unrecognized">, QueryFamily> = 
   "policy-review-signals": "STATUS",
   "actionable-low-personal-work": "STATUS",
   "observed-statuses-with-actions": "STATUS",
+  "execution-path-for-item": "STATUS",
+  "candidate-pool-actionable-items": "STATUS",
+  "jira-items-in-personal-focus": "STATUS",
 
   "decisions-to-revisit": "DECISION",
   "decisions-blocked": "DECISION",
@@ -289,6 +298,18 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   }
   if (/which observed statuses have actions|observed statuses.*(have )?actions/.test(q)) {
     return { intent: "observed-statuses-with-actions" };
+  }
+  // V2.8 §17 — Execution Path & Work Signal Calibration intents. "Candidate pool" checked
+  // before the generic "actionable statuses" patterns above/below since it also contains
+  // the substring "actionable".
+  if (/execution (path|flow|trace)|where is .* in my execution/.test(q)) {
+    return { intent: "execution-path-for-item", target: findTarget(q, data.workItems.map((w) => w.key)) };
+  }
+  if (/(actionable|which).*candidate pool|candidate pool.*actionable/.test(q)) {
+    return { intent: "candidate-pool-actionable-items" };
+  }
+  if (/(jira )?items? .*in personal focus because of jira|jira work.*(in )?personal focus|personal focus.*because of jira/.test(q)) {
+    return { intent: "jira-items-in-personal-focus" };
   }
   // V2.5 §17 — checked before the generic patterns below (e.g. "what should i do") so
   // status-context/waiting/unclassified questions are never misrouted to next-actions.
@@ -662,6 +683,55 @@ export function answerFromRoute(
       if (rows.length === 0) return none("No observed Jira status currently has a linked Action.");
       return {
         facts: rows.map((s) => `${s.projectKey}: "${s.statusName}" (${s.currentRelevance}) — ${s.actionEvidenceCount} linked Action(s), ${s.completionEvidenceCount} completed.`),
+        evidence: [],
+        recommendedAction: "",
+      };
+    }
+    // V2.8 §4-6 — one item's full execution trace, narrated as plain facts. §17's own
+    // suggested fallback line for unsupported ambiguity when no issue key is named.
+    case "execution-path-for-item": {
+      if (!route.target) {
+        return { facts: ["I need a project, issue key, or status to answer that precisely."], evidence: [], recommendedAction: "" };
+      }
+      const item = data.workItems.find((w) => w.key.toLowerCase() === route.target!.toLowerCase());
+      if (!item || item.sourceType !== "jira") {
+        return { facts: [`No Jira work item matching "${route.target}" was found in the current scope.`], evidence: [], recommendedAction: "" };
+      }
+      const idx = workRelevanceIndex ?? new Map();
+      const trace = computeExecutionPathTrace(item, data, today, idx, proactive ?? null, personalFocus ?? null);
+      return {
+        facts: [
+          `${item.key} — Jira status "${item.jiraStatusName ?? item.status}", Work Relevance ${trace.relevance === "NOT_APPLICABLE" ? "N/A" : trace.relevance}.`,
+          `Candidate evaluation: ${trace.candidateEvaluation === "ELIGIBLE" ? "entered candidate pool" : trace.candidateEvaluation === "NOT_ELIGIBLE" ? "did not enter candidate pool" : "not applicable"}.`,
+          `Action Plan: ${trace.actionPlan === "SELECTED" ? "selected" : trace.actionPlan === "NOT_SELECTED" ? "not selected" : "not applicable"}.`,
+          `Explicit Action: ${trace.actions.state === "EXISTS" ? `${trace.actions.actions.length} (${trace.actions.activeCount} active, ${trace.actions.completedCount} completed)` : "none"}.`,
+          `Personal Focus: ${trace.attention.presentInPersonalFocus ? "present" : trace.attention.evidenceAvailable ? "not currently present" : "not enough evidence"}.`,
+          `Outcome: ${trace.outcome.recorded ? `recorded (${trace.outcome.count})` : "not recorded"}.`,
+        ],
+        evidence: [],
+        recommendedAction: "",
+      };
+    }
+    // V2.8 §17 — Stage 3 (Candidate Evaluation) aggregate, distinct from V2.6's
+    // jira-statuses-actionable (policy vocabulary) and next-actions (all candidate work).
+    case "candidate-pool-actionable-items": {
+      const idx = workRelevanceIndex ?? new Map();
+      const items = listCandidatePoolActionableItems(data, idx, today);
+      if (items.length === 0) return none("No ACTIONABLE Jira item is currently in the candidate pool.");
+      return {
+        facts: items.slice(0, 8).map((w) => `${w.key} — ${w.title}`),
+        evidence: items.slice(0, 8).map((w) => makeEvidence(`${w.key} entered the candidate pool`, sourceType, w.id)),
+        recommendedAction: "",
+      };
+    }
+    // V2.8 §17, §33 — the exact question V2.7 flagged as an open product hypothesis: which
+    // Jira-sourced items are ACTUALLY connected (via real Attention/Loop evidence) to
+    // Personal Focus right now. Never implies more Jira items SHOULD be there.
+    case "jira-items-in-personal-focus": {
+      const rows = listJiraItemsInPersonalFocus(data, proactive ?? null, personalFocus ?? null);
+      if (rows.length === 0) return none("No Jira-sourced item is currently connected to Personal Focus.");
+      return {
+        facts: rows.slice(0, 8).map(({ item, candidate }) => `${item.key} — ${candidate.whyOnMyList || candidate.why}`),
         evidence: [],
         recommendedAction: "",
       };

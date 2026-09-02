@@ -6,8 +6,11 @@ import { evidenceForScore, factsForWorkItem } from "@/lib/command-center/evidenc
 import type { CommandCenterData, PriorityScoreResult, ReasoningTrace, WorkItem } from "@/lib/command-center/types";
 import { clientName } from "@/lib/command-center/selectors";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
+import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
+import type { PersonalFocusResult } from "@/lib/command-center/types";
 import { ConfidenceTag, ReasoningTraceBlock, SeverityBadge, TrustLabel } from "./ui";
 import { WhyNotATaskDrawer } from "./WhyNotATaskDrawer";
+import { ExecutionPathTrace } from "./ExecutionPathTrace";
 
 function recommendedAction(item: WorkItem): string {
   if (item.blocked) return `Escalate the blocker: ${item.blockerReason ?? "unblock dependency"}.`;
@@ -23,6 +26,9 @@ export function PriorityCard({
   isDemo,
   onTakeAction,
   workRelevanceIndex,
+  today,
+  proactive,
+  personalFocus,
 }: {
   item: WorkItem;
   result: PriorityScoreResult;
@@ -33,6 +39,11 @@ export function PriorityCard({
   // on my work list?" (§7 "smallest number of useful entry points"). Undefined is a no-op,
   // not a crash — any other PriorityCard caller keeps working unchanged.
   workRelevanceIndex?: WorkRelevanceIndex;
+  // V2.8 §9 — optional, same no-op-when-absent contract: the Execution Path trace only
+  // renders when the caller supplies today + proactive + personalFocus alongside the index.
+  today?: string;
+  proactive?: ProactiveIntelligence | null;
+  personalFocus?: PersonalFocusResult | null;
 }) {
   const [trace, setTrace] = useState<ReasoningTrace | null>(null);
   const [open, setOpen] = useState(false);
@@ -94,6 +105,10 @@ export function PriorityCard({
       </div>
 
       {workRelevanceIndex && <WhyNotATaskDrawer item={item} workRelevanceIndex={workRelevanceIndex} />}
+
+      {workRelevanceIndex && today && (
+        <ExecutionPathTrace item={item} data={data} today={today} workRelevanceIndex={workRelevanceIndex} proactive={proactive ?? null} personalFocus={personalFocus ?? null} />
+      )}
 
       <button
         onClick={onTakeAction}
