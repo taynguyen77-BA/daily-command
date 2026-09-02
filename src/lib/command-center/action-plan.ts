@@ -36,9 +36,18 @@ function estimateForWorkItem(item: WorkItem): number {
 
 export function buildCandidates(data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex): PlanCandidate[] {
   const candidates: PlanCandidate[] = [];
-  const coveredItemIds = new Set(
-    data.actions.filter((a) => a.status === "open" && a.relatedWorkItemId).map((a) => a.relatedWorkItemId!)
-  );
+  // BUGFIX — covered by ANY action regardless of status, not just "open" ones. The
+  // underlying WorkItem doesn't become Done just because its Action was completed/
+  // deferred/snoozed/blocked, so scoping this to "open" actions only meant that acting on
+  // an auto-suggested candidate (e.g. clicking Complete) made it immediately re-eligible
+  // for auto-suggestion again on the very next recompute — the same still-open, still
+  // >=40-score WorkItem would come right back as a brand-new, action-less candidate,
+  // silently erasing the fact the user already acted on it (most visible after a reload,
+  // since the client-side liveAction workaround in action-plan/page.tsx's CandidateRow only
+  // papers over this within one still-mounted component instance). Once a real Action
+  // exists for a WorkItem, that Action — never a fresh synthesized one — is the only
+  // representation of it; store.reopenAction() is the explicit way back to "active".
+  const coveredItemIds = new Set(data.actions.filter((a) => a.relatedWorkItemId).map((a) => a.relatedWorkItemId!));
 
   for (const action of data.actions) {
     if (action.status !== "open") continue;

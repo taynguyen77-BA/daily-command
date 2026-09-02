@@ -171,11 +171,29 @@ export function computeExecutionPathTrace(
 
   // Stage 3 — Candidate Evaluation (§5 Stage 3): reuses buildCandidates() verbatim, the
   // same score >= 40 threshold action-plan.ts already enforces — never reimplemented here.
+  // Stage 5 computed early — needed below to give Candidate Evaluation an accurate verdict
+  // once a real Action already exists (§5 Stage 5, hoisted ahead of Stage 3/4).
+  const linkedActions = actionsForWorkItem(data, item.id);
+  const actions = computeActionRelationship(linkedActions);
+  // Only an OPEN action keeps the item represented in buildCandidates() (via the
+  // action-loop) — see action-plan.ts's own coveredItemIds comment. A completed/deferred/
+  // snoozed/blocked action still counts as "an Action exists" for Stage 5, but no longer
+  // keeps the item in the automatic candidate pool.
+  const hasOpenAction = linkedActions.some((a) => a.status === "open");
+  const hasNonOpenActionOnly = linkedActions.length > 0 && !hasOpenAction;
+
   let candidateEvaluation: CandidateEvaluationState = "NOT_APPLICABLE";
-  let candidateIds: Set<string> | undefined;
   if (relevance === "ACTIONABLE" && isOpen) {
-    candidateIds = new Set(buildCandidates(data, today, workRelevanceIndex).map((c) => c.item?.id).filter(Boolean) as string[]);
-    candidateEvaluation = candidateIds.has(item.id) ? "ELIGIBLE" : "NOT_ELIGIBLE";
+    if (hasNonOpenActionOnly) {
+      // A real Action already exists and represents this item (completed, deferred,
+      // snoozed, or blocked) — the automatic score-based evaluation question is moot, a
+      // human already acted. Never label this "not eligible": that would misleadingly
+      // imply the item's own score was too low, when the real reason is an existing Action.
+      candidateEvaluation = "NOT_APPLICABLE";
+    } else {
+      const candidateIds = new Set(buildCandidates(data, today, workRelevanceIndex).map((c) => c.item?.id).filter(Boolean) as string[]);
+      candidateEvaluation = candidateIds.has(item.id) ? "ELIGIBLE" : "NOT_ELIGIBLE";
+    }
   }
 
   // Stage 4 — Action Plan (§5 Stage 4): of the real candidates, would this one actually be
@@ -187,10 +205,6 @@ export function computeExecutionPathTrace(
   } else if (candidateEvaluation === "NOT_ELIGIBLE") {
     actionPlan = "NOT_SELECTED";
   }
-
-  // Stage 5 — Explicit Action (§5 Stage 5): the real, existing Action model.
-  const linkedActions = actionsForWorkItem(data, item.id);
-  const actions = computeActionRelationship(linkedActions);
 
   // Stage 6 — Focus / Attention (§5 Stage 6, §14): real FK-based traceability, never
   // inferred from ownership/status similarity.
@@ -217,6 +231,19 @@ export interface ExecutionSurfaceExplanation {
  *  already on `trace` — never a new causal claim (§7 "use actual evidence"). */
 export function explainExecutionSurface(item: WorkItem, trace: ExecutionPathTrace, surface: ExecutionSurface, workRelevanceIndex: WorkRelevanceIndex): ExecutionSurfaceExplanation {
   if (surface === "ACTION_PLAN") {
+    if (trace.candidateEvaluation === "NOT_APPLICABLE" && trace.relevance === "ACTIONABLE" && trace.actions.state === "EXISTS") {
+      // A real Action already exists (completed/deferred/snoozed/blocked) — it, not a
+      // fresh auto-suggested slot, represents this item now. See action-plan.ts's
+      // coveredItemIds: an item with any existing Action is never re-synthesized.
+      const completed = trace.actions.completedCount > 0;
+      return {
+        surface,
+        present: false,
+        explanation: completed
+          ? "This item already has a completed Action, so it is no longer auto-suggested into the Action Plan."
+          : "This item already has an explicit Action (not currently open), so it is no longer auto-suggested into the Action Plan.",
+      };
+    }
     if (trace.candidateEvaluation === "NOT_APPLICABLE") {
       const policy = explainWorkItemRelevance(item, workRelevanceIndex);
       return { surface, present: false, explanation: `This Jira status is classified ${trace.relevance === "NOT_APPLICABLE" ? "N/A" : trace.relevance}. ${policy.answer}` };

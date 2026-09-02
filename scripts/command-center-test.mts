@@ -292,6 +292,39 @@ function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
   ok("Action plan", plan15.every((c, i, arr) => i === 0 || arr[i - 1].priorityScore >= c.priorityScore), "plan items are ordered by descending priority score");
 }
 
+// ===== BUGFIX regression — completing (or deferring/snoozing/blocking) an auto-suggested
+// candidate's Action must never make that same WorkItem reappear as a fresh, untouched
+// candidate on the next recompute. Previously buildCandidates() only excluded items covered
+// by an OPEN action, so completing an action removed it from coveredItemIds and the item
+// came right back via the bare-item loop — visually indistinguishable from never having
+// been touched (most visible after a page reload, since the client-side liveAction
+// workaround in action-plan/page.tsx only survives within one still-mounted component). =====
+{
+  const highScoreItem = makeItem({ id: "bugfix-1", key: "BUG-1", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
+  const dataNoAction = { ...emptyData(), workItems: [highScoreItem] };
+  const beforeAny = buildCandidates(dataNoAction, TODAY);
+  ok("Action plan bugfix", beforeAny.some((c) => c.item?.id === "bugfix-1" && c.id === "plan-bugfix-1"), "sanity check: a fresh, untouched high-scoring item is auto-suggested as a bare-item candidate");
+
+  for (const status of ["completed", "deferred", "snoozed", "blocked"] as const) {
+    const action = { id: `bugfix-action-${status}`, title: "Do the thing", why: "test", relatedWorkItemId: "bugfix-1", status, estimateMinutes: 15, createdAt: TODAY, ...(status === "completed" ? { completedAt: TODAY } : {}) };
+    const dataAfter = { ...emptyData(), workItems: [highScoreItem], actions: [action] };
+    const after = buildCandidates(dataAfter, TODAY);
+    ok(
+      "Action plan bugfix",
+      !after.some((c) => c.id === "plan-bugfix-1"),
+      `a ${status} Action's WorkItem is never re-synthesized as a fresh bare-item candidate (would silently look untouched again)`
+    );
+  }
+
+  // The "open" case is the control: an item with an OPEN action must still be represented
+  // (via the action-based candidate itself) — the fix must not hide active work.
+  const openAction = { id: "bugfix-action-open", title: "Do the thing", why: "test", relatedWorkItemId: "bugfix-1", status: "open" as const, estimateMinutes: 15, createdAt: TODAY };
+  const dataOpen = { ...emptyData(), workItems: [highScoreItem], actions: [openAction] };
+  const withOpen = buildCandidates(dataOpen, TODAY);
+  ok("Action plan bugfix", withOpen.some((c) => c.id === "bugfix-action-open"), "an item with an OPEN action remains represented via its own action-based candidate, never hidden");
+  ok("Action plan bugfix", !withOpen.some((c) => c.id === "plan-bugfix-1"), "…and is never ALSO duplicated as a second, bare-item candidate for the same WorkItem");
+}
+
 // ===== Data import validation =====
 {
   const good = importFromJson(JSON.stringify({ workItems: [{ key: "X-1", title: "Do a thing" }] }), TODAY);
@@ -5712,26 +5745,35 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 {
   const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
   const item = jiraItem({ id: "exec-1", key: "JPMC-800", jiraStatusName: "In Progress", status: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY, owner: "Minh Tran" });
-  const linkedAction = calAction({ id: "exec-action-1", relatedWorkItemId: "exec-1", status: "completed" });
-  (linkedAction as any).outcomeStatus = "EFFECTIVE";
+  const openAction = calAction({ id: "exec-action-1", relatedWorkItemId: "exec-1", status: "open" });
 
   const risk: Risk = { id: "risk-1", projectId: "proj-1", title: "Risk on JPMC-800", level: "HIGH", reason: "test", evidence: [], potentialImpact: "impact", mitigation: "mitigate", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["exec-1"] };
   const attentionItem = mockAttentionItem({ id: "RISK:risk-on-jpmc-800", sourceRef: { type: "risk", id: "Risk on JPMC-800" } });
   const focusCandidate = pfc({ id: "focus:attention:RISK:risk-on-jpmc-800", sourceType: "attention", sourceId: "RISK:risk-on-jpmc-800", title: risk.title, whyOnMyList: "Because a HIGH severity risk is linked to this work." });
 
-  const data = { ...emptyData(), workItems: [item], actions: [linkedAction], risks: [risk] };
+  const data = { ...emptyData(), workItems: [item], actions: [openAction], risks: [risk] };
   const proactive = mockProactive([attentionItem]);
   const personalFocus = mockPersonalFocus([focusCandidate]);
 
   const trace = computeExecutionPathTrace(item, data, TODAY, idx, proactive, personalFocus);
   ok("V2.8 Execution trace", trace.relevance === "ACTIONABLE", "relevance is read via the real V2.5/V2.6 resolveWorkRelevance(), not reimplemented");
-  ok("V2.8 Execution trace", trace.candidateEvaluation === "ELIGIBLE", "a high-scoring ACTIONABLE item is ELIGIBLE — reuses the real buildCandidates() score >= 40 threshold");
+  ok("V2.8 Execution trace", trace.candidateEvaluation === "ELIGIBLE", "an ACTIONABLE item with an OPEN action is ELIGIBLE — the action-loop keeps it represented in buildCandidates()");
   ok("V2.8 Execution trace", trace.actionPlan === "SELECTED", "a real candidate with a small enough estimate is SELECTED within the reference 30-minute Action Plan budget");
-  ok("V2.8 Execution trace", trace.actions.state === "EXISTS" && trace.actions.completedCount === 1 && trace.actions.activeCount === 0, "the real linked, completed Action is reflected exactly");
+  ok("V2.8 Execution trace", trace.actions.state === "EXISTS" && trace.actions.activeCount === 1 && trace.actions.completedCount === 0, "the real linked, open Action is reflected exactly");
   ok("V2.8 Execution trace", trace.attention.presentInPersonalFocus === true, "the item is traced to Personal Focus via the REAL Risk.sourceWorkItemIds -> AttentionItem.sourceRef -> PersonalFocusCandidate.sourceId chain, never inferred");
   ok("V2.8 Execution trace", trace.attention.connectedAttentionItems.some((a) => a.id === attentionItem.id), "the connected AttentionItem is the real one, found via the FK chain");
   ok("V2.8 Execution trace", trace.attention.personalFocusCandidate?.id === focusCandidate.id, "the matched PersonalFocusCandidate is the real one, not fabricated");
-  ok("V2.8 Execution trace", trace.outcome.recorded === true && trace.outcome.count === 1, "outcome is read from the real Action.outcomeStatus — no new outcome model");
+  ok("V2.8 Execution trace", trace.outcome.recorded === false, "no outcome yet — the action hasn't completed");
+
+  // BUGFIX regression, at the execution-trace level: completing the action must never make
+  // the item look untouched/fresh again on the next trace computation.
+  const completedAction = { ...openAction, status: "completed" as const, completedAt: TODAY, outcomeStatus: "EFFECTIVE" as const };
+  const dataAfterComplete = { ...data, actions: [completedAction] };
+  const traceAfterComplete = computeExecutionPathTrace(item, dataAfterComplete, TODAY, idx, proactive, personalFocus);
+  ok("V2.8 Execution trace (bugfix)", traceAfterComplete.candidateEvaluation === "NOT_APPLICABLE", "once the Action is completed, Candidate Evaluation reads NOT_APPLICABLE — never a misleading 'not eligible', and never silently ELIGIBLE again as if untouched");
+  ok("V2.8 Execution trace (bugfix)", traceAfterComplete.actionPlan === "NOT_APPLICABLE", "Action Plan correctly follows suit rather than showing the completed item as needing selection again");
+  ok("V2.8 Execution trace (bugfix)", traceAfterComplete.actions.state === "EXISTS" && traceAfterComplete.actions.completedCount === 1, "the completed action itself remains fully visible on the trace");
+  ok("V2.8 Execution trace (bugfix)", traceAfterComplete.outcome.recorded === true && traceAfterComplete.outcome.count === 1, "the outcome is now correctly recorded");
 }
 
 // ----- §5-6 OBSERVE item with an explicit Action: OBSERVE stays OBSERVE, Action stays intact -----
