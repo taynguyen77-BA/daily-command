@@ -5,7 +5,9 @@ import { getAIProvider } from "@/lib/command-center/ai";
 import { evidenceForScore, factsForWorkItem } from "@/lib/command-center/evidence";
 import type { CommandCenterData, PriorityScoreResult, ReasoningTrace, WorkItem } from "@/lib/command-center/types";
 import { clientName } from "@/lib/command-center/selectors";
+import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { ConfidenceTag, ReasoningTraceBlock, SeverityBadge, TrustLabel } from "./ui";
+import { WhyNotATaskDrawer } from "./WhyNotATaskDrawer";
 
 function recommendedAction(item: WorkItem): string {
   if (item.blocked) return `Escalate the blocker: ${item.blockerReason ?? "unblock dependency"}.`;
@@ -20,12 +22,17 @@ export function PriorityCard({
   data,
   isDemo,
   onTakeAction,
+  workRelevanceIndex,
 }: {
   item: WorkItem;
   result: PriorityScoreResult;
   data: CommandCenterData;
   isDemo: boolean;
   onTakeAction: () => void;
+  // V2.6 §7 — optional: Priorities is one of the few entry points wired to "Why isn't this
+  // on my work list?" (§7 "smallest number of useful entry points"). Undefined is a no-op,
+  // not a crash — any other PriorityCard caller keeps working unchanged.
+  workRelevanceIndex?: WorkRelevanceIndex;
 }) {
   const [trace, setTrace] = useState<ReasoningTrace | null>(null);
   const [open, setOpen] = useState(false);
@@ -85,6 +92,8 @@ export function PriorityCard({
           </div>
         )}
       </div>
+
+      {workRelevanceIndex && <WhyNotATaskDrawer item={item} workRelevanceIndex={workRelevanceIndex} />}
 
       <button
         onClick={onTakeAction}

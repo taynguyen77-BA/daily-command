@@ -8,7 +8,7 @@ import { buildPlan } from "./action-plan";
 import { computeReleaseHealth } from "./release-health";
 import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
-import { explainWorkItemRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { explainWorkItemRelevance, listStatusesByRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, Evidence, EvidenceSourceType, PersonalDeliveryReviewFacts } from "./types";
 import type { DerivedData } from "./selectors";
 import type { ProactiveIntelligence } from "./proactive";
@@ -56,6 +56,10 @@ export type QueryIntent =
   | "jira-status-context"
   | "jira-status-waiting"
   | "jira-statuses-unclassified"
+  // V2.6 §17 — "which statuses are actionable?" is a POLICY-vocabulary question (which
+  // (project, status) pairs are currently classified ACTIONABLE), distinct from
+  // "next-actions" ("what do I need to work on?", which lists actual candidate work items).
+  | "jira-statuses-actionable"
   // V2.2 §10 — Command Bar artifact intents. Deliberately NOT narrated through
   // answerFromRoute/answerQuery (see isArtifactIntent below) — these open the Artifact
   // Editor with a communicate.ts-built draft instead of an AI-narrated answer, so Command
@@ -102,6 +106,7 @@ const QUERY_FAMILY: Record<Exclude<QueryIntent, "unrecognized">, QueryFamily> = 
   "jira-status-context": "STATUS",
   "jira-status-waiting": "STATUS",
   "jira-statuses-unclassified": "STATUS",
+  "jira-statuses-actionable": "STATUS",
 
   "decisions-to-revisit": "DECISION",
   "decisions-blocked": "DECISION",
@@ -263,8 +268,20 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   if (/not classified|unclassified/.test(q)) {
     return { intent: "jira-statuses-unclassified" };
   }
+  // V2.6 §17 — a policy-vocabulary question ("which statuses are actionable?"), checked
+  // before the generic next-actions pattern below so it's never misrouted to a work-item
+  // list ("what do I need to work on?").
+  if (/which statuses? (are|is) actionable|actionable statuses/.test(q)) {
+    return { intent: "jira-statuses-actionable" };
+  }
   if (/what('s| is) waiting|waiting on (me|us)|things? (are )?waiting/.test(q)) {
     return { intent: "jira-status-waiting" };
+  }
+  // V2.6 §17 — "what is being observed?" is the spec's own worked example; it has no
+  // specific status keyword to match, so it lists every currently-OBSERVE item (same
+  // handler as "what's in UAT?" with an empty keyword — see the jira-status-context case).
+  if (/what('s| is) (currently )?(being )?observed|observation.?only/.test(q)) {
+    return { intent: "jira-status-context" };
   }
   {
     const statusContextMatch = q.match(/what('s| is) in ([a-z0-9 /_-]+)\??$/);
@@ -564,6 +581,18 @@ export function answerFromRoute(
         facts: rows.map((r) => `${r.projectKey}: "${r.status}" has not been classified.`),
         evidence: [],
         recommendedAction: "Classify these in Data & Settings → Jira Work Relevance Policy.",
+      };
+    }
+    // V2.6 §17 — the POLICY vocabulary itself (which (project, status) pairs are
+    // classified ACTIONABLE), not the work items currently in that state.
+    case "jira-statuses-actionable": {
+      const idx = workRelevanceIndex ?? new Map();
+      const rows = listStatusesByRelevance(data, idx, "ACTIONABLE");
+      if (rows.length === 0) return none("No Jira status is currently classified ACTIONABLE.");
+      return {
+        facts: rows.map((r) => `${r.projectKey}: "${r.status}" is classified ACTIONABLE.`),
+        evidence: [],
+        recommendedAction: "Review or change this in Data & Settings → Jira Work Relevance Policy.",
       };
     }
     case "am-i-overloaded": {

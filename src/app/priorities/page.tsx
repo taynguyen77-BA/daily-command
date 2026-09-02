@@ -19,7 +19,7 @@ const FILTERS: { key: string; label: string }[] = [
 ];
 
 function PrioritiesInner() {
-  const { state, today, derived, filteredData, store } = useCommandCenter();
+  const { state, today, derived, filteredData, store, workRelevanceIndex } = useCommandCenter();
   const searchParams = useSearchParams();
   const [filter, setFilter] = useState<string>(searchParams.get("filter") ?? "ALL");
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
@@ -76,6 +76,7 @@ function PrioritiesInner() {
                 data={filteredData}
                 isDemo={state.isDemo}
                 onTakeAction={() => setSelected({ item, result })}
+                workRelevanceIndex={workRelevanceIndex}
               />
             );
           })}

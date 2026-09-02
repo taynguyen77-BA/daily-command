@@ -146,6 +146,11 @@ import {
   withStatusRelevance,
   workItemsByRelevance,
   WORK_RELEVANCE_EXPLANATIONS,
+  // V2.6 — Work Policy Intelligence & Operational Calibration
+  computeOverallWorkRelevanceCoverage,
+  computeStatusCoverage,
+  countOpenItemsForProjectStatus,
+  listStatusesByRelevance,
 } from "../src/lib/command-center/jira/work-relevance";
 import type { JiraStatusPolicy, WorkRelevance } from "../src/lib/command-center/types";
 
@@ -5235,6 +5240,136 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
     ok("V2.5 Performance", elapsedMs < 2000, `buildCandidates over ${size} Jira work items with Work Relevance gating completes well within a generous bound (${elapsedMs}ms) — Map-based lookup, not O(n × statuses)`);
     const actionableCount = items.filter((_, i) => (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5] === "ACTIONABLE").length;
     ok("V2.5 Performance", candidates.length <= actionableCount, `only ACTIONABLE-classified items (${actionableCount} of ${size}) can possibly appear as auto-suggested candidates`);
+  }
+}
+
+// ===== V2.6 — Work Policy Intelligence & Operational Calibration =====
+
+// ----- Status coverage arithmetic (§3-4, §26 coverage: full / partial / zero / no data) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" } }));
+  const items = [
+    jiraItem({ id: "a", jiraStatusName: "To Do" }),
+    jiraItem({ id: "b", jiraStatusName: "Ready for UAT/Business Test" }),
+    jiraItem({ id: "c", jiraStatusName: "Blocked" }), // unclassified
+  ];
+  const data = { ...emptyData(), workItems: items };
+
+  const partial = computeStatusCoverage(data, idx, "JPMC");
+  ok("V2.6 Coverage", partial.observedStatusCount === 3 && partial.classifiedStatusCount === 2 && partial.unclassifiedStatusCount === 1, "computeStatusCoverage counts observed/classified/unclassified statuses correctly");
+  ok("V2.6 Coverage", partial.coveragePct === 67, "coverage percentage is deterministic rounded arithmetic (2/3 = 67%), never a blended score");
+  ok("V2.6 Coverage", partial.state === "PARTIALLY_CLASSIFIED", "2 of 3 classified is PARTIALLY_CLASSIFIED");
+
+  const fullyIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE", Blocked: "WAITING" } }));
+  const full = computeStatusCoverage(data, fullyIdx, "JPMC");
+  ok("V2.6 Coverage", full.state === "FULLY_CLASSIFIED" && full.coveragePct === 100, "every observed status classified is FULLY_CLASSIFIED at 100%");
+
+  const zeroIdx = buildWorkRelevanceIndex({});
+  const zero = computeStatusCoverage(data, zeroIdx, "JPMC");
+  ok("V2.6 Coverage", zero.state === "NOT_CLASSIFIED" && zero.coveragePct === 0 && zero.classifiedStatusCount === 0, "an entirely unclassified project (observed statuses exist, none mapped) is NOT_CLASSIFIED at 0%");
+
+  const noData = computeStatusCoverage({ ...emptyData() }, idx, "GHOST");
+  ok("V2.6 Coverage", noData.state === "NO_JIRA_DATA" && noData.observedStatusCount === 0, "a project with no observed statuses at all is NO_JIRA_DATA, never NOT_CLASSIFIED (§4)");
+
+  // §10 — overall coverage across every project, optionally scoped to Focus Projects.
+  const twoProjectItems = [...items, jiraItem({ id: "d", projectId: "jira-project-UBS", jiraStatusName: "To Do" })];
+  const twoProjectData = { ...emptyData(), workItems: twoProjectItems };
+  const overallAll = computeOverallWorkRelevanceCoverage(twoProjectData, idx);
+  ok("V2.6 Coverage", overallAll.observedStatusCount === 4, "overall coverage (ALL scope) counts distinct (project, status) pairs across every project — JPMC's 3 plus UBS's own 'To Do'");
+  const overallFocused = computeOverallWorkRelevanceCoverage(twoProjectData, idx, ["JPMC"]);
+  ok("V2.6 Coverage", overallFocused.observedStatusCount === 3, "overall coverage narrowed to Focus Projects (['JPMC']) excludes UBS's status entirely — never leaks scope");
+
+  const emptyOverall = computeOverallWorkRelevanceCoverage({ ...emptyData() }, idx);
+  ok("V2.6 Coverage", emptyOverall.state === "NO_JIRA_DATA", "no Jira data at all is honestly reported as NO_JIRA_DATA, not 0% classified");
+}
+
+// ----- Policy Change Impact Preview: deterministic affected-item counts (§8-9) -----
+{
+  const items = [
+    jiraItem({ id: "a", key: "JPMC-1", jiraStatusName: "Ready for UAT/Business Test" }),
+    jiraItem({ id: "b", key: "JPMC-2", jiraStatusName: "Ready for UAT/Business Test" }),
+    jiraItem({ id: "c", key: "JPMC-3", jiraStatusName: "Ready for UAT/Business Test", status: "Done" }), // closed — excluded
+    jiraItem({ id: "d", key: "JPMC-4", jiraStatusName: "Waiting for Client" }),
+    jiraItem({ id: "e", key: "UBS-1", projectId: "jira-project-UBS", jiraStatusName: "Ready for UAT/Business Test" }), // different project
+  ];
+  const data = { ...emptyData(), workItems: items };
+
+  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "JPMC", "Ready for UAT/Business Test") === 2, "impact count is exactly the number of OPEN items matching the (project, status) pair — closed items excluded");
+  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "JPMC", "Waiting for Client") === 1, "impact count is scoped to the specific status, not every item in the project");
+  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "UBS", "Ready for UAT/Business Test") === 1, "impact count respects project isolation — the identical status string in a different project is counted separately");
+  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "JPMC", "Never Seen") === 0, "a status with no matching items yields 0, never a fabricated number");
+}
+
+// ----- listStatusesByRelevance: generalizes the V2.5 UNKNOWN-only listing (§17) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" }, UBS: { "To Do": "ACTIONABLE" } }));
+  const items = [jiraItem({ id: "a", jiraStatusName: "To Do" }), jiraItem({ id: "b", jiraStatusName: "Ready for UAT/Business Test" }), jiraItem({ id: "c", projectId: "jira-project-UBS", jiraStatusName: "To Do" })];
+  const data = { ...emptyData(), workItems: items };
+
+  const actionableRows = listStatusesByRelevance(data, idx, "ACTIONABLE");
+  ok("V2.6 Status listing", actionableRows.length === 2, "listStatusesByRelevance(ACTIONABLE) returns each project's own ACTIONABLE status once, never deduped across projects");
+  ok("V2.6 Status listing", actionableRows.some((r) => r.projectKey === "JPMC" && r.status === "To Do") && actionableRows.some((r) => r.projectKey === "UBS" && r.status === "To Do"), "the same status string classified ACTIONABLE in two projects is reported as two independent rows");
+
+  const observeRows = listStatusesByRelevance(data, idx, "OBSERVE");
+  ok("V2.6 Status listing", observeRows.length === 1 && observeRows[0].projectKey === "JPMC", "listStatusesByRelevance(OBSERVE) returns only the OBSERVE-classified row");
+
+  // listUnclassifiedJiraStatuses must still behave identically after being rewritten as a thin wrapper.
+  const unclassified = listUnclassifiedJiraStatuses(data, idx);
+  ok("V2.6 Status listing", unclassified.length === 0, "listUnclassifiedJiraStatuses (now a thin wrapper over listStatusesByRelevance) is unchanged — every status here is classified");
+}
+
+// ----- Command Bar: new/extended intents + near-miss regression matrix (§17) -----
+{
+  const items = [
+    jiraItem({ id: "a", key: "JPMC-500", title: "Sprint board cleanup", jiraStatusName: "To Do" }),
+    jiraItem({ id: "b", key: "JPMC-501", title: "UAT coverage", jiraStatusName: "Ready for UAT/Business Test" }),
+  ];
+  const cbData = { ...emptyData(), workItems: items };
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" } }));
+  const derived = deriveData(cbData, null, TODAY);
+
+  ok("V2.6 Command Bar", classifyQuery("Which statuses are actionable?", cbData).intent === "jira-statuses-actionable", "'which statuses are actionable?' routes to the new jira-statuses-actionable intent");
+  ok("V2.6 Command Bar", classifyQuery("What are the actionable statuses?", cbData).intent === "jira-statuses-actionable", "'what are the actionable statuses?' also routes correctly (near-miss phrasing)");
+  ok("V2.6 Command Bar", classifyQuery("What is being observed?", cbData).intent === "jira-status-context", "'what is being observed?' routes to the existing jira-status-context intent (same OBSERVE listing as 'what's in UAT?')");
+
+  const actionableFacts = answerFromRoute({ intent: "jira-statuses-actionable" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.6 Command Bar", actionableFacts.facts.some((f) => f.includes("To Do") && f.includes("ACTIONABLE")), "'which statuses are actionable?' names the real classified status, not an invented one");
+
+  const observedFacts = answerFromRoute({ intent: "jira-status-context" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.6 Command Bar", observedFacts.facts.some((f) => f.includes("JPMC-501")), "'what is being observed?' (no keyword) lists every current OBSERVE item");
+
+  // Near-miss regression matrix (§17) — every V2.5 phrasing from the same worked examples
+  // must still route exactly as before; none of the V2.6 additions may shadow them.
+  ok("V2.6 Near-miss regression", classifyQuery("What is in UAT?", cbData).intent === "jira-status-context", "'what is in UAT?' still routes to jira-status-context (unaffected by the new 'being observed' pattern)");
+  ok("V2.6 Near-miss regression", classifyQuery("What is waiting?", cbData).intent === "jira-status-waiting", "'what is waiting?' still routes to jira-status-waiting");
+  ok("V2.6 Near-miss regression", classifyQuery("What do I need to work on?", cbData).intent === "next-actions", "'what do I need to work on?' still routes to next-actions, not jira-statuses-actionable");
+  ok("V2.6 Near-miss regression", classifyQuery("Why isn't JPMC-500 on my list?", cbData).intent === "why-on-my-list", "'why isn't X on my list?' still routes to why-on-my-list");
+  ok("V2.6 Near-miss regression", classifyQuery("Which Jira statuses are unclassified?", cbData).intent === "jira-statuses-unclassified", "'which Jira statuses are unclassified?' still routes to jira-statuses-unclassified, not jira-statuses-actionable");
+  ok("V2.6 Near-miss regression", classifyQuery("Which projects need my attention?", cbData).intent === "which-projects-need-attention", "'which projects need my attention?' is unaffected by the new actionable-statuses pattern");
+  ok("V2.6 Near-miss regression", classifyQuery("asdkjfh nonsense query", cbData).intent === "unrecognized", "nonsense input remains unclassified, never misrouted to a V2.6 intent");
+}
+
+// ----- Performance (§23/§28): coverage/impact calculations use Map-based indexes, no O(n²). -----
+{
+  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF${i}`);
+  const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
+  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigIndex = buildWorkRelevanceIndex(bigPolicy);
+
+  for (const size of [100, 500, 2000]) {
+    const items = Array.from({ length: size }, (_, i) =>
+      jiraItem({ id: `perf-cov-${size}-${i}`, key: `PERF${i % 20}-${i}`, projectId: `jira-project-PERF${i % 20}`, jiraStatusName: statusNames[i % 30] })
+    );
+    const perfData = { ...emptyData(), workItems: items };
+
+    const start = Date.now();
+    const overall = computeOverallWorkRelevanceCoverage(perfData, bigIndex);
+    const perProject = computeStatusCoverage(perfData, bigIndex, "PERF0");
+    const impact = countOpenItemsForProjectStatus(perfData, "PERF0", "Status 0");
+    const elapsedMs = Date.now() - start;
+
+    ok("V2.6 Performance", elapsedMs < 2000, `coverage + impact calculations over ${size} Jira work items complete well within a generous bound (${elapsedMs}ms)`);
+    ok("V2.6 Performance", overall.observedStatusCount > 0 && perProject.observedStatusCount > 0 && impact >= 0, `coverage/impact results over ${size} items are well-formed, not degenerate`);
   }
 }
 

@@ -7,7 +7,16 @@ import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/compon
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
-import { collectObservedStatuses, WORK_RELEVANCE_EXPLANATIONS } from "@/lib/command-center/jira/work-relevance";
+import {
+  collectObservedStatuses,
+  computeOverallWorkRelevanceCoverage,
+  computeStatusCoverage,
+  countOpenItemsForProjectStatus,
+  WORK_RELEVANCE_EXPLANATIONS,
+  type WorkRelevanceCoverage,
+  type WorkRelevanceCoverageState,
+} from "@/lib/command-center/jira/work-relevance";
+import { PolicyChangeImpactDialog, type PendingPolicyChange } from "@/components/command-center/PolicyChangeImpactDialog";
 import { WORK_RELEVANCE_VALUES, type WorkRelevance } from "@/lib/command-center/types";
 import { computeDataHealth } from "@/lib/command-center/data-health";
 import { getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
@@ -268,33 +277,106 @@ const RELEVANCE_SELECT_STYLE: Record<WorkRelevance, string> = {
   UNKNOWN: "text-text3",
 };
 
+// V2.6 §4 — coverage state labels/colors, reused wherever a WorkRelevanceCoverage is shown.
+const COVERAGE_STATE_LABEL: Record<WorkRelevanceCoverageState, string> = {
+  FULLY_CLASSIFIED: "Fully classified",
+  PARTIALLY_CLASSIFIED: "Partially classified",
+  NOT_CLASSIFIED: "Not classified",
+  NO_JIRA_DATA: "No Jira data",
+};
+const COVERAGE_STATE_STYLE: Record<WorkRelevanceCoverageState, string> = {
+  FULLY_CLASSIFIED: "text-green",
+  PARTIALLY_CLASSIFIED: "text-yellow",
+  NOT_CLASSIFIED: "text-red",
+  NO_JIRA_DATA: "text-text3",
+};
+
+function CoverageStatBar({ coverage }: { coverage: WorkRelevanceCoverage }) {
+  return (
+    <div className="rounded-md border border-border bg-surface p-2.5 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-text2">
+          {coverage.observedStatusCount} observed status{coverage.observedStatusCount === 1 ? "" : "es"} · {coverage.classifiedStatusCount} classified · {coverage.unclassifiedStatusCount} unclassified
+        </p>
+        <span className={`font-display ${COVERAGE_STATE_STYLE[coverage.state]}`}>
+          {coverage.state === "NO_JIRA_DATA" ? COVERAGE_STATE_LABEL[coverage.state] : `${coverage.coveragePct}% policy coverage`}
+        </span>
+      </div>
+      {coverage.state !== "NO_JIRA_DATA" && coverage.state !== "FULLY_CLASSIFIED" && (
+        <p className="mt-1 text-text3">
+          ⚠ {coverage.unclassifiedStatusCount} status{coverage.unclassifiedStatusCount === 1 ? "" : "es"} need{coverage.unclassifiedStatusCount === 1 ? "s" : ""} classification
+        </p>
+      )}
+    </div>
+  );
+}
+
 // V2.5 — Work Relevance & Jira Status Policy. Lives inside Data & Settings, right beside
 // Jira Project Scope (§8 "no new settings page"). One project at a time, statuses derived
 // from OBSERVED Jira data (§6), grouped by their current classification so the layout
-// matches the spec's own worked example. A plain <select> per status — no drag-and-drop.
-// Every change is immediate and local (store.setJiraStatusRelevance), no Jira write.
+// matches the spec's own worked example.
+// V2.6 — calibration layer on top: (1) restricted to the existing Focus Project Scope by
+// default with an ALL-mode warning (§11), (2) a deterministic coverage readout per project
+// (§3-4), (3) a status change no longer applies immediately — it opens a Policy Change
+// Impact Preview computed from CURRENT data, and only takes effect on explicit "Apply
+// Policy Change" (§8-9). store.setJiraStatusRelevance (the only place a classification is
+// ever set — see jira/work-relevance.ts) is unchanged; this panel just gates the call
+// behind a confirmation step.
 function JiraWorkRelevancePolicyPanel({
   state,
   store,
   jiraConfigured,
+  workRelevanceIndex,
 }: {
   state: ReturnType<typeof useCommandCenter>["state"];
   store: ReturnType<typeof useCommandCenter>["store"];
   jiraConfigured: boolean | undefined;
+  workRelevanceIndex: ReturnType<typeof useCommandCenter>["workRelevanceIndex"];
 }) {
-  const projects = useMemo(() => knownJiraProjects(state.data), [state.data]);
+  const allKnownProjects = useMemo(() => knownJiraProjects(state.data), [state.data]);
+  // V2.6 §11 — "primarily operate against the user's existing jiraProjectScope"; FOCUSED
+  // narrows the picker to those projects, ALL shows every known project with a warning.
+  const isFocusedScope = state.jiraProjectScope.mode === "FOCUSED";
+  const projects = useMemo(
+    () => (isFocusedScope ? allKnownProjects.filter((p) => state.jiraProjectScope.projectKeys.includes(p.key)) : allKnownProjects),
+    [allKnownProjects, isFocusedScope, state.jiraProjectScope.projectKeys]
+  );
   const [selectedProject, setSelectedProject] = useState<string>("");
-  const activeProjectKey = selectedProject || projects[0]?.key || "";
+  const activeProjectKey = selectedProject && projects.some((p) => p.key === selectedProject) ? selectedProject : projects[0]?.key ?? "";
 
   const observedStatuses = useMemo(() => (activeProjectKey ? collectObservedStatuses(state.data, activeProjectKey) : []), [state.data, activeProjectKey]);
   const statusMap = state.jiraWorkRelevancePolicy[activeProjectKey]?.statusMap ?? {};
+  const coverage = useMemo(() => (activeProjectKey ? computeStatusCoverage(state.data, workRelevanceIndex, activeProjectKey) : null), [state.data, workRelevanceIndex, activeProjectKey]);
+
+  const [pendingChange, setPendingChange] = useState<PendingPolicyChange | null>(null);
+
+  function requestChange(status: string, next: WorkRelevance) {
+    const current = statusMap[status] ?? "UNKNOWN";
+    if (current === next) return;
+    setPendingChange({
+      projectKey: activeProjectKey,
+      status,
+      from: current,
+      to: next,
+      // §8 — always a live count over current data, never invented; countOpenItemsForProjectStatus
+      // can't fail here (it's plain arithmetic over `state.data`), so this is never null in
+      // practice — the dialog still handles null defensively per §8 "Impact unavailable".
+      affectedCount: countOpenItemsForProjectStatus(state.data, activeProjectKey, status),
+    });
+  }
+
+  function applyPendingChange() {
+    if (!pendingChange) return;
+    store.setJiraStatusRelevance(pendingChange.projectKey, pendingChange.status, pendingChange.to);
+    setPendingChange(null);
+  }
 
   const groups: Record<WorkRelevance, string[]> = { ACTIONABLE: [], WAITING: [], OBSERVE: [], COMPLETED: [], EXCLUDED: [], UNKNOWN: [] };
   for (const status of observedStatuses) groups[statusMap[status] ?? "UNKNOWN"].push(status);
 
   if (!jiraConfigured) {
     return (
-      <Panel className="p-5">
+      <Panel className="p-5" id="jira-work-relevance-policy-panel">
         <SectionHeading
           title="Jira Work Relevance Policy"
           subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status per project so Daily Command Center knows the difference."
@@ -305,13 +387,20 @@ function JiraWorkRelevancePolicyPanel({
   }
 
   return (
-    <Panel className="p-5">
+    <Panel className="p-5" id="jira-work-relevance-policy-panel">
       <SectionHeading
         title="Jira Work Relevance Policy"
         subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status per project so Daily Command Center knows the difference."
       />
-      {projects.length === 0 ? (
+      {!isFocusedScope && (
+        <p className="mb-3 rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs text-text2">
+          Your Jira Project Scope is ALL PROJECTS — this panel may show a large status vocabulary across every synced project. Consider Focus Projects above to narrow it.
+        </p>
+      )}
+      {allKnownProjects.length === 0 ? (
         <p className="text-sm text-text3">No Jira projects known yet — sync Jira first, then return here to classify its statuses.</p>
+      ) : projects.length === 0 ? (
+        <p className="text-sm text-text3">No Focus Projects are selected yet, so there&apos;s nothing to classify. Select at least one project in Jira Project Scope above.</p>
       ) : (
         <div className="space-y-3 text-sm">
           <label className="flex items-center gap-2 text-xs text-text2">
@@ -328,6 +417,8 @@ function JiraWorkRelevancePolicyPanel({
               ))}
             </select>
           </label>
+
+          {coverage && <CoverageStatBar coverage={coverage} />}
 
           {observedStatuses.length === 0 ? (
             <p className="text-xs text-text3">No Jira statuses observed yet for {activeProjectKey} — sync Jira to populate this list.</p>
@@ -348,7 +439,7 @@ function JiraWorkRelevancePolicyPanel({
                           <span className="font-mono text-xs text-text">{status}</span>
                           <select
                             value={statusMap[status] ?? "UNKNOWN"}
-                            onChange={(e) => store.setJiraStatusRelevance(activeProjectKey, status, e.target.value as WorkRelevance)}
+                            onChange={(e) => requestChange(status, e.target.value as WorkRelevance)}
                             aria-label={`Classify Jira status "${status}" for ${activeProjectKey}`}
                             className="rounded border border-border bg-surface2 px-2 py-1 text-xs text-text"
                           >
@@ -368,6 +459,8 @@ function JiraWorkRelevancePolicyPanel({
           )}
         </div>
       )}
+
+      {pendingChange && <PolicyChangeImpactDialog change={pendingChange} onCancel={() => setPendingChange(null)} onApply={applyPendingChange} />}
     </Panel>
   );
 }
@@ -421,6 +514,13 @@ export default function DataSettingsPage() {
   const dataHealth = useMemo(
     () => computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex),
     [state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt, workRelevanceIndex]
+  );
+  // V2.6 §10 — Data Health's own Work Relevance dimension: scoped to Focus Projects when
+  // FOCUSED, every known project when ALL. Plain arithmetic (§4), never blended into any
+  // other Data Health dimension.
+  const workRelevanceCoverage = useMemo(
+    () => computeOverallWorkRelevanceCoverage(state.data, workRelevanceIndex, state.jiraProjectScope.mode === "FOCUSED" ? state.jiraProjectScope.projectKeys : undefined),
+    [state.data, workRelevanceIndex, state.jiraProjectScope]
   );
   const trustDiagnostic = useMemo(
     () =>
@@ -711,7 +811,7 @@ export default function DataSettingsPage() {
 
       <JiraProjectScopePanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
 
-      <JiraWorkRelevancePolicyPanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
+      <JiraWorkRelevancePolicyPanel state={state} store={store} jiraConfigured={jiraStatus?.configured} workRelevanceIndex={workRelevanceIndex} />
 
       <Panel className="p-5">
         <SectionHeading title="Jira Conformance" subtitle="Runs the same connector code (pagination, mapping, error classification) against fixtures — or, when Jira is configured, the real API — never a reimplementation." />
@@ -919,11 +1019,29 @@ export default function DataSettingsPage() {
           </div>
           {dataHealth.unclassifiedJiraStatusCount !== undefined && (
             <div className="rounded-md border border-border bg-surface2 px-3 py-2">
-              <p className="text-text3">Unclassified Jira statuses</p>
-              <p className={`font-display ${dataHealth.unclassifiedJiraStatusCount > 0 ? "text-yellow" : "text-text"}`}>{dataHealth.unclassifiedJiraStatusCount}</p>
+              <p className="text-text3">Jira work relevance</p>
+              {workRelevanceCoverage.state === "NO_JIRA_DATA" ? (
+                <p className="font-display text-text3">No Jira data</p>
+              ) : (
+                <p className={`font-display ${dataHealth.unclassifiedJiraStatusCount > 0 ? "text-yellow" : "text-text"}`}>{workRelevanceCoverage.coveragePct}% classified</p>
+              )}
             </div>
           )}
         </div>
+        {dataHealth.unclassifiedJiraStatusCount !== undefined && workRelevanceCoverage.state !== "NO_JIRA_DATA" && workRelevanceCoverage.state !== "FULLY_CLASSIFIED" && (
+          <div className="mt-3 rounded-md border border-border bg-surface2 p-3 text-xs">
+            <p className="font-semibold uppercase tracking-wide text-text3">Jira Work Relevance</p>
+            <p className="mt-1 text-text2">
+              {workRelevanceCoverage.coveragePct}% classified — {workRelevanceCoverage.unclassifiedStatusCount} observed status{workRelevanceCoverage.unclassifiedStatusCount === 1 ? "" : "es"} unclassified.
+            </p>
+            <button
+              onClick={() => document.getElementById("jira-work-relevance-policy-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              className="mt-2 font-medium text-accent2 hover:underline"
+            >
+              Review affected statuses
+            </button>
+          </div>
+        )}
         {/* V2.3 §17 — makes scope visible in Data Health without introducing a blended
             "scope score"; a plain fact, styled like the trust-diagnostic rows above. */}
         {state.dataSource === "jira" && (

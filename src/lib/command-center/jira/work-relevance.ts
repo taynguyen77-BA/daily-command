@@ -163,11 +163,19 @@ export interface UnclassifiedStatusRow {
 }
 
 export function listUnclassifiedJiraStatuses(data: CommandCenterData, index: WorkRelevanceIndex): UnclassifiedStatusRow[] {
+  return listStatusesByRelevance(data, index, "UNKNOWN");
+}
+
+/** V2.6 §17 — generalized (project, status) rows currently classified as `relevance`, e.g.
+ *  for the Command Bar's "which statuses are actionable?" intent. `listUnclassifiedJiraStatuses`
+ *  above is the UNKNOWN special case, kept as its own export since it's the one V2.5 already
+ *  wired everywhere (Data & Settings, Command Bar) — this is purely additive. */
+export function listStatusesByRelevance(data: CommandCenterData, index: WorkRelevanceIndex, relevance: WorkRelevance): UnclassifiedStatusRow[] {
   const seen = new Map<string, UnclassifiedStatusRow>();
   for (const item of data.workItems) {
     const projectKey = jiraProjectKeyForWorkItem(item);
     if (!projectKey || !item.jiraStatusName) continue;
-    if (resolveWorkRelevance(item, index) !== "UNKNOWN") continue;
+    if (resolveWorkRelevance(item, index) !== relevance) continue;
     const key = `${projectKey}::${item.jiraStatusName}`;
     if (!seen.has(key)) seen.set(key, { projectKey, status: item.jiraStatusName });
   }
@@ -188,4 +196,74 @@ export function withStatusRelevance(policyMap: Record<string, JiraStatusPolicy>,
   const existing = policyMap[projectKey];
   const nextStatusMap = { ...(existing?.statusMap ?? {}), [status]: relevance };
   return { ...policyMap, [projectKey]: { projectKey, statusMap: nextStatusMap, updatedAt: new Date().toISOString() } };
+}
+
+// ===== V2.6 — Work Policy Intelligence & Operational Calibration =====
+// Additive calibration layer on top of V2.5 above: status coverage arithmetic and a
+// deterministic policy-change impact count. No new classification logic — every function
+// below is a read over the SAME index/policy map V2.5 already builds and enforces.
+
+/** §4 — deterministic coverage state for one project's (or the whole scope's) observed
+ *  Jira status vocabulary. Plain arithmetic, never a blended score (§4). */
+export type WorkRelevanceCoverageState = "FULLY_CLASSIFIED" | "PARTIALLY_CLASSIFIED" | "NOT_CLASSIFIED" | "NO_JIRA_DATA";
+
+export interface WorkRelevanceCoverage {
+  observedStatusCount: number;
+  classifiedStatusCount: number;
+  unclassifiedStatusCount: number;
+  coveragePct: number;
+  state: WorkRelevanceCoverageState;
+}
+
+function pctOf(numerator: number, denominator: number): number {
+  if (denominator === 0) return 0;
+  return Math.round((numerator / denominator) * 100);
+}
+
+function coverageFrom(observedCount: number, classifiedCount: number): WorkRelevanceCoverage {
+  const state: WorkRelevanceCoverageState = observedCount === 0 ? "NO_JIRA_DATA" : classifiedCount === 0 ? "NOT_CLASSIFIED" : classifiedCount === observedCount ? "FULLY_CLASSIFIED" : "PARTIALLY_CLASSIFIED";
+  return { observedStatusCount: observedCount, classifiedStatusCount: classifiedCount, unclassifiedStatusCount: observedCount - classifiedCount, coveragePct: pctOf(classifiedCount, observedCount), state };
+}
+
+/** §4 — per-project status coverage, computed from OBSERVED Jira data (never invented). */
+export function computeStatusCoverage(data: CommandCenterData, index: WorkRelevanceIndex, projectKey: string): WorkRelevanceCoverage {
+  const observed = collectObservedStatuses(data, projectKey);
+  const statusMap = index.get(projectKey);
+  const classifiedCount = observed.filter((s) => !!statusMap?.get(s)).length;
+  return coverageFrom(observed.length, classifiedCount);
+}
+
+/** §4, §10 — coverage across every OBSERVED (project, status) pair currently in scope, for
+ *  the single "X% classified" figure the Data Health panel shows (§10 "do not create a
+ *  second status-management page"). `projectKeys` narrows to Focused Projects when
+ *  supplied; omitted/empty means every project observed in `data` (ALL scope). */
+export function computeOverallWorkRelevanceCoverage(data: CommandCenterData, index: WorkRelevanceIndex, projectKeys?: string[]): WorkRelevanceCoverage {
+  const scope = projectKeys && projectKeys.length > 0 ? new Set(projectKeys) : undefined;
+  const seen = new Set<string>();
+  let observedCount = 0;
+  let classifiedCount = 0;
+  for (const item of data.workItems) {
+    const projectKey = jiraProjectKeyForWorkItem(item);
+    if (!projectKey || !item.jiraStatusName) continue;
+    if (scope && !scope.has(projectKey)) continue;
+    const pairKey = `${projectKey}::${item.jiraStatusName}`;
+    if (seen.has(pairKey)) continue;
+    seen.add(pairKey);
+    observedCount++;
+    if (index.get(projectKey)?.get(item.jiraStatusName)) classifiedCount++;
+  }
+  return coverageFrom(observedCount, classifiedCount);
+}
+
+/** §8-9 — deterministic policy-change impact: how many currently-open work items carry
+ *  this exact (project, raw status) pair right now. Used to preview "+N personal work
+ *  items" BEFORE a classification change is applied — never a guess, always a live count
+ *  over `data` (§8 "the impact calculation must use actual current data"). */
+export function countOpenItemsForProjectStatus(data: CommandCenterData, projectKey: string, status: string): number {
+  let count = 0;
+  for (const item of data.workItems) {
+    if (item.status === "Done") continue;
+    if (jiraProjectKeyForWorkItem(item) === projectKey && item.jiraStatusName === status) count++;
+  }
+  return count;
 }
