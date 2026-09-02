@@ -9,6 +9,7 @@ import { computeReleaseHealth } from "./release-health";
 import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
 import { explainWorkItemRelevance, listStatusesByRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { computePolicyReviewSignals, computeWorkRelevanceDistribution } from "./jira/work-relevance-calibration";
 import type { CommandCenterData, Evidence, EvidenceSourceType, PersonalDeliveryReviewFacts } from "./types";
 import type { DerivedData } from "./selectors";
 import type { ProactiveIntelligence } from "./proactive";
@@ -60,6 +61,12 @@ export type QueryIntent =
   // (project, status) pairs are currently classified ACTIONABLE), distinct from
   // "next-actions" ("what do I need to work on?", which lists actual candidate work items).
   | "jira-statuses-actionable"
+  // V2.7 §19 — Work Relevance Operational Calibration intents. Deterministic reads over
+  // jira/work-relevance-calibration.ts — never AI, never a mutation.
+  | "work-relevance-calibration-summary"
+  | "policy-review-signals"
+  | "actionable-low-personal-work"
+  | "observed-statuses-with-actions"
   // V2.2 §10 — Command Bar artifact intents. Deliberately NOT narrated through
   // answerFromRoute/answerQuery (see isArtifactIntent below) — these open the Artifact
   // Editor with a communicate.ts-built draft instead of an AI-narrated answer, so Command
@@ -107,6 +114,10 @@ const QUERY_FAMILY: Record<Exclude<QueryIntent, "unrecognized">, QueryFamily> = 
   "jira-status-waiting": "STATUS",
   "jira-statuses-unclassified": "STATUS",
   "jira-statuses-actionable": "STATUS",
+  "work-relevance-calibration-summary": "STATUS",
+  "policy-review-signals": "STATUS",
+  "actionable-low-personal-work": "STATUS",
+  "observed-statuses-with-actions": "STATUS",
 
   "decisions-to-revisit": "DECISION",
   "decisions-blocked": "DECISION",
@@ -262,6 +273,22 @@ export function classifyQuery(query: string, data: CommandCenterData): RoutedQue
   }
   if (/what should i defer/.test(q)) {
     return { intent: "what-should-i-defer" };
+  }
+  // V2.7 §19 — Work Relevance Operational Calibration intents. Checked before V2.6's
+  // "which statuses are actionable?" pattern below: "actionable statuses producing little
+  // personal work" contains the substring "actionable statuses" and would otherwise be
+  // misrouted to jira-statuses-actionable.
+  if (/how is my work relevance( policy)? performing|work relevance (performance|calibration)/.test(q)) {
+    return { intent: "work-relevance-calibration-summary" };
+  }
+  if (/actionable statuses?.*(little|low|no) personal work|actionable.*producing little/.test(q)) {
+    return { intent: "actionable-low-personal-work" };
+  }
+  if (/which statuses need (a )?(policy )?review|policy review signals?|statuses?.*worth reviewing/.test(q)) {
+    return { intent: "policy-review-signals" };
+  }
+  if (/which observed statuses have actions|observed statuses.*(have )?actions/.test(q)) {
+    return { intent: "observed-statuses-with-actions" };
   }
   // V2.5 §17 — checked before the generic patterns below (e.g. "what should i do") so
   // status-context/waiting/unclassified questions are never misrouted to next-actions.
@@ -593,6 +620,50 @@ export function answerFromRoute(
         facts: rows.map((r) => `${r.projectKey}: "${r.status}" is classified ACTIONABLE.`),
         evidence: [],
         recommendedAction: "Review or change this in Data & Settings → Jira Work Relevance Policy.",
+      };
+    }
+    // V2.7 §4 — the deterministic distribution, never a blended "work relevance score".
+    case "work-relevance-calibration-summary": {
+      const idx = workRelevanceIndex ?? new Map();
+      const rows = computeWorkRelevanceDistribution(data, idx);
+      if (rows.length === 0) return none("No Jira-sourced work items are currently in scope to calibrate against.");
+      return {
+        facts: rows.map((r) => `${r.projectKey}: ACTIONABLE ${r.counts.ACTIONABLE} · WAITING ${r.counts.WAITING} · OBSERVE ${r.counts.OBSERVE} · COMPLETED ${r.counts.COMPLETED} · EXCLUDED ${r.counts.EXCLUDED} · UNKNOWN ${r.counts.UNKNOWN}`),
+        evidence: [],
+        recommendedAction: "Review the full calibration breakdown in Data & Settings → Work Relevance Calibration.",
+      };
+    }
+    // V2.7 §8-11 — deterministic REVIEW signals only; never a claim that the policy is wrong.
+    case "policy-review-signals": {
+      const idx = workRelevanceIndex ?? new Map();
+      const signals = computePolicyReviewSignals(data, idx).filter((s) => s.signalType === "REVIEW");
+      if (signals.length === 0) return none("No status currently shows a policy review signal.");
+      return {
+        facts: signals.map((s) => `${s.projectKey}: "${s.statusName}" (${s.currentRelevance}) — ${s.explanation}`),
+        evidence: [],
+        recommendedAction: "This may be worth reviewing in Data & Settings → Work Relevance Calibration. The policy is not changed automatically.",
+      };
+    }
+    // V2.7 §8 Signal B — ACTIONABLE statuses with zero linked personal-work evidence.
+    case "actionable-low-personal-work": {
+      const idx = workRelevanceIndex ?? new Map();
+      const signals = computePolicyReviewSignals(data, idx).filter((s) => s.currentRelevance === "ACTIONABLE" && s.signalType === "REVIEW");
+      if (signals.length === 0) return none("No ACTIONABLE status currently shows a review signal — every ACTIONABLE status with enough evidence has at least one linked Action.");
+      return {
+        facts: signals.map((s) => `${s.projectKey}: "${s.statusName}" — ${s.explanation}`),
+        evidence: [],
+        recommendedAction: "This may be worth reviewing — it does not mean the policy is wrong.",
+      };
+    }
+    // V2.7 §8 Signal A — any observed status (any policy) with linked user Actions.
+    case "observed-statuses-with-actions": {
+      const idx = workRelevanceIndex ?? new Map();
+      const rows = computePolicyReviewSignals(data, idx).filter((s) => s.actionEvidenceCount > 0);
+      if (rows.length === 0) return none("No observed Jira status currently has a linked Action.");
+      return {
+        facts: rows.map((s) => `${s.projectKey}: "${s.statusName}" (${s.currentRelevance}) — ${s.actionEvidenceCount} linked Action(s), ${s.completionEvidenceCount} completed.`),
+        evidence: [],
+        recommendedAction: "",
       };
     }
     case "am-i-overloaded": {

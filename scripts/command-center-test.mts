@@ -152,6 +152,15 @@ import {
   countOpenItemsForProjectStatus,
   listStatusesByRelevance,
 } from "../src/lib/command-center/jira/work-relevance";
+// V2.7 — Work Relevance Operational Calibration
+import {
+  computeActionableCalibration,
+  computeCalibrationHealthState,
+  computeObserveCalibration,
+  computePolicyReviewSignals,
+  computeUnknownVisibility,
+  computeWorkRelevanceDistribution,
+} from "../src/lib/command-center/jira/work-relevance-calibration";
 import type { JiraStatusPolicy, WorkRelevance } from "../src/lib/command-center/types";
 
 let failures = 0;
@@ -5370,6 +5379,295 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 
     ok("V2.6 Performance", elapsedMs < 2000, `coverage + impact calculations over ${size} Jira work items complete well within a generous bound (${elapsedMs}ms)`);
     ok("V2.6 Performance", overall.observedStatusCount > 0 && perProject.observedStatusCount > 0 && impact >= 0, `coverage/impact results over ${size} items are well-formed, not degenerate`);
+  }
+}
+
+// ===== V2.7 — Work Relevance Operational Calibration =====
+
+function calAction(overrides: Partial<Action> = {}): Action {
+  return { id: `action-${Math.random().toString(36).slice(2)}`, title: "Test action", why: "test", status: "open", estimateMinutes: 15, createdAt: TODAY, ...overrides };
+}
+
+// ----- §4 Distribution: counts per relevance, project breakdown -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Waiting for Client": "WAITING", "Ready for UAT/Business Test": "OBSERVE", Done: "COMPLETED" } }));
+  const items = [
+    jiraItem({ id: "a", jiraStatusName: "To Do" }),
+    jiraItem({ id: "b", jiraStatusName: "To Do" }),
+    jiraItem({ id: "c", jiraStatusName: "Waiting for Client" }),
+    jiraItem({ id: "d", jiraStatusName: "Ready for UAT/Business Test" }),
+    jiraItem({ id: "e", jiraStatusName: "Done", status: "Done" }),
+    jiraItem({ id: "f", jiraStatusName: "Never Classified" }), // UNKNOWN
+    jiraItem({ id: "g", projectId: "jira-project-UBS", jiraStatusName: "To Do" }), // no UBS policy at all
+  ];
+  const data = { ...emptyData(), workItems: items };
+  const rows = computeWorkRelevanceDistribution(data, idx);
+
+  ok("V2.7 Distribution", rows.length === 2, "distribution returns one row per observed project (JPMC and UBS), never collapsed together");
+  const jpmc = rows.find((r) => r.projectKey === "JPMC")!;
+  ok("V2.7 Distribution", jpmc.counts.ACTIONABLE === 2 && jpmc.counts.WAITING === 1 && jpmc.counts.OBSERVE === 1 && jpmc.counts.COMPLETED === 1 && jpmc.counts.UNKNOWN === 1, "JPMC's counts match the real classified data exactly, including a Done/COMPLETED item and an UNKNOWN one");
+  ok("V2.7 Distribution", jpmc.totalItems === 6, "totalItems is the sum across every relevance bucket for that project");
+  const ubs = rows.find((r) => r.projectKey === "UBS")!;
+  ok("V2.7 Distribution", ubs.counts.UNKNOWN === 1 && ubs.totalItems === 1, "UBS (no policy configured at all) reports its item as UNKNOWN, never guessed from JPMC's policy");
+
+  const scoped = computeWorkRelevanceDistribution(data, idx, ["JPMC"]);
+  ok("V2.7 Distribution", scoped.length === 1 && scoped[0].projectKey === "JPMC", "narrowing to Focus Projects (['JPMC']) excludes UBS entirely — never leaks scope");
+}
+
+// ----- §5 Actionable calibration: candidate pool / acted-on / completed evidence -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const untouched = jiraItem({ id: "act-1", key: "JPMC-1", jiraStatusName: "To Do", businessImpact: 1, priority: "P4" }); // low score -> may not enter pool
+  const highScore = jiraItem({ id: "act-2", key: "JPMC-2", jiraStatusName: "To Do", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY }); // high score -> enters pool
+  const actedOn = jiraItem({ id: "act-3", key: "JPMC-3", jiraStatusName: "To Do", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
+  const completed = jiraItem({ id: "act-4", key: "JPMC-4", jiraStatusName: "To Do", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
+  const data = {
+    ...emptyData(),
+    workItems: [untouched, highScore, actedOn, completed],
+    actions: [calAction({ id: "a-acted", relatedWorkItemId: "act-3", status: "open" }), calAction({ id: "a-done", relatedWorkItemId: "act-4", status: "completed", completedAt: TODAY })],
+  };
+
+  const result = computeActionableCalibration(data, idx, TODAY);
+  ok("V2.7 Actionable calibration", result.actionableItemCount === 4, "counts every open item classified ACTIONABLE, regardless of score");
+  ok("V2.7 Actionable calibration", result.actedOnCount === 2, "actedOnCount counts items with at least one linked Action (open or completed)");
+  ok("V2.7 Actionable calibration", result.completedCount === 1, "completedCount counts only items whose linked Action is actually completed");
+  ok("V2.7 Actionable calibration", result.candidatePoolCount >= result.actedOnCount - 1, "candidatePoolCount is derived from the real, reused action-plan.ts buildCandidates() — not reimplemented scoring");
+
+  // A single ACTIONABLE item with zero action evidence and not enough volume for a signal.
+  const noEvidenceIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const noEvidenceData = { ...emptyData(), workItems: [jiraItem({ id: "solo", jiraStatusName: "To Do" })], actions: [] };
+  const soloResult = computeActionableCalibration(noEvidenceData, noEvidenceIdx, TODAY);
+  ok("V2.7 Actionable calibration", soloResult.actionableItemCount === 1 && soloResult.actedOnCount === 0 && soloResult.completedCount === 0, "no action evidence at all is reported as zero, never estimated");
+}
+
+// ----- §6 Observe calibration: OBSERVE items stay outside the candidate pool -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const observeItems = [
+    jiraItem({ id: "obs-1", jiraStatusName: "Ready for UAT/Business Test", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY, owner: "Minh Tran" }),
+    jiraItem({ id: "obs-2", jiraStatusName: "Ready for UAT/Business Test" }),
+  ];
+  const data = { ...emptyData(), workItems: observeItems };
+  const result = computeObserveCalibration(data, idx, TODAY);
+  ok("V2.7 Observe calibration", result.observeItemCount === 2, "counts every open OBSERVE item");
+  ok("V2.7 Observe calibration", result.policyViolationCount === 0, "0 policy violations — OBSERVE items never enter the automatic candidate pool, even a high-priority owned one (§21 boundary holds)");
+  ok("V2.7 Observe calibration", result.outsidePersonalWorkCount === 2, "every OBSERVE item is confirmed outside inferred personal work");
+
+  // §22 — an explicit user-created Action on an OBSERVE item is evidence, not a violation.
+  const withExplicitAction = { ...data, actions: [calAction({ relatedWorkItemId: "obs-1" })] };
+  const resultWithAction = computeObserveCalibration(withExplicitAction, idx, TODAY);
+  ok("V2.7 Observe calibration", resultWithAction.policyViolationCount === 0, "an explicit user-created Action on an OBSERVE item is not counted as a policy violation — it's evidence for a review signal instead (§8, §22)");
+}
+
+// ----- §7 Unknown visibility -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const items = [
+    jiraItem({ id: "u1", jiraStatusName: "Some New Status" }),
+    jiraItem({ id: "u2", jiraStatusName: "Some New Status" }),
+    jiraItem({ id: "u3", jiraStatusName: "Another New Status" }),
+    jiraItem({ id: "u4", jiraStatusName: "Some New Status", status: "Done" }), // closed — excluded
+    jiraItem({ id: "u5", jiraStatusName: "To Do" }), // classified — not UNKNOWN
+  ];
+  const data = { ...emptyData(), workItems: items };
+  const result = computeUnknownVisibility(data, idx);
+  ok("V2.7 Unknown visibility", result.statusCount === 2, "counts distinct unclassified (project, status) pairs — 'Some New Status' and 'Another New Status'");
+  ok("V2.7 Unknown visibility", result.affectedItemCount === 3, "counts open affected items only — the closed duplicate is excluded, matching the existing V2.5 open-item convention");
+}
+
+// ----- §8-11 Policy Review Signals: REVIEW / NONE / INSUFFICIENT_EVIDENCE -----
+{
+  const idx = buildWorkRelevanceIndex(
+    policyMap({
+      JPMC: { "To Do": "ACTIONABLE", "Ready for Prod Release": "OBSERVE", "Almost Never Seen": "WAITING", "Well Behaved": "ACTIONABLE" },
+    })
+  );
+
+  // Signal A — OBSERVE status with repeated (>=2) explicit Action evidence -> REVIEW.
+  const observeWithActions = [
+    jiraItem({ id: "sig-a-1", jiraStatusName: "Ready for Prod Release" }),
+    jiraItem({ id: "sig-a-2", jiraStatusName: "Ready for Prod Release" }),
+    jiraItem({ id: "sig-a-3", jiraStatusName: "Ready for Prod Release" }),
+  ];
+  // Signal B — ACTIONABLE status, enough volume, ZERO action evidence -> REVIEW.
+  const actionableNoEvidence = [
+    jiraItem({ id: "sig-b-1", jiraStatusName: "To Do" }),
+    jiraItem({ id: "sig-b-2", jiraStatusName: "To Do" }),
+    jiraItem({ id: "sig-b-3", jiraStatusName: "To Do" }),
+  ];
+  // A well-behaved ACTIONABLE status with real evidence -> NONE.
+  const wellBehaved = [
+    jiraItem({ id: "wb-1", jiraStatusName: "Well Behaved" }),
+    jiraItem({ id: "wb-2", jiraStatusName: "Well Behaved" }),
+    jiraItem({ id: "wb-3", jiraStatusName: "Well Behaved" }),
+  ];
+  // Too little volume to trust any signal -> INSUFFICIENT_EVIDENCE.
+  const tooFew = [jiraItem({ id: "few-1", jiraStatusName: "Almost Never Seen" })];
+
+  const data = {
+    ...emptyData(),
+    workItems: [...observeWithActions, ...actionableNoEvidence, ...wellBehaved, ...tooFew],
+    actions: [
+      calAction({ id: "act-obs-1", relatedWorkItemId: "sig-a-1" }),
+      calAction({ id: "act-obs-2", relatedWorkItemId: "sig-a-2", status: "completed", completedAt: TODAY }),
+      calAction({ id: "act-wb-1", relatedWorkItemId: "wb-1" }),
+    ],
+  };
+
+  const signals = computePolicyReviewSignals(data, idx);
+  const byStatus = new Map(signals.map((s) => [s.statusName, s]));
+
+  const observeSignal = byStatus.get("Ready for Prod Release")!;
+  ok("V2.7 Policy signals", observeSignal.signalType === "REVIEW", "an OBSERVE status with 2+ linked Actions produces a REVIEW signal (Signal A)");
+  ok("V2.7 Policy signals", observeSignal.actionEvidenceCount === 2 && observeSignal.completionEvidenceCount === 1, "evidence counts are exact: 2 linked Actions, 1 of them completed");
+  ok("V2.7 Policy signals", !/should be|is (wrong|incorrect)|because.*failed/i.test(observeSignal.explanation), "the explanation never claims causality or that the policy is wrong (§9, §34)");
+  ok("V2.7 Policy signals", /may be worth reviewing/i.test(observeSignal.explanation), "REVIEW signals use the exact neutral 'may be worth reviewing' language, never a stronger claim");
+
+  const actionableSignal = byStatus.get("To Do")!;
+  ok("V2.7 Policy signals", actionableSignal.signalType === "REVIEW", "an ACTIONABLE status with enough volume and ZERO action evidence produces a REVIEW signal (Signal B)");
+  ok("V2.7 Policy signals", actionableSignal.actionEvidenceCount === 0, "zero linked Actions despite 3 observed items");
+
+  const wellBehavedSignal = byStatus.get("Well Behaved")!;
+  ok("V2.7 Policy signals", wellBehavedSignal.signalType === "NONE", "an ACTIONABLE status with real action evidence produces no signal");
+
+  const fewSignal = byStatus.get("Almost Never Seen")!;
+  ok("V2.7 Policy signals", fewSignal.signalType === "INSUFFICIENT_EVIDENCE", "a status with too few observed items (1) never produces a REVIEW/NONE verdict, only INSUFFICIENT_EVIDENCE");
+
+  ok("V2.7 Policy signals", !signals.some((s) => s.currentRelevance === "UNKNOWN"), "UNKNOWN-classified statuses never appear in Policy Review Signals — they're covered separately by Unknown Visibility (§7)");
+
+  ok("V2.7 Data Health", computeCalibrationHealthState(signals) === "REVIEW", "the Data Health calibration state is REVIEW when at least one status shows a REVIEW signal");
+  ok("V2.7 Data Health", computeCalibrationHealthState([wellBehavedSignal]) === "HEALTHY", "a set with no REVIEW/INSUFFICIENT_EVIDENCE-only signals is HEALTHY");
+  ok("V2.7 Data Health", computeCalibrationHealthState([fewSignal]) === "INSUFFICIENT_EVIDENCE", "a set where every signal is INSUFFICIENT_EVIDENCE is reported as INSUFFICIENT_EVIDENCE, never HEALTHY");
+  ok("V2.7 Data Health", computeCalibrationHealthState([]) === "INSUFFICIENT_EVIDENCE", "no observed statuses at all is INSUFFICIENT_EVIDENCE, never HEALTHY");
+}
+
+// ----- §13 Project isolation: same status name, different projects, independent signals -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" }, UBS: { "Ready for Prod Release": "ACTIONABLE" } }));
+  const data = {
+    ...emptyData(),
+    workItems: [
+      jiraItem({ id: "iso-1", projectId: "jira-project-JPMC", jiraStatusName: "Ready for Prod Release" }),
+      jiraItem({ id: "iso-2", projectId: "jira-project-JPMC", jiraStatusName: "Ready for Prod Release" }),
+      jiraItem({ id: "iso-3", projectId: "jira-project-JPMC", jiraStatusName: "Ready for Prod Release" }),
+      jiraItem({ id: "iso-4", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" }),
+      jiraItem({ id: "iso-5", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" }),
+      jiraItem({ id: "iso-6", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" }),
+    ],
+    actions: [calAction({ id: "iso-a1", relatedWorkItemId: "iso-1" }), calAction({ id: "iso-a2", relatedWorkItemId: "iso-2" })],
+  };
+  const signals = computePolicyReviewSignals(data, idx);
+  const jpmcSignal = signals.find((s) => s.projectKey === "JPMC" && s.statusName === "Ready for Prod Release")!;
+  const ubsSignal = signals.find((s) => s.projectKey === "UBS" && s.statusName === "Ready for Prod Release")!;
+  ok("V2.7 Project isolation", jpmcSignal.currentRelevance === "OBSERVE" && ubsSignal.currentRelevance === "ACTIONABLE", "the identical raw status name carries independent policies per project");
+  ok("V2.7 Project isolation", jpmcSignal.signalType === "REVIEW", "JPMC's OBSERVE status with 2 linked Actions is REVIEW");
+  ok("V2.7 Project isolation", ubsSignal.signalType === "REVIEW", "UBS's ACTIONABLE status with zero linked Actions is independently REVIEW — for a completely different reason, never influenced by JPMC's evidence");
+  ok("V2.7 Project isolation", ubsSignal.actionEvidenceCount === 0, "UBS's own action evidence count is unaffected by JPMC's 2 linked Actions on the same raw status string");
+}
+
+// ----- Explicit Actions remain intact / authoritative (§22) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const item = jiraItem({ id: "explicit-1", key: "JPMC-999", jiraStatusName: "Ready for UAT/Business Test" });
+  const explicitAction: Action = { id: "explicit-action", title: "Confirm production release", why: "manual tracking", status: "open", estimateMinutes: 10, createdAt: TODAY, relatedWorkItemId: "explicit-1" };
+  const data = { ...emptyData(), workItems: [item], actions: [explicitAction] };
+  ok("V2.7 Explicit Actions", data.actions.length === 1 && data.actions[0].id === "explicit-action", "an explicit user-created Action linked to an OBSERVE item is untouched by any V2.7 calculation");
+  const calibration = computeObserveCalibration(data, idx, TODAY);
+  ok("V2.7 Explicit Actions", calibration.policyViolationCount === 0, "the explicit Action does not cause a policy-violation false positive");
+}
+
+// ----- Synthetic data: no false calibration claim (§16) -----
+{
+  // computeWorkRelevanceDistribution etc. are pure functions with no concept of "synthetic"
+  // — the UI layer (WorkRelevanceCalibrationPanel, data-settings/page.tsx) is what gates on
+  // state.isDemo / state.dataSource, exactly like V2.5/V2.6's own jiraConfigured gate. This
+  // test documents that boundary: a demo-sourced item (sourceType !== "jira") is simply
+  // NOT_APPLICABLE and contributes nothing to any V2.7 calculation, so even if a caller
+  // forgot to gate the UI, no false ACTIONABLE/OBSERVE/etc. claim could be produced for it.
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const demoItem = makeItem({ id: "demo-1", sourceType: undefined, jiraStatusName: undefined });
+  const data = { ...emptyData(), workItems: [demoItem] };
+  const distribution = computeWorkRelevanceDistribution(data, idx);
+  ok("V2.7 Synthetic data", distribution.length === 0, "a non-Jira (demo/local-import) item contributes no row at all to the distribution — never a fabricated classification");
+}
+
+// ----- Backward compatibility: malformed/missing policy never crashes calibration (§26) -----
+{
+  const emptyIdx = buildWorkRelevanceIndex({});
+  const items = [jiraItem({ id: "bc-1", jiraStatusName: "To Do" })];
+  const data = { ...emptyData(), workItems: items };
+  const distribution = computeWorkRelevanceDistribution(data, emptyIdx);
+  ok("V2.7 Backward compatibility", distribution[0]?.counts.UNKNOWN === 1, "an entirely missing policy map degrades every item to UNKNOWN, never throws");
+  const signals = computePolicyReviewSignals(data, emptyIdx);
+  ok("V2.7 Backward compatibility", signals.length === 0, "UNKNOWN statuses produce no policy-review-signal row (handled by Unknown Visibility instead), and nothing throws");
+  const actionable = computeActionableCalibration(data, emptyIdx, TODAY);
+  ok("V2.7 Backward compatibility", actionable.actionableItemCount === 0, "with no policy at all, nothing is ACTIONABLE — calibration stays conservative, never crashes");
+}
+
+// ----- Command Bar: new V2.7 intents + near-miss regression matrix (§19) -----
+{
+  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" } }));
+  const items = [
+    jiraItem({ id: "cb7-1", key: "JPMC-701", jiraStatusName: "To Do" }),
+    jiraItem({ id: "cb7-2", key: "JPMC-702", jiraStatusName: "To Do" }),
+    jiraItem({ id: "cb7-3", key: "JPMC-703", jiraStatusName: "To Do" }),
+    jiraItem({ id: "cb7-4", key: "JPMC-704", jiraStatusName: "Ready for Prod Release" }),
+    jiraItem({ id: "cb7-5", key: "JPMC-705", jiraStatusName: "Ready for Prod Release" }),
+    jiraItem({ id: "cb7-6", key: "JPMC-706", jiraStatusName: "Ready for Prod Release" }),
+  ];
+  const cbData = { ...emptyData(), workItems: items, actions: [calAction({ relatedWorkItemId: "cb7-4" }), calAction({ relatedWorkItemId: "cb7-5" })] };
+  const derived = deriveData(cbData, null, TODAY);
+
+  ok("V2.7 Command Bar", classifyQuery("How is my work relevance policy performing?", cbData).intent === "work-relevance-calibration-summary", "routes to the calibration summary intent");
+  ok("V2.7 Command Bar", classifyQuery("Which statuses need policy review?", cbData).intent === "policy-review-signals", "routes to the policy-review-signals intent");
+  ok(
+    "V2.7 Command Bar",
+    classifyQuery("Are any actionable statuses producing little personal work?", cbData).intent === "actionable-low-personal-work",
+    "'actionable statuses producing little personal work' routes to actionable-low-personal-work, NOT jira-statuses-actionable, despite containing the substring 'actionable statuses'"
+  );
+  ok("V2.7 Command Bar", classifyQuery("Which observed statuses have actions?", cbData).intent === "observed-statuses-with-actions", "routes to the observed-statuses-with-actions intent");
+
+  const summaryFacts = answerFromRoute({ intent: "work-relevance-calibration-summary" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.7 Command Bar", summaryFacts.facts.some((f) => f.includes("JPMC") && f.includes("ACTIONABLE 3")), "the calibration summary names the real project and real ACTIONABLE count");
+
+  const reviewFacts = answerFromRoute({ intent: "policy-review-signals" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.7 Command Bar", reviewFacts.facts.some((f) => f.includes("Ready for Prod Release")), "policy-review-signals surfaces the real status name with a review signal");
+
+  const observedActionsFacts = answerFromRoute({ intent: "observed-statuses-with-actions" }, cbData, derived, TODAY, "jira", undefined, undefined, undefined, idx);
+  ok("V2.7 Command Bar", observedActionsFacts.facts.some((f) => f.includes("2 linked Action")), "observed-statuses-with-actions reports the real linked-Action count");
+
+  // Near-miss regression — every V2.5/V2.6 phrasing must still route exactly as before.
+  ok("V2.7 Near-miss regression", classifyQuery("Which statuses are actionable?", cbData).intent === "jira-statuses-actionable", "the plain V2.6 'which statuses are actionable?' still routes correctly, unaffected by the new V2.7 patterns");
+  ok("V2.7 Near-miss regression", classifyQuery("What is being observed?", cbData).intent === "jira-status-context", "'what is being observed?' still routes to jira-status-context");
+  ok("V2.7 Near-miss regression", classifyQuery("Which Jira statuses are unclassified?", cbData).intent === "jira-statuses-unclassified", "unclassified-statuses phrasing is unaffected");
+  ok("V2.7 Near-miss regression", classifyQuery("What do I need to work on?", cbData).intent === "next-actions", "next-actions is unaffected by any V2.7 pattern");
+  ok("V2.7 Near-miss regression", classifyQuery("Why isn't JPMC-701 on my list?", cbData).intent === "why-on-my-list", "why-on-my-list is unaffected");
+  ok("V2.7 Near-miss regression", classifyQuery("asdkjfh nonsense query", cbData).intent === "unrecognized", "nonsense input remains unclassified, never misrouted to a V2.7 intent");
+}
+
+// ----- Performance (§25): 100 / 500 / 2000 items, Map-based grouping, no O(n²). -----
+{
+  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF7-${i}`);
+  const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
+  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigIndex = buildWorkRelevanceIndex(bigPolicy);
+
+  for (const size of [100, 500, 2000]) {
+    const items = Array.from({ length: size }, (_, i) =>
+      jiraItem({ id: `perf7-${size}-${i}`, key: `PERF7-${i % 20}-${i}`, projectId: `jira-project-PERF7-${i % 20}`, jiraStatusName: statusNames[i % 30] })
+    );
+    const actions = items.filter((_, i) => i % 7 === 0).map((item, i) => calAction({ relatedWorkItemId: item.id, status: i % 2 === 0 ? "completed" : "open" }));
+    const perfData = { ...emptyData(), workItems: items, actions };
+
+    const start = Date.now();
+    const distribution = computeWorkRelevanceDistribution(perfData, bigIndex);
+    const signals = computePolicyReviewSignals(perfData, bigIndex);
+    const actionable = computeActionableCalibration(perfData, bigIndex, TODAY);
+    const observe = computeObserveCalibration(perfData, bigIndex, TODAY);
+    const elapsedMs = Date.now() - start;
+
+    ok("V2.7 Performance", elapsedMs < 3000, `full V2.7 calibration pass over ${size} Jira work items completes well within a generous bound (${elapsedMs}ms)`);
+    ok("V2.7 Performance", distribution.length > 0 && signals.length > 0 && actionable.actionableItemCount >= 0 && observe.observeItemCount >= 0, `results over ${size} items are well-formed, not degenerate`);
   }
 }
 

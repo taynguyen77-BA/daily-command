@@ -17,6 +17,8 @@ import {
   type WorkRelevanceCoverageState,
 } from "@/lib/command-center/jira/work-relevance";
 import { PolicyChangeImpactDialog, type PendingPolicyChange } from "@/components/command-center/PolicyChangeImpactDialog";
+import { WorkRelevanceCalibrationPanel } from "@/components/command-center/WorkRelevanceCalibrationPanel";
+import { computeCalibrationHealthState, computePolicyReviewSignals } from "@/lib/command-center/jira/work-relevance-calibration";
 import { WORK_RELEVANCE_VALUES, type WorkRelevance } from "@/lib/command-center/types";
 import { computeDataHealth } from "@/lib/command-center/data-health";
 import { getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
@@ -522,6 +524,15 @@ export default function DataSettingsPage() {
     () => computeOverallWorkRelevanceCoverage(state.data, workRelevanceIndex, state.jiraProjectScope.mode === "FOCUSED" ? state.jiraProjectScope.projectKeys : undefined),
     [state.data, workRelevanceIndex, state.jiraProjectScope]
   );
+  // V2.7 §12 — Data Health's own calibration dimension. §16 — synthetic (demo/import) data
+  // is never presented as if it reflects real operating behavior, so calibration is simply
+  // unavailable rather than showing a fabricated state for it.
+  const isSyntheticData = state.isDemo || state.dataSource !== "jira";
+  const calibrationHealthState = useMemo(() => {
+    if (isSyntheticData) return null;
+    const scopeKeys = state.jiraProjectScope.mode === "FOCUSED" ? state.jiraProjectScope.projectKeys : undefined;
+    return computeCalibrationHealthState(computePolicyReviewSignals(state.data, workRelevanceIndex, scopeKeys));
+  }, [isSyntheticData, state.data, workRelevanceIndex, state.jiraProjectScope]);
   const trustDiagnostic = useMemo(
     () =>
       computeTrustDiagnostic({
@@ -813,6 +824,16 @@ export default function DataSettingsPage() {
 
       <JiraWorkRelevancePolicyPanel state={state} store={store} jiraConfigured={jiraStatus?.configured} workRelevanceIndex={workRelevanceIndex} />
 
+      <WorkRelevanceCalibrationPanel
+        data={state.data}
+        isDemo={state.isDemo}
+        dataSourceIsJira={state.dataSource === "jira"}
+        jiraConfigured={jiraStatus?.configured}
+        jiraProjectScope={state.jiraProjectScope}
+        workRelevanceIndex={workRelevanceIndex}
+        today={today}
+      />
+
       <Panel className="p-5">
         <SectionHeading title="Jira Conformance" subtitle="Runs the same connector code (pagination, mapping, error classification) against fixtures — or, when Jira is configured, the real API — never a reimplementation." />
         <button onClick={runConformance} disabled={conformanceLoading} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-60">
@@ -1027,6 +1048,18 @@ export default function DataSettingsPage() {
               )}
             </div>
           )}
+          {dataHealth.unclassifiedJiraStatusCount !== undefined && (
+            <div className="rounded-md border border-border bg-surface2 px-3 py-2">
+              <p className="text-text3">Work relevance calibration</p>
+              <p
+                className={`font-display ${
+                  calibrationHealthState === "REVIEW" ? "text-yellow" : calibrationHealthState === "HEALTHY" ? "text-text" : "text-text3"
+                }`}
+              >
+                {calibrationHealthState === null ? "N/A (synthetic data)" : calibrationHealthState === "HEALTHY" ? "Healthy" : calibrationHealthState === "REVIEW" ? "Review" : "Insufficient evidence"}
+              </p>
+            </div>
+          )}
         </div>
         {dataHealth.unclassifiedJiraStatusCount !== undefined && workRelevanceCoverage.state !== "NO_JIRA_DATA" && workRelevanceCoverage.state !== "FULLY_CLASSIFIED" && (
           <div className="mt-3 rounded-md border border-border bg-surface2 p-3 text-xs">
@@ -1039,6 +1072,18 @@ export default function DataSettingsPage() {
               className="mt-2 font-medium text-accent2 hover:underline"
             >
               Review affected statuses
+            </button>
+          </div>
+        )}
+        {calibrationHealthState === "REVIEW" && (
+          <div className="mt-3 rounded-md border border-border bg-surface2 p-3 text-xs">
+            <p className="font-semibold uppercase tracking-wide text-text3">Work Relevance Calibration</p>
+            <p className="mt-1 text-text2">Some statuses show behavior worth reviewing — real Action evidence doesn&apos;t line up with the current policy for at least one observed status.</p>
+            <button
+              onClick={() => document.getElementById("work-relevance-calibration-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              className="mt-2 font-medium text-accent2 hover:underline"
+            >
+              Review calibration
             </button>
           </div>
         )}
