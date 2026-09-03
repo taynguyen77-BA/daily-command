@@ -2,7 +2,7 @@
 // pure functions of priority score, urgency, effort estimate, and dependency risk —
 // the AI provider only narrates the result (see ai/provider.ts generateActionPlan).
 
-import { scoreWorkItem } from "./scoring";
+import { eligibilityScore, scoreWorkItem } from "./scoring";
 import { isPersonalWorkEligibleItem, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { Action, CommandCenterData, PriorityScoreResult, WorkItem } from "./types";
 
@@ -76,7 +76,10 @@ export function buildCandidates(data: CommandCenterData, today: string, workRele
     if (item.status === "Done" || coveredItemIds.has(item.id)) continue;
     if (workRelevanceIndex && !isPersonalWorkEligibleItem(item, workRelevanceIndex)) continue;
     const result = scoreWorkItem(item, data, today);
-    if (result.score < 40) continue; // LOW-priority items don't earn a slot in a time-boxed plan
+    // V2.9 §F-01 — gate on eligibilityScore, not the raw score: an item missing a due
+    // date / Business Impact field (the real-Jira norm) must not be unfairly excluded
+    // for data it never had a chance to populate. See scoring.ts for the rationale.
+    if (eligibilityScore(item, result) < 40) continue; // LOW-signal items don't earn a slot in a time-boxed plan
     candidates.push({
       id: `plan-${item.id}`,
       title: `${item.key} — ${item.title}`,

@@ -5,7 +5,7 @@
 // change detection, action-plan generation, data import validation, empty state,
 // demo dataset. No AI provider calls — everything under test is deterministic.
 
-import { scoreWorkItem, isOverdue, daysBetween, classify } from "../src/lib/command-center/scoring";
+import { scoreWorkItem, isOverdue, daysBetween, classify, eligibilityScore } from "../src/lib/command-center/scoring";
 import { detectRisks } from "../src/lib/command-center/risk-detection";
 import { detectChanges, toSnapshot } from "../src/lib/command-center/change-detection";
 import { buildCandidates, buildPlan } from "../src/lib/command-center/action-plan";
@@ -323,6 +323,32 @@ function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
   const withOpen = buildCandidates(dataOpen, TODAY);
   ok("Action plan bugfix", withOpen.some((c) => c.id === "bugfix-action-open"), "an item with an OPEN action remains represented via its own action-based candidate, never hidden");
   ok("Action plan bugfix", !withOpen.some((c) => c.id === "plan-bugfix-1"), "…and is never ALSO duplicated as a second, bare-item candidate for the same WorkItem");
+}
+
+// ===== V2.9 §F-01 fix — eligibilityScore must not punish missing Business Impact /
+// due-date data (the real-Jira norm) out of candidacy, while still excluding genuinely
+// quiet items. Reproduces the real-world shape found auditing a live Jira instance:
+// a heavily-churned, blocked item scored 25/100 raw (well under the old flat 40 gate)
+// purely because it had no Business Impact field or due date populated. =====
+{
+  const noBusinessImpactOrDueDate = { businessImpact: undefined, dueDate: undefined } as const;
+  const churnedAndBlocked = makeItem({ id: "churned-1", blocked: true, scopeChangeCount: 21, ...noBusinessImpactOrDueDate });
+  const churnedResult = scoreWorkItem(churnedAndBlocked, emptyData(), TODAY);
+  ok("V2.9 Eligibility fix", churnedResult.score < 40, `sanity check: raw score (${churnedResult.score}) is below the old flat 40 gate, exactly like the real audited item`);
+  ok("V2.9 Eligibility fix", eligibilityScore(churnedAndBlocked, churnedResult) >= 40, `a heavily-churned, blocked item now clears the candidate gate (eligibilityScore ${eligibilityScore(churnedAndBlocked, churnedResult)}) despite missing Business Impact/due date`);
+
+  const quietItem = makeItem({ id: "quiet-1", blocked: false, scopeChangeCount: 0, lastUpdated: TODAY, ...noBusinessImpactOrDueDate });
+  const quietResult = scoreWorkItem(quietItem, emptyData(), TODAY);
+  ok("V2.9 Eligibility fix", eligibilityScore(quietItem, quietResult) < 40, "a genuinely low-signal item with the same missing fields is still correctly excluded — the fix removes an unfair penalty, not the bar itself");
+
+  const fullyPopulated = makeItem({ id: "full-1", blocked: true, scopeChangeCount: 21, businessImpact: 3, dueDate: TODAY });
+  const fullResult = scoreWorkItem(fullyPopulated, emptyData(), TODAY);
+  ok("V2.9 Eligibility fix", eligibilityScore(fullyPopulated, fullResult) === fullResult.score, "an item with both fields populated is completely unaffected — eligibilityScore only adjusts for missing data");
+
+  const candidates = buildCandidates({ ...emptyData(), workItems: [churnedAndBlocked, quietItem] }, TODAY);
+  const candidateIds = new Set(candidates.map((c) => c.item?.id).filter(Boolean));
+  ok("V2.9 Eligibility fix", candidateIds.has("churned-1"), "buildCandidates() end-to-end: the churned/blocked item is now a real candidate");
+  ok("V2.9 Eligibility fix", !candidateIds.has("quiet-1"), "buildCandidates() end-to-end: the quiet item remains excluded, not flooded in");
 }
 
 // ===== Data import validation =====
@@ -3905,6 +3931,18 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   const blockedQ = brief.questions.find((q) => q.question === "What is blocked?");
   ok("V2.2 Meeting Mode", !!blockedQ && blockedQ.items.some((i) => i.includes("V22-1")), "the blocked work item appears under 'What is blocked?'");
   ok("V2.2 Meeting Mode", brief.whatShouldISay.length > 0, "'What should I say?' is a non-empty deterministic summary, not an AI call");
+
+  // V2.9 §F-07 fix — an unowned item's "person" is the literal string "UNKNOWN" on the
+  // underlying NeedsFromOthersRow (asserted above); the "What do I need from others?" list
+  // must never interpolate that literally, which read like an unresolved template variable
+  // ("UNKNOWN: Assign an owner"), as if UNKNOWN were a real person or team's name.
+  const needsFromOthersQ = brief.questions.find((q) => q.question === "What do I need from others?");
+  ok("V2.9 Meeting Mode copy", !!needsFromOthersQ && needsFromOthersQ.items.length > 0, "sanity check: v22Data's unowned item(s) produce at least one 'needs from others' row");
+  ok(
+    "V2.9 Meeting Mode copy",
+    !!needsFromOthersQ && needsFromOthersQ.items.every((i) => !i.startsWith("UNKNOWN:")),
+    "no 'needs from others' line starts with the literal word UNKNOWN standing in for a person's name"
+  );
   ok("V2.2 Meeting Mode", renderMeetingModeText(brief).startsWith("MEETING MODE"), "the copyable meeting summary is well-formed plain text");
 
   const emptyBrief = buildMeetingModeBrief(emptyData(), deriveData(emptyData(), null, TODAY), computeProactiveIntelligence(emptyData(), deriveData(emptyData(), null, TODAY), [], null, {}, "manual", TODAY), TODAY);

@@ -486,11 +486,12 @@ const JIRA_ERROR_HELP: Record<string, string> = {
 };
 
 export default function DataSettingsPage() {
-  const { state, store, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex } = useCommandCenter();
+  const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex } = useCommandCenter();
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [syncElapsedSec, setSyncElapsedSec] = useState(0);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [conformance, setConformance] = useState<JiraConformanceReport | null>(null);
   const [conformanceLoading, setConformanceLoading] = useState(false);
@@ -505,6 +506,18 @@ export default function DataSettingsPage() {
     checkJiraConfigured().then(setJiraStatus);
   }, []);
 
+  // V2.9 §F-03 fix — a real sync against a large Jira instance can run for minutes with a
+  // single fetch/response (no server-sent progress events to listen for). The only honest
+  // client-side signal available without a backend change is elapsed time, so make that
+  // visible rather than leaving a static "Syncing…" label the only sign of life.
+  useEffect(() => {
+    if (!syncing) return;
+    setSyncElapsedSec(0);
+    const start = Date.now();
+    const id = window.setInterval(() => setSyncElapsedSec(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [syncing]);
+
   // aiTraceTick is a deliberate cache-buster: getRecentAiTrace() reads a module-level log
   // this component doesn't own.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -513,9 +526,13 @@ export default function DataSettingsPage() {
   const aiTraceSummary = useMemo(() => getAiTraceSummary(getTodayIso()), [aiTraceTick]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const cacheStats = useMemo(() => getCacheStats(), [aiTraceTick]);
+  // V2.9 §F-02 fix — computed from scopedData (Jira Project Scope already enforced), so
+  // Ownership/Due dates/Release/Scope-history/Open-work-items match the "Current dataset"
+  // counts above and every other scoped screen, instead of silently reporting global figures
+  // across every project this browser has ever synced under a label that doesn't say so.
   const dataHealth = useMemo(
-    () => computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex),
-    [state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt, workRelevanceIndex]
+    () => computeDataHealth(scopedData, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex),
+    [scopedData, state.dataSource, state.jiraSync.lastSyncCompletedAt, workRelevanceIndex]
   );
   // V2.6 §10 — Data Health's own Work Relevance dimension: scoped to Focus Projects when
   // FOCUSED, every known project when ALL. Plain arithmetic (§4), never blended into any
@@ -571,17 +588,33 @@ export default function DataSettingsPage() {
     }
   }
 
+  // V2.9 §F-02 fix — "Current dataset" now reports the Jira Project Scope-enforced view
+  // (scopedData), matching what every other screen in the app actually shows, instead of
+  // every record ever locally stored (state.data) — which kept reading e.g. "342 clients"
+  // after scope was narrowed to 2 Focus Projects, because narrowing scope never deletes the
+  // wider sync's local data (§10, by design). rawCounts is still surfaced below whenever it
+  // differs, so nothing about what's actually stored locally is hidden — only relabeled.
   const counts: [string, number][] = [
-    ["Clients", state.data.clients.length],
-    ["Projects", state.data.projects.length],
-    ["Work items", state.data.workItems.length],
-    ["Requirements", state.data.requirements.length],
-    ["Risks (manual)", state.data.risks.length],
-    ["Dependencies", state.data.dependencies.length],
-    ["Decisions", state.data.decisions.length],
-    ["Actions", state.data.actions.length],
-    ["Communications", state.data.communications.length],
+    ["Clients", scopedData.clients.length],
+    ["Projects", scopedData.projects.length],
+    ["Work items", scopedData.workItems.length],
+    ["Requirements", scopedData.requirements.length],
+    ["Risks (manual)", scopedData.risks.length],
+    ["Dependencies", scopedData.dependencies.length],
+    ["Decisions", scopedData.decisions.length],
+    ["Actions", scopedData.actions.length],
+    ["Communications", scopedData.communications.length],
   ];
+  const rawStoredCounts = {
+    clients: state.data.clients.length,
+    projects: state.data.projects.length,
+    workItems: state.data.workItems.length,
+  };
+  const scopeHidesStoredData =
+    state.jiraProjectScope.mode === "FOCUSED" &&
+    (rawStoredCounts.clients > scopedData.clients.length ||
+      rawStoredCounts.projects > scopedData.projects.length ||
+      rawStoredCounts.workItems > scopedData.workItems.length);
 
   // V2.1 §8 — gate the FIRST sync against a real Jira instance behind an explicit
   // confirmation; every sync after that (lastSyncStatus no longer "never") proceeds
@@ -663,6 +696,11 @@ export default function DataSettingsPage() {
             </div>
           ))}
         </div>
+        {scopeHidesStoredData && (
+          <p className="mt-3 text-xs text-text3">
+            Scoped to your current Jira Project Scope (Focused). This browser also still holds {rawStoredCounts.clients} client(s) / {rawStoredCounts.projects} project(s) / {rawStoredCounts.workItems} work item(s) from a wider sync — narrowing scope never deletes local data. Run <span className="font-mono">Full re-sync</span> to re-pull only the current scope, or <span className="font-mono">Reset all data</span> to clear everything.
+          </p>
+        )}
         <div className="mt-4 flex flex-wrap gap-2">
           <button
             onClick={() => store.loadDemoData()}
@@ -752,6 +790,11 @@ export default function DataSettingsPage() {
                     <li>No Jira issues will be created or updated</li>
                     <li>Existing local data will be preserved if sync fails</li>
                   </ul>
+                  {state.jiraProjectScope.mode === "ALL" && (
+                    <p className="mt-2 rounded border border-yellow/30 bg-yellow/5 p-2 text-text2">
+                      Your Jira Project Scope is currently <span className="font-mono">All Projects</span>. On a large Jira instance this can take several minutes and pull in every project you have access to — including ones you don&apos;t work on. If you only work on a few client projects, cancel and set <span className="font-mono">Focus Projects</span> below first; you can always sync All Projects later.
+                    </p>
+                  )}
                   <div className="mt-3 flex gap-2">
                     <button
                       onClick={() => {
@@ -774,7 +817,7 @@ export default function DataSettingsPage() {
                     disabled={syncing}
                     className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
                   >
-                    {syncing ? "Syncing…" : "Sync Jira"}
+                    {syncing ? `Syncing… (${syncElapsedSec}s)` : "Sync Jira"}
                   </button>
                   <button
                     onClick={() => requestSync(true)}
@@ -792,6 +835,11 @@ export default function DataSettingsPage() {
                     </button>
                   )}
                 </div>
+              )}
+              {syncing && (
+                <p className="mt-2 text-xs text-text3">
+                  {syncElapsedSec}s elapsed — a large Jira instance can take several minutes on a first sync. Read-only the whole time; switching to another page in this app is safe, but closing this browser tab will cancel the sync in progress.
+                </p>
               )}
               {syncMessage && <p className="mt-2 text-xs text-text3">{syncMessage}</p>}
 

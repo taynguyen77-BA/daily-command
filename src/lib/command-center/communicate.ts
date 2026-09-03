@@ -445,7 +445,12 @@ export function buildMeetingModeBrief(data: CommandCenterData, derived: DerivedD
       question: "What do I need from others?",
       items:
         needsFromOthers.length > 0
-          ? needsFromOthers.map((r) => `${r.person}: ${r.what}${r.by !== "UNKNOWN" ? ` (by ${r.by})` : ""}`)
+          ? // V2.9 §F-07 fix — r.person is the literal string "UNKNOWN" when isUnknownPerson
+            // is true (see buildNeedsFromOthers above); interpolating it directly read like an
+            // unresolved template variable ("UNKNOWN: Assign an owner"), as if UNKNOWN were
+            // someone's name. isUnknownPerson/isUnknownBy already exist for exactly this case
+            // (renderNeedsFromOthersText, just above, already uses them correctly).
+            needsFromOthers.map((r) => `${r.isUnknownPerson ? "No owner assigned yet" : r.person}: ${r.what}${!r.isUnknownBy ? ` (by ${r.by})` : ""}`)
           : ["Nothing currently needed from others."],
       evidence,
     },

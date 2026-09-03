@@ -24,12 +24,16 @@ function Select({
   options: { value: string; label: string }[];
 }) {
   return (
-    <label className="flex items-center gap-1.5 text-xs text-text3">
+    // V2.9 §F-04 fix — min-w-0 lets this flex item actually shrink instead of forcing the
+    // whole bar to overflow the viewport; the select itself gets a bounded, responsive
+    // max-width with text-overflow ellipsis so a long real project/client name (this app
+    // sees real Jira names up to ~50 characters) truncates instead of pushing off-screen.
+    <label className="flex min-w-0 items-center gap-1.5 text-xs text-text3">
       {label}
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded border border-border bg-surface2 px-2 py-1 text-xs text-text2"
+        className="min-w-0 max-w-[45vw] truncate rounded border border-border bg-surface2 px-2 py-1 text-xs text-text2 sm:max-w-[220px]"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -44,12 +48,16 @@ function Select({
 /** V1.3 §9 — the compact global context filter, applied once by useCommandCenter() and
  *  inherited automatically by every screen built on `derived`/`filteredData`. */
 export function FilterBar() {
-  const { state, store } = useCommandCenter();
-  const { data, filters } = state;
+  const { state, scopedData, store } = useCommandCenter();
+  const { filters } = state;
 
-  const clients = data.clients;
-  const projects = filters.clientId ? data.projects.filter((p) => p.clientId === filters.clientId) : data.projects;
-  const versions = availableFixVersions(data);
+  // V2.9 §F-02 fix — options are built from scopedData (Jira Project Scope already
+  // enforced), not raw state.data: a project/client left over from a previous, wider sync
+  // (e.g. an earlier "All Projects" sync, before scope was narrowed to Focus Projects) must
+  // not still be selectable here just because its records are still in local storage.
+  const clients = scopedData.clients;
+  const projects = filters.clientId ? scopedData.projects.filter((p) => p.clientId === filters.clientId) : scopedData.projects;
+  const versions = availableFixVersions(scopedData);
 
   if (clients.length === 0) return null;
 

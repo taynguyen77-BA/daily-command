@@ -77,7 +77,11 @@ export function useCommandCenter() {
     [filteredData, proactive, state.ownerName, today]
   );
 
-  return { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, store: commandCenterStore };
+  // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
+  // control (FilterBar) reads the scope-enforced set, not raw `state.data`. `filteredData`
+  // can't serve that purpose: it also has the CURRENT client/project filter selection
+  // already applied, which would hide every other in-scope option from its own picker.
+  return { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, scopedData, workRelevanceIndex, store: commandCenterStore };
 }
 
 /** V2.4 §19-20, §23 — Command Bar / Meeting Mode explicit project override. Runs the exact

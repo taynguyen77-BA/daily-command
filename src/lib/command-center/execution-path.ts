@@ -170,7 +170,7 @@ export function computeExecutionPathTrace(
   const isOpen = item.status !== "Done";
 
   // Stage 3 — Candidate Evaluation (§5 Stage 3): reuses buildCandidates() verbatim, the
-  // same score >= 40 threshold action-plan.ts already enforces — never reimplemented here.
+  // same eligibilityScore >= 40 gate action-plan.ts already enforces — never reimplemented here.
   // Stage 5 computed early — needed below to give Candidate Evaluation an accurate verdict
   // once a real Action already exists (§5 Stage 5, hoisted ahead of Stage 3/4).
   const linkedActions = actionsForWorkItem(data, item.id);

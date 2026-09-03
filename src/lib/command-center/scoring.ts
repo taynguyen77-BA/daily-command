@@ -110,6 +110,27 @@ export function scoreWorkItem(item: WorkItem, data: CommandCenterData, today: st
   return { itemId: item.id, score, classification: classify(score), factors, confidence, reasoning };
 }
 
+/**
+ * V2.9 §F-01 fix — the raw 0-100 score conflates "missing data" with "zero risk" for
+ * Business Impact and Deadline Proximity: an item without a mapped Business Impact field
+ * or a Jira due date loses up to 40 of the 100 possible points before any real signal
+ * (blocker, scope churn, aging, dependency risk, ownership) is even considered. On real
+ * Jira data — where neither field is reliably populated — this silently capped every
+ * item's score well under the candidate-eligibility bar, regardless of genuine signal.
+ * eligibilityScore rescales the raw score against only the factors this item's data can
+ * actually speak to, so a genuinely high-signal item (heavily churned, blocked, aged)
+ * isn't punished for a field nobody populated — while a genuinely quiet item still scores
+ * low and stays excluded. Used ONLY for the candidate-pool gate (action-plan.ts); the raw
+ * score/classify() severity shown on Priorities and Risks is intentionally untouched.
+ */
+export function eligibilityScore(item: WorkItem, result: PriorityScoreResult): number {
+  let maxAchievable = 100;
+  if (item.businessImpact === undefined) maxAchievable -= 20;
+  if (!item.dueDate) maxAchievable -= 20;
+  if (maxAchievable >= 100 || maxAchievable <= 0) return result.score;
+  return Math.round((result.score * 100) / maxAchievable);
+}
+
 export function scoreAllWorkItems(data: CommandCenterData, today: string): PriorityScoreResult[] {
   return data.workItems
     .filter((i) => i.status !== "Done")
