@@ -404,7 +404,7 @@ export class CommandCenterStore {
     this.setAttentionLifecycle(id, { lifecycle: "SNOOZED", snoozedUntil: untilIso, snoozedAt: getTodayIso(), snoozeReason: reason });
   }
   resolveAttentionItem(id: string) {
-    this.setAttentionLifecycle(id, { lifecycle: "RESOLVED" });
+    this.setAttentionLifecycle(id, { lifecycle: "RESOLVED", resolvedManually: true });
   }
 
   setFilters(patch: Partial<GlobalFilters>) {

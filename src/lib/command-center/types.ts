@@ -720,6 +720,11 @@ export interface AttentionItemState {
   lastSeverity?: AttentionSeverity;
   snoozedAt?: string;
   snoozeReason?: string;
+  // Bugfix — distinguishes a user-initiated Resolve (evidence may still be ongoing; treat
+  // like ACKNOWLEDGED and persist until a real severity increase) from the auto-resolve
+  // pass, which only fires once the underlying evidence has genuinely disappeared (any later
+  // reappearance is then a real REOPENED). See attention-queue.ts's RESOLVED branch.
+  resolvedManually?: boolean;
 }
 
 /** V1.4 §34 — Release Drift, extends Release Health with a snapshot-over-snapshot delta. */

@@ -1358,6 +1358,25 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const reopenedResult = buildAttentionQueue(dedupInputs, reappearAfterResolve, "2026-06-17");
   ok("Reopened intelligence", reopenedResult.items[0].lifecycle === "REOPENED", "an item that reappears after being resolved comes back as REOPENED, evidence-backed, not silently as NEW");
 
+  // Bugfix regression: clicking Resolve on an item whose evidence is still being produced
+  // (never actually disappeared) must not be instantly undone on the very next recompute —
+  // this is exactly what a manual "Resolve" click does: same day, same underlying condition.
+  const manuallyResolvedToday: Record<string, AttentionItemState> = { "DEPENDENCY:dep-dup": { lifecycle: "RESOLVED", firstSeenDate: "2026-06-10", lastSeenDate: "2026-06-15", resolvedManually: true } };
+  const sameDayAfterResolve = buildAttentionQueue(dedupInputs, manuallyResolvedToday, "2026-06-15");
+  ok("Resolve bugfix", sameDayAfterResolve.nextAttentionState["DEPENDENCY:dep-dup"]?.lifecycle === "RESOLVED", "manually resolving an item whose evidence is still ongoing stays RESOLVED on the same-day recompute, instead of instantly flipping to REOPENED");
+  ok("Resolve bugfix", sameDayAfterResolve.items.find((i) => i.id === "DEPENDENCY:dep-dup")?.lifecycle === "RESOLVED", "the item is still reported in the full list (consumers filter it), but tagged RESOLVED rather than bounced back to REOPENED/ACTIVE");
+
+  const nextDayStillResolved = buildAttentionQueue(dedupInputs, sameDayAfterResolve.nextAttentionState, "2026-06-16");
+  ok("Resolve bugfix", nextDayStillResolved.nextAttentionState["DEPENDENCY:dep-dup"]?.lifecycle === "RESOLVED", "a manually-resolved item with unchanged severity stays resolved on later days too, like ACKNOWLEDGED — not just for one cycle");
+
+  const manuallyResolvedThenWorsened: Record<string, AttentionItemState> = { "DEPENDENCY:dep-dup": { lifecycle: "RESOLVED", firstSeenDate: "2026-06-10", lastSeenDate: "2026-06-15", lastSeverity: "MEDIUM", resolvedManually: true } };
+  const worsenedAfterResolve = buildAttentionQueue({ ...dedupInputs, dependencyRadar: [{ ...depItemA, heat: "CRITICAL" }] }, manuallyResolvedThenWorsened, "2026-06-16");
+  ok("Resolve bugfix", worsenedAfterResolve.nextAttentionState["DEPENDENCY:dep-dup"]?.lifecycle === "RE_ESCALATED", "a manually-resolved item still re-escalates if severity genuinely worsens afterward — Resolve suppresses noise, it doesn't hide a real new signal");
+
+  const genuineReappearAfterManualResolve: Record<string, AttentionItemState> = { "DEPENDENCY:dep-dup": { lifecycle: "RESOLVED", firstSeenDate: "2026-06-10", lastSeenDate: "2026-06-15" } };
+  const genuineReopen = buildAttentionQueue(dedupInputs, genuineReappearAfterManualResolve, "2026-06-17");
+  ok("Resolve bugfix", genuineReopen.items[0].lifecycle === "REOPENED", "without the resolvedManually flag (i.e. resolved via genuine disappearance), reappearing still correctly comes back as REOPENED");
+
   const orderedInputs = {
     ...inputsBase,
     drift: computeDeliveryDrift([], yesterdayMetrics),

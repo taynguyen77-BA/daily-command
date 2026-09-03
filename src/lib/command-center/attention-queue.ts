@@ -14,8 +14,11 @@
 // resolves/snoozes them (cooldown) UNLESS a real new signal appears — severity increasing
 // while acknowledged or snoozed re-escalates to RE_ESCALATED (never simply because time
 // passed, §23), which then behaves like REOPENED (one cycle, then back to ACTIVE). SNOOZED
-// items are hidden until `snoozedUntil` passes; an item whose underlying evidence
-// disappears is marked RESOLVED; if it reappears afterward, it comes back as REOPENED.
+// items are hidden until `snoozedUntil` passes. RESOLVED (whether the user clicked Resolve
+// or the underlying evidence disappeared on its own) stays resolved — like ACKNOWLEDGED,
+// only a real severity increase re-escalates it — UNLESS the evidence genuinely disappeared
+// and later came back, in which case it's a true REOPENED, not just a still-ongoing
+// condition the user already resolved.
 
 import type {
   ActionEffectivenessResult,
@@ -228,7 +231,18 @@ export function buildAttentionQueue(
     if (!prior) {
       state = { lifecycle: "NEW", firstSeenDate: today, lastSeenDate: today, lastSeverity: r.severity };
     } else if (prior.lifecycle === "RESOLVED") {
-      state = { lifecycle: "REOPENED", firstSeenDate: prior.firstSeenDate, lastSeenDate: today, lastSeverity: r.severity };
+      // `resolvedManually` (set only by the user's Resolve action, never by the
+      // auto-resolve pass below) means the evidence never actually disappeared — the user
+      // just asked to stop being bothered about it. Treat that like ACKNOWLEDGED (persist,
+      // only a real severity increase re-escalates) so clicking Resolve isn't instantly
+      // undone the moment the still-ongoing condition is recomputed. Without that flag, the
+      // item got here only via genuine disappearance (see below), so reappearing in `raw`
+      // now is a real REOPENED.
+      state = prior.resolvedManually
+        ? severityWorsened(prior.lastSeverity, r.severity)
+          ? { lifecycle: "RE_ESCALATED", firstSeenDate: prior.firstSeenDate, lastSeenDate: today, lastSeverity: r.severity }
+          : { ...prior, lastSeenDate: today, lastSeverity: r.severity }
+        : { lifecycle: "REOPENED", firstSeenDate: prior.firstSeenDate, lastSeenDate: today, lastSeverity: r.severity };
     } else if (prior.lifecycle === "SNOOZED" && prior.snoozedUntil && prior.snoozedUntil > today) {
       state = { ...prior, lastSeenDate: today };
     } else if (prior.lifecycle === "SNOOZED") {
