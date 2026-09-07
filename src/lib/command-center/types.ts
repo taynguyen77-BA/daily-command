@@ -474,10 +474,13 @@ export interface JiraProjectSummary {
 // ===== V2.5 — Work Relevance & Jira Status Policy =====
 // A Jira workflow status is delivery/process state, not automatically "work the user needs
 // to do". This is a deterministic semantic layer over the existing Jira ingestion — no new
-// task system, no new scoring engine, no AI classification. `JiraStatusPolicy` is additional
-// per-project configuration, keyed by the same Jira project KEY used throughout this codebase
-// (JiraProjectScope.projectKeys, Project.sourceId, WorkItem.projectId's `jira-project-${key}`
-// prefix) — see jira/work-relevance.ts for the enforcement/parsing logic.
+// task system, no new scoring engine, no AI classification.
+//
+// V2.11 §1 — GLOBAL policy (explicit product decision, overriding the V2.6/V2.7 per-project
+// design): one status→relevance map, shared identically across every Jira project/site. The
+// map is keyed directly by the raw Jira status NAME exactly as observed (e.g. "Ready for
+// UAT/Business Test") — never normalized/fuzzy-matched. A status absent from the map is
+// UNKNOWN, not guessed. See jira/work-relevance.ts for enforcement/parsing/migration.
 export type WorkRelevance = "ACTIONABLE" | "WAITING" | "OBSERVE" | "COMPLETED" | "EXCLUDED" | "UNKNOWN";
 
 /** Every classification the user can explicitly choose in Data & Settings, plus the
@@ -485,14 +488,19 @@ export type WorkRelevance = "ACTIONABLE" | "WAITING" | "OBSERVE" | "COMPLETED" |
  *  selectable option (it simply means "no explicit choice has been made"). */
 export const WORK_RELEVANCE_VALUES: WorkRelevance[] = ["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED", "UNKNOWN"];
 
-/** One project's status→relevance map. `statusMap` keys are the raw Jira status NAME exactly
- *  as observed (e.g. "Ready for UAT/Business Test") — never normalized/fuzzy-matched, and
- *  never assumed to mean the same thing in a different project (§6 "prefer project-specific
- *  classification"). A status absent from `statusMap` is UNKNOWN, not guessed. */
-export interface JiraStatusPolicy {
-  projectKey: string;
-  statusMap: Record<string, WorkRelevance>;
-  updatedAt?: string;
+/** V2.11 §1 — the global policy map itself: raw Jira status name -> classification. */
+export type JiraWorkRelevancePolicyMap = Record<string, WorkRelevance>;
+
+/** V2.11 §1 — one-time migration notice for an install upgrading from the pre-V2.11
+ *  per-project policy shape. Shown once in Data & Settings, then dismissed (see
+ *  store.ts's dismissWorkRelevancePolicyMigrationNotice). `collapsedStatuses` are the
+ *  statuses where different projects had genuinely disagreeing classifications and one had
+ *  to be deterministically chosen — see jira/work-relevance.ts's parseWorkRelevancePolicyMap
+ *  for the exact tiebreak rule. */
+export interface WorkRelevancePolicyMigrationNotice {
+  fromProjectCount: number;
+  collapsedStatuses: string[];
+  migratedAt: string;
 }
 
 /** V1.3 §9 — the compact global context filter. All fields undefined = "All". */

@@ -290,19 +290,20 @@ export function explainExecutionSurface(item: WorkItem, trace: ExecutionPathTrac
 }
 
 // ===== §10 — Status-level Execution Path Calibration (extends V2.7's status table) =====
+// V2.11 §1 — GLOBAL policy: grouped by status name alone, across every project, matching
+// work-relevance-calibration.ts's computePolicyReviewSignals (the two are merged by status
+// name in the same UI table — see WorkRelevanceCalibrationPanel.tsx).
 
 export interface ExecutionPathStatusRow {
-  projectKey: string;
   statusName: string;
   relevance: WorkRelevance;
   candidateCount?: number; // undefined = "N/A" (not ACTIONABLE — candidate evaluation doesn't apply)
   outcomeCount: number;
 }
 
-/** §10, §23 — one pass building per-(project,status) rows with real, indexed counts.
- *  candidateCount is ONLY meaningful for ACTIONABLE rows (§10's own worked example shows
- *  "N/A" for OBSERVE/WAITING) — computed via a single buildCandidates() call, not a
- *  per-item rescan. */
+/** §10, §23 — one pass building per-status rows with real, indexed counts. candidateCount is
+ *  ONLY meaningful for ACTIONABLE rows (§10's own worked example shows "N/A" for
+ *  OBSERVE/WAITING) — computed via a single buildCandidates() call, not a per-item rescan. */
 export function computeExecutionPathStatusTable(data: CommandCenterData, index: WorkRelevanceIndex, today: string, projectKeys?: string[]): ExecutionPathStatusRow[] {
   const scope = projectKeys && projectKeys.length > 0 ? new Set(projectKeys) : undefined;
   const actionsByWorkItemId = new Map<string, Action[]>();
@@ -314,18 +315,17 @@ export function computeExecutionPathStatusTable(data: CommandCenterData, index: 
   }
   const candidateIds = new Set(buildCandidates(data, today, index).map((c) => c.item?.id).filter(Boolean));
 
-  const groups = new Map<string, { projectKey: string; statusName: string; relevance: WorkRelevance; items: WorkItem[] }>();
+  const groups = new Map<string, { statusName: string; relevance: WorkRelevance; items: WorkItem[] }>();
   for (const item of data.workItems) {
     if (item.sourceType !== "jira" || item.status === "Done" || !item.jiraStatusName) continue;
     const projectKey = jiraProjectKeyForWorkItem(item);
     if (!projectKey || (scope && !scope.has(projectKey))) continue;
     const relevance = resolveWorkRelevance(item, index);
     if (relevance === "NOT_APPLICABLE" || relevance === "UNKNOWN") continue;
-    const key = `${projectKey}::${item.jiraStatusName}`;
-    let group = groups.get(key);
+    let group = groups.get(item.jiraStatusName);
     if (!group) {
-      group = { projectKey, statusName: item.jiraStatusName, relevance, items: [] };
-      groups.set(key, group);
+      group = { statusName: item.jiraStatusName, relevance, items: [] };
+      groups.set(item.jiraStatusName, group);
     }
     group.items.push(item);
   }
@@ -334,20 +334,18 @@ export function computeExecutionPathStatusTable(data: CommandCenterData, index: 
   for (const group of Array.from(groups.values())) {
     const outcomeCount = group.items.reduce((sum, item) => sum + (actionsByWorkItemId.get(item.id) ?? []).filter((a) => !!a.outcomeStatus).length, 0);
     rows.push({
-      projectKey: group.projectKey,
       statusName: group.statusName,
       relevance: group.relevance,
       candidateCount: group.relevance === "ACTIONABLE" ? group.items.filter((item) => candidateIds.has(item.id)).length : undefined,
       outcomeCount,
     });
   }
-  return rows.sort((a, b) => a.projectKey.localeCompare(b.projectKey) || a.statusName.localeCompare(b.statusName));
+  return rows.sort((a, b) => a.statusName.localeCompare(b.statusName));
 }
 
 // ===== §11 Signal C — ACTIONABLE but no items entered the candidate pool =====
 
 export interface CandidateGapSignal {
-  projectKey: string;
   statusName: string;
   observedItemCount: number;
   explanation: string;
@@ -355,15 +353,14 @@ export interface CandidateGapSignal {
 
 /** §11 Signal C — deliberately separate from V2.7's PolicyReviewSignal (which is about
  *  Action EVIDENCE); this is specifically about CANDIDATE EVALUATION, an earlier pipeline
- *  stage. Never claims "policy is too broad" — states the observation only (§11). */
+ *  stage. Never claims "policy is too broad" — states the observation only (§11). V2.11 §1 —
+ *  global: observedItemCount is now summed across every project observing this status. */
 export function computeCandidateGapSignals(data: CommandCenterData, index: WorkRelevanceIndex, today: string, projectKeys?: string[]): CandidateGapSignal[] {
   return computeExecutionPathStatusTable(data, index, today, projectKeys)
     .filter((r) => r.relevance === "ACTIONABLE" && r.candidateCount === 0)
     .map((r) => {
-      const observedItemCount = data.workItems.filter(
-        (w) => w.sourceType === "jira" && w.status !== "Done" && w.jiraStatusName === r.statusName && jiraProjectKeyForWorkItem(w) === r.projectKey
-      ).length;
-      return { projectKey: r.projectKey, statusName: r.statusName, observedItemCount };
+      const observedItemCount = data.workItems.filter((w) => w.sourceType === "jira" && w.status !== "Done" && w.jiraStatusName === r.statusName).length;
+      return { statusName: r.statusName, observedItemCount };
     })
     .filter((r) => r.observedItemCount >= MIN_ITEMS_FOR_SIGNAL)
     .map((r) => ({

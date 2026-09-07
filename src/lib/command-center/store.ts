@@ -41,8 +41,8 @@ import type {
   DecisionOption,
   GlobalFilters,
   JiraProjectScope,
-  JiraStatusPolicy,
   JiraSyncState,
+  JiraWorkRelevancePolicyMap,
   MemoryEvent,
   MentionEvent,
   PersonalFocusCandidate,
@@ -52,6 +52,7 @@ import type {
   PersonalPlanItemStatus,
   PlanItemOrigin,
   WorkRelevance,
+  WorkRelevancePolicyMigrationNotice,
 } from "./types";
 import { DATA_SCHEMA_VERSION, emptyData } from "./types";
 import type { ImportResult } from "./import";
@@ -89,11 +90,16 @@ export interface StoreState {
   // discoverable Jira project is synced/analyzed; FOCUSED restricts to `projectKeys`. See
   // jira/project-scope.ts for the enforcement and parsing logic.
   jiraProjectScope: JiraProjectScope;
-  // V2.5 — Work Relevance & Jira Status Policy. Keyed by Jira project KEY, same identifier
-  // as jiraProjectScope. Empty map (the default) means no status has been classified for any
-  // project yet — every Jira status is conservatively UNKNOWN until the user classifies it
-  // in Data & Settings. See jira/work-relevance.ts.
-  jiraWorkRelevancePolicy: Record<string, JiraStatusPolicy>;
+  // V2.5 — Work Relevance & Jira Status Policy. V2.11 §1 — GLOBAL: keyed directly by raw
+  // Jira status name, shared across every project/site (explicit product decision,
+  // overriding the V2.6/V2.7 per-project design). Empty map (the default) means no status
+  // has been classified yet — every Jira status is conservatively UNKNOWN until the user
+  // classifies it in Data & Settings. See jira/work-relevance.ts.
+  jiraWorkRelevancePolicy: JiraWorkRelevancePolicyMap;
+  // V2.11 §1 — set once when an existing per-project policy map is migrated into the new
+  // global shape on load; cleared by dismissWorkRelevancePolicyMigrationNotice() once the
+  // user has seen the one-time "policy was consolidated" notice in Data & Settings.
+  workRelevancePolicyMigrationNotice?: WorkRelevancePolicyMigrationNotice;
   // V1.4 §39-41 — attention lifecycle (deliberately separate from any Jira status) and a
   // small set of meaningful proactive-intelligence events. Both additive/optional-safe.
   attentionState: Record<string, AttentionItemState>;
@@ -120,6 +126,13 @@ export interface StoreState {
   // otherwise stays empty, same "safe when unconfigured" contract as every other optional
   // Jira capability.
   mentionEvents: MentionEvent[];
+  // V2.11 §3B — "Show advanced/rarely-used sections" toggle in Data & Settings. Hides
+  // dev/pilot-oriented panels (Pilot Readiness, Real Jira Data Protection, AI Trust (dev))
+  // that a BA/PO managing live client projects wouldn't open in a normal week — never
+  // deletes them, always one toggle away. Defaults to false (hidden) since these are the
+  // confidently-identified sections from the V2.11 nav/section audit; see that audit's
+  // report for sections still marked as open questions.
+  showAdvancedSettings: boolean;
 }
 
 function initialJiraSync(): JiraSyncState {
@@ -147,6 +160,7 @@ function initialState(): StoreState {
     artifacts: [],
     usageCounters: {},
     mentionEvents: [],
+    showAdvancedSettings: false,
   };
 }
 
@@ -200,10 +214,20 @@ function asUsageCounters(v: unknown): Record<string, number> {
   return out;
 }
 
+// V2.11 §1 — defensive shape guard for the persisted one-time migration notice; a malformed
+// value is dropped rather than trusted, same discipline as every other parsed field here.
+function asMigrationNotice(v: unknown): WorkRelevancePolicyMigrationNotice | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const n = v as Partial<WorkRelevancePolicyMigrationNotice>;
+  if (typeof n.fromProjectCount !== "number" || !Array.isArray(n.collapsedStatuses) || typeof n.migratedAt !== "string") return undefined;
+  return { fromProjectCount: n.fromProjectCount, collapsedStatuses: n.collapsedStatuses.filter((s): s is string => typeof s === "string"), migratedAt: n.migratedAt };
+}
+
 export function parseStoredState(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
     const snapshotHistory = parsed.snapshotHistory ?? (parsed.previousSnapshot ? [parsed.previousSnapshot] : []);
+    const { policy: jiraWorkRelevancePolicy, migration } = parseWorkRelevancePolicyMap(parsed.jiraWorkRelevancePolicy);
     const dataSourceValue: StoreState["dataSource"] = ["demo", "local-import", "jira"].includes(parsed.dataSource as string)
       ? (parsed.dataSource as StoreState["dataSource"])
       : parsed.isDemo
@@ -222,7 +246,8 @@ export function parseStoredState(raw: string): StoreState {
       jiraSync: asPlainObject(parsed.jiraSync, initialJiraSync()),
       filters: asPlainObject(parsed.filters, {}),
       jiraProjectScope: parseJiraProjectScope(parsed.jiraProjectScope),
-      jiraWorkRelevancePolicy: parseWorkRelevancePolicyMap(parsed.jiraWorkRelevancePolicy),
+      jiraWorkRelevancePolicy,
+      workRelevancePolicyMigrationNotice: migration ?? asMigrationNotice(parsed.workRelevancePolicyMigrationNotice),
       attentionState: asPlainObject(parsed.attentionState, {}),
       memoryEvents: Array.isArray(parsed.memoryEvents) ? parsed.memoryEvents : [],
       ownerName: typeof parsed.ownerName === "string" ? parsed.ownerName : undefined,
@@ -234,6 +259,7 @@ export function parseStoredState(raw: string): StoreState {
       artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts.filter(isArtifactRecordShape) : [],
       usageCounters: asUsageCounters(parsed.usageCounters),
       mentionEvents: Array.isArray(parsed.mentionEvents) ? parsed.mentionEvents : [],
+      showAdvancedSettings: parsed.showAdvancedSettings === true,
     };
   } catch {
     return initialState();
@@ -420,6 +446,12 @@ export class CommandCenterStore {
     this.set({ ...this.state, filters: { ...this.state.filters, ...patch } });
   }
 
+  /** V2.11 §3B — the ONLY place the advanced-settings visibility toggle is ever set. Purely
+   *  a UI display preference (never deletes or gates any underlying computation). */
+  setShowAdvancedSettings(value: boolean) {
+    this.set({ ...this.state, showAdvancedSettings: value });
+  }
+
   /** V2.3 §3-4, §32 — the ONLY place Focus Project Scope is ever set. Always explicit and
    *  user-driven (no inference from owner/assignee/recent activity/labels — §32); switching
    *  ALL -> FOCUSED or narrowing an existing focused set never deletes any already-synced
@@ -437,10 +469,19 @@ export class CommandCenterStore {
   /** V2.5 — the ONLY place a Jira status classification is ever set. Always explicit and
    *  user-driven (no automatic status classification, no AI — see jira/work-relevance.ts).
    *  A configuration change, not a delivery event — deliberately does not emit a memory
-   *  event (§23 "a status classification change is configuration, not a delivery event"). */
-  setJiraStatusRelevance(projectKey: string, status: string, relevance: WorkRelevance) {
-    if (!projectKey.trim() || !status.trim()) return;
-    this.set({ ...this.state, jiraWorkRelevancePolicy: withStatusRelevance(this.state.jiraWorkRelevancePolicy, projectKey, status, relevance) });
+   *  event (§23 "a status classification change is configuration, not a delivery event").
+   *  V2.11 §1 — global: no projectKey parameter, since a classification now applies to
+   *  every project at once. */
+  setJiraStatusRelevance(status: string, relevance: WorkRelevance) {
+    if (!status.trim()) return;
+    this.set({ ...this.state, jiraWorkRelevancePolicy: withStatusRelevance(this.state.jiraWorkRelevancePolicy, status, relevance) });
+  }
+
+  /** V2.11 §1 — dismisses the one-time "policy was consolidated from N per-project
+   *  settings" notice shown after migrating a pre-V2.11 per-project policy map. */
+  dismissWorkRelevancePolicyMigrationNotice() {
+    if (!this.state.workRelevancePolicyMigrationNotice) return;
+    this.set({ ...this.state, workRelevancePolicyMigrationNotice: undefined });
   }
 
   /**

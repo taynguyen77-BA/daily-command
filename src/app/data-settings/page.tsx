@@ -6,12 +6,12 @@ import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
+import { checkSlackNotifyStatus, sendTestSlackNotification, type SlackNotifyStatus } from "@/lib/command-center/notify-client";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import {
   collectObservedStatuses,
   computeOverallWorkRelevanceCoverage,
-  computeStatusCoverage,
-  countOpenItemsForProjectStatus,
+  countOpenItemsForStatus,
   WORK_RELEVANCE_EXPLANATIONS,
   type WorkRelevanceCoverage,
   type WorkRelevanceCoverageState,
@@ -21,8 +21,9 @@ import { WorkRelevanceCalibrationPanel } from "@/components/command-center/WorkR
 import { computeCalibrationHealthState, computePolicyReviewSignals } from "@/lib/command-center/jira/work-relevance-calibration";
 import { WORK_RELEVANCE_VALUES, type WorkRelevance } from "@/lib/command-center/types";
 import { computeDataHealth } from "@/lib/command-center/data-health";
-import { getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
-import { getCacheStats } from "@/lib/command-center/ai/ai-cache";
+import { clearAiTrace, getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
+import { aiCacheSize, clearAICache, getCacheStats } from "@/lib/command-center/ai/ai-cache";
+import { listAllUsagePolicies } from "@/lib/command-center/ai/usage-policy";
 import { getTodayIso } from "@/lib/command-center/store";
 import { computeTrustDiagnostic, type TrustDiagnosticStatus } from "@/lib/command-center/trust-diagnostic";
 import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadinessStatus, type PilotCheckItem } from "@/lib/command-center/jira/pilot-checklist";
@@ -55,6 +56,65 @@ function PilotChecklistRow({ item }: { item: PilotCheckItem }) {
       <p className="mt-1 text-text2">Evidence: {item.detail}</p>
       {item.nextAction !== "None." && item.nextAction !== "None — this is a structural guarantee, verified by the credential-safety static scan." && <p className="mt-1 text-accent2">→ {item.nextAction}</p>}
     </div>
+  );
+}
+
+// V2.11 §2 — Slack Notifications status. SLACK_WEBHOOK_URL's actual value never reaches
+// this component (or the browser at all — see notify/route.ts) — only whether it's set
+// (boolean) and the self-declared, non-secret SLACK_CHANNEL_LABEL. "Send test notification"
+// reuses the exact same server-side webhook-call path as a real signal (postToSlack in the
+// route), so a passing test genuinely proves real delivery works.
+function SlackNotificationsPanel() {
+  const [status, setStatus] = useState<SlackNotifyStatus | null>(null);
+  const [sending, setSending] = useState(false);
+  const [testResult, setTestResult] = useState<{ sent: boolean; reason?: string } | null>(null);
+
+  useEffect(() => {
+    checkSlackNotifyStatus().then(setStatus);
+  }, []);
+
+  async function handleSendTest() {
+    setSending(true);
+    setTestResult(null);
+    const result = await sendTestSlackNotification();
+    setTestResult(result);
+    setSending(false);
+  }
+
+  const destinationLabel = status?.channelLabel
+    ? status.channelLabel
+    : status?.configured
+    ? 'Not labeled — set SLACK_CHANNEL_LABEL to identify this destination'
+    : "Not configured";
+
+  return (
+    <Panel className="p-5" id="slack-notifications-panel">
+      <SectionHeading title="Slack Notifications" subtitle="V2.10 real-time mention/assignment alerts. The webhook URL itself is never sent to or readable by the browser — only whether it's configured." />
+      <div className="space-y-1 text-sm">
+        <p className="text-text2">
+          Configured: <span className="font-mono text-text">{status === null ? "checking…" : status.configured ? "yes" : "no"}</span>
+        </p>
+        <p className="text-text2">
+          Destination label: <span className={status?.channelLabel ? "font-mono text-text" : "text-text3"}>{status === null ? "checking…" : destinationLabel}</span>
+        </p>
+      </div>
+      <button
+        onClick={handleSendTest}
+        disabled={sending || !status?.configured}
+        className="mt-3 rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-50"
+      >
+        {sending ? "Sending…" : "Send test notification"}
+      </button>
+      {testResult && (
+        <p className={`mt-2 text-xs ${testResult.sent ? "text-green" : "text-yellow"}`}>
+          {testResult.sent
+            ? "Test notification sent — check your configured Slack destination."
+            : testResult.reason === "not-configured"
+            ? "Not sent — SLACK_WEBHOOK_URL is not configured on the server."
+            : `Not sent — ${testResult.reason ?? "delivery failed"}.`}
+        </p>
+      )}
+    </Panel>
   );
 }
 
@@ -314,16 +374,16 @@ function CoverageStatBar({ coverage }: { coverage: WorkRelevanceCoverage }) {
 }
 
 // V2.5 — Work Relevance & Jira Status Policy. Lives inside Data & Settings, right beside
-// Jira Project Scope (§8 "no new settings page"). One project at a time, statuses derived
-// from OBSERVED Jira data (§6), grouped by their current classification so the layout
-// matches the spec's own worked example.
-// V2.6 — calibration layer on top: (1) restricted to the existing Focus Project Scope by
-// default with an ALL-mode warning (§11), (2) a deterministic coverage readout per project
-// (§3-4), (3) a status change no longer applies immediately — it opens a Policy Change
-// Impact Preview computed from CURRENT data, and only takes effect on explicit "Apply
-// Policy Change" (§8-9). store.setJiraStatusRelevance (the only place a classification is
-// ever set — see jira/work-relevance.ts) is unchanged; this panel just gates the call
-// behind a confirmation step.
+// Jira Project Scope (§8 "no new settings page"). Statuses derived from OBSERVED Jira data
+// (§6), grouped by their current classification so the layout matches the spec's own worked
+// example.
+// V2.11 §1 — GLOBAL policy (explicit product decision, overriding the V2.6/V2.7 per-project
+// design): ONE table, one row per distinct status name observed across every synced project
+// — no per-project selector or grouping. A status change no longer applies immediately — it
+// opens a Policy Change Impact Preview computed from CURRENT data, and only takes effect on
+// explicit "Apply Policy Change" (§8-9). store.setJiraStatusRelevance (the only place a
+// classification is ever set — see jira/work-relevance.ts) is unchanged in spirit; this
+// panel just gates the call behind a confirmation step.
 function JiraWorkRelevancePolicyPanel({
   state,
   store,
@@ -337,39 +397,35 @@ function JiraWorkRelevancePolicyPanel({
 }) {
   const allKnownProjects = useMemo(() => knownJiraProjects(state.data), [state.data]);
   // V2.6 §11 — "primarily operate against the user's existing jiraProjectScope"; FOCUSED
-  // narrows the picker to those projects, ALL shows every known project with a warning.
+  // narrows the observed-status vocabulary to those projects, ALL shows every known project
+  // with a warning.
   const isFocusedScope = state.jiraProjectScope.mode === "FOCUSED";
-  const projects = useMemo(
-    () => (isFocusedScope ? allKnownProjects.filter((p) => state.jiraProjectScope.projectKeys.includes(p.key)) : allKnownProjects),
-    [allKnownProjects, isFocusedScope, state.jiraProjectScope.projectKeys]
-  );
-  const [selectedProject, setSelectedProject] = useState<string>("");
-  const activeProjectKey = selectedProject && projects.some((p) => p.key === selectedProject) ? selectedProject : projects[0]?.key ?? "";
+  const scopeProjectKeys = isFocusedScope ? state.jiraProjectScope.projectKeys : undefined;
 
-  const observedStatuses = useMemo(() => (activeProjectKey ? collectObservedStatuses(state.data, activeProjectKey) : []), [state.data, activeProjectKey]);
-  const statusMap = state.jiraWorkRelevancePolicy[activeProjectKey]?.statusMap ?? {};
-  const coverage = useMemo(() => (activeProjectKey ? computeStatusCoverage(state.data, workRelevanceIndex, activeProjectKey) : null), [state.data, workRelevanceIndex, activeProjectKey]);
+  const observedStatuses = useMemo(() => collectObservedStatuses(state.data, scopeProjectKeys), [state.data, scopeProjectKeys]);
+  const statusMap = state.jiraWorkRelevancePolicy;
+  const coverage = useMemo(() => computeOverallWorkRelevanceCoverage(state.data, workRelevanceIndex, scopeProjectKeys), [state.data, workRelevanceIndex, scopeProjectKeys]);
 
   const [pendingChange, setPendingChange] = useState<PendingPolicyChange | null>(null);
+  const migrationNotice = state.workRelevancePolicyMigrationNotice;
 
   function requestChange(status: string, next: WorkRelevance) {
     const current = statusMap[status] ?? "UNKNOWN";
     if (current === next) return;
     setPendingChange({
-      projectKey: activeProjectKey,
       status,
       from: current,
       to: next,
-      // §8 — always a live count over current data, never invented; countOpenItemsForProjectStatus
+      // §8 — always a live count over current data, never invented; countOpenItemsForStatus
       // can't fail here (it's plain arithmetic over `state.data`), so this is never null in
       // practice — the dialog still handles null defensively per §8 "Impact unavailable".
-      affectedCount: countOpenItemsForProjectStatus(state.data, activeProjectKey, status),
+      affectedCount: countOpenItemsForStatus(state.data, status),
     });
   }
 
   function applyPendingChange() {
     if (!pendingChange) return;
-    store.setJiraStatusRelevance(pendingChange.projectKey, pendingChange.status, pendingChange.to);
+    store.setJiraStatusRelevance(pendingChange.status, pendingChange.to);
     setPendingChange(null);
   }
 
@@ -381,7 +437,7 @@ function JiraWorkRelevancePolicyPanel({
       <Panel className="p-5" id="jira-work-relevance-policy-panel">
         <SectionHeading
           title="Jira Work Relevance Policy"
-          subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status per project so Daily Command Center knows the difference."
+          subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status so Daily Command Center knows the difference — one policy, shared by every Jira project."
         />
         <p className="text-sm text-text3">Work Relevance Policy is available for Jira data. Configure Jira above to enable it.</p>
       </Panel>
@@ -392,38 +448,40 @@ function JiraWorkRelevancePolicyPanel({
     <Panel className="p-5" id="jira-work-relevance-policy-panel">
       <SectionHeading
         title="Jira Work Relevance Policy"
-        subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status per project so Daily Command Center knows the difference."
+        subtitle="A Jira workflow status is delivery/process state, not automatically a task for you. Classify each observed status so Daily Command Center knows the difference — one policy, shared by every Jira project."
       />
-      {!isFocusedScope && (
+      {migrationNotice && (
+        <div className="mb-3 rounded-md border border-accent/40 bg-accent/10 p-2.5 text-xs text-text2">
+          <p>
+            Policy was consolidated from {migrationNotice.fromProjectCount} per-project setting{migrationNotice.fromProjectCount === 1 ? "" : "s"} into one shared policy — review below.
+          </p>
+          {migrationNotice.collapsedStatuses.length > 0 && (
+            <p className="mt-1">
+              {migrationNotice.collapsedStatuses.length} status{migrationNotice.collapsedStatuses.length === 1 ? "" : "es"} had different classifications across projects and were
+              consolidated to one: {migrationNotice.collapsedStatuses.map((s) => `"${s}"`).join(", ")}.
+            </p>
+          )}
+          <button
+            onClick={() => store.dismissWorkRelevancePolicyMigrationNotice()}
+            className="mt-2 rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {!isFocusedScope && allKnownProjects.length > 1 && (
         <p className="mb-3 rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs text-text2">
-          Your Jira Project Scope is ALL PROJECTS — this panel may show a large status vocabulary across every synced project. Consider Focus Projects above to narrow it.
+          Your Jira Project Scope is ALL PROJECTS — this panel shows the status vocabulary across every synced project. Consider Focus Projects above to narrow it.
         </p>
       )}
       {allKnownProjects.length === 0 ? (
         <p className="text-sm text-text3">No Jira projects known yet — sync Jira first, then return here to classify its statuses.</p>
-      ) : projects.length === 0 ? (
-        <p className="text-sm text-text3">No Focus Projects are selected yet, so there&apos;s nothing to classify. Select at least one project in Jira Project Scope above.</p>
       ) : (
         <div className="space-y-3 text-sm">
-          <label className="flex items-center gap-2 text-xs text-text2">
-            Project
-            <select
-              value={activeProjectKey}
-              onChange={(e) => setSelectedProject(e.target.value)}
-              className="rounded-md border border-border bg-surface2 px-2 py-1 text-xs text-text"
-            >
-              {projects.map((p) => (
-                <option key={p.key} value={p.key}>
-                  {p.name} ({p.key})
-                </option>
-              ))}
-            </select>
-          </label>
-
-          {coverage && <CoverageStatBar coverage={coverage} />}
+          <CoverageStatBar coverage={coverage} />
 
           {observedStatuses.length === 0 ? (
-            <p className="text-xs text-text3">No Jira statuses observed yet for {activeProjectKey} — sync Jira to populate this list.</p>
+            <p className="text-xs text-text3">No Jira statuses observed yet — sync Jira to populate this list.</p>
           ) : (
             <div className="space-y-3">
               {WORK_RELEVANCE_VALUES.map((relevance) => {
@@ -442,7 +500,7 @@ function JiraWorkRelevancePolicyPanel({
                           <select
                             value={statusMap[status] ?? "UNKNOWN"}
                             onChange={(e) => requestChange(status, e.target.value as WorkRelevance)}
-                            aria-label={`Classify Jira status "${status}" for ${activeProjectKey}`}
+                            aria-label={`Classify Jira status "${status}"`}
                             className="rounded border border-border bg-surface2 px-2 py-1 text-xs text-text"
                           >
                             {WORK_RELEVANCE_VALUES.map((v) => (
@@ -527,6 +585,9 @@ export default function DataSettingsPage() {
   const aiTraceSummary = useMemo(() => getAiTraceSummary(getTodayIso()), [aiTraceTick]);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const cacheStats = useMemo(() => getCacheStats(), [aiTraceTick]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cachedEntryCount = useMemo(() => aiCacheSize(), [aiTraceTick]);
+  const usagePolicies = useMemo(() => listAllUsagePolicies(), []);
   // V2.9 §F-02 fix — computed from scopedData (Jira Project Scope already enforced), so
   // Ownership/Due dates/Release/Scope-history/Open-work-items match the "Current dataset"
   // counts above and every other scoped screen, instead of silently reporting global figures
@@ -649,7 +710,17 @@ export default function DataSettingsPage() {
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading title="Data & Settings" />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <SectionHeading title="Data & Settings" />
+        {/* V2.11 §3B — nothing behind this toggle is ever deleted; it's one click away
+            either way. Hides dev/pilot-oriented panels (Pilot Readiness, Real Jira Data
+            Protection, AI Trust (dev)) that a BA/PO running live client projects wouldn't
+            open in a normal week — see the V2.11 nav/section audit for the reasoning. */}
+        <label className="flex items-center gap-2 text-xs text-text2">
+          <input type="checkbox" checked={state.showAdvancedSettings} onChange={(e) => store.setShowAdvancedSettings(e.target.checked)} className="h-3.5 w-3.5" />
+          Show advanced/rarely-used sections
+        </label>
+      </div>
 
       <Panel className="p-5">
         <SectionHeading title="Why can't I trust this?" subtitle="A quick, actionable answer for each trust dimension — composed from the signals below, never a separate blended score." />
@@ -1201,23 +1272,27 @@ export default function DataSettingsPage() {
         )}
       </Panel>
 
-      <Panel className="p-5">
-        <SectionHeading title="Pilot Readiness" subtitle="A checklist, not a score. Every item defaults to NOT TESTED until genuinely exercised — never fabricated." />
-        <div className="space-y-2">
-          {pilotChecklist.map((c) => (
-            <PilotChecklistRow key={c.id} item={c} />
-          ))}
-        </div>
-      </Panel>
+      {state.showAdvancedSettings && (
+        <>
+          <Panel className="p-5">
+            <SectionHeading title="Pilot Readiness" subtitle="A checklist, not a score. Every item defaults to NOT TESTED until genuinely exercised — never fabricated." />
+            <div className="space-y-2">
+              {pilotChecklist.map((c) => (
+                <PilotChecklistRow key={c.id} item={c} />
+              ))}
+            </div>
+          </Panel>
 
-      <Panel className="p-5">
-        <SectionHeading title="Real Jira Data Protection" subtitle="Read-only remains the rule — no write-back. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
-        <div className="space-y-2">
-          {dataProtectionChecklist.map((c) => (
-            <PilotChecklistRow key={c.id} item={c} />
-          ))}
-        </div>
-      </Panel>
+          <Panel className="p-5">
+            <SectionHeading title="Real Jira Data Protection" subtitle="Read-only remains the rule — no write-back. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
+            <div className="space-y-2">
+              {dataProtectionChecklist.map((c) => (
+                <PilotChecklistRow key={c.id} item={c} />
+              ))}
+            </div>
+          </Panel>
+        </>
+      )}
 
       <DataImportPanel />
 
@@ -1236,20 +1311,46 @@ export default function DataSettingsPage() {
         </p>
         <p className="mt-2 text-xs text-text3">
           Both API keys, when set, live only in the server environment — neither is ever sent to or readable by the browser.
-          Slack, Confluence, and email integrations are not implemented — this is a future capability. Jira write-back
-          (updating, commenting on, or transitioning issues) is also not implemented — every Jira interaction in this app is
-          read-only; all actions on real tickets remain something you do yourself.
+          Slack notifications (V2.10) are implemented — see the Slack Notifications panel below. Confluence and email
+          integrations are not implemented — that remains a future capability. Jira write-back (updating, commenting on, or
+          transitioning issues) is also not implemented — every Jira interaction in this app is read-only; all actions on
+          real tickets remain something you do yourself.
         </p>
       </Panel>
 
+      <SlackNotificationsPanel />
+
+      {state.showAdvancedSettings && (
       <Panel className="p-5">
         <SectionHeading
           title="AI Trust (dev)"
           subtitle="Local diagnostic only — mode/schema/fallback status for recent AI calls. Never persisted, never includes prompts or credentials."
           action={
-            <button onClick={() => setAiTraceTick((t) => t + 1)} className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
-              Refresh
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  clearAICache();
+                  setAiTraceTick((t) => t + 1);
+                }}
+                className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+              >
+                Clear AI cache
+              </button>
+              {/* V2.11 §3A — clearAiTrace() existed since this trace log's own introduction
+                  but had no UI action anywhere; pairs naturally with "Clear AI cache" above. */}
+              <button
+                onClick={() => {
+                  clearAiTrace();
+                  setAiTraceTick((t) => t + 1);
+                }}
+                className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+              >
+                Clear trace log
+              </button>
+              <button onClick={() => setAiTraceTick((t) => t + 1)} className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+                Refresh
+              </button>
+            </div>
           }
         />
         {/* V2.1 §13-14 — richer session diagnostics, still reusing existing trace/cache
@@ -1258,7 +1359,7 @@ export default function DataSettingsPage() {
             facts/evidence, which the trace never stores by design (privacy/size), so a
             live per-call evaluation count can't be honestly computed from trace alone
             without an invasive signature change across every provider method. */}
-        <div className="mb-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-5">
+        <div className="mb-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-6">
           <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
             <p className="text-text3">Provider</p>
             <p className="font-display text-text">{claudeAvailable ? "Configured" : "Not configured"}</p>
@@ -1274,6 +1375,10 @@ export default function DataSettingsPage() {
           <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
             <p className="text-text3">Cache misses</p>
             <p className="font-display text-text">{cacheStats.misses}</p>
+          </div>
+          <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
+            <p className="text-text3">Cached entries</p>
+            <p className="font-display text-text">{cachedEntryCount}</p>
           </div>
           <div className="rounded-md border border-border bg-surface2 px-2 py-1.5">
             <p className="text-text3">Failed validation</p>
@@ -1295,7 +1400,37 @@ export default function DataSettingsPage() {
             ))}
           </div>
         )}
+        {/* V2.11 §3A — this registry (ai/usage-policy.ts) existed since V2.0 but was never
+            surfaced anywhere; a BA/PO debugging "why didn't this AI call re-run" can now see
+            each task's real cache duration/trigger/dedupe behavior directly. */}
+        <p className="mb-1 mt-4 text-xs font-semibold uppercase tracking-wide text-text3">AI Usage Policy</p>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[520px] text-xs">
+            <caption className="sr-only">Per-task AI usage policy: trigger, cache duration, max calls per interaction, and in-flight dedupe.</caption>
+            <thead>
+              <tr className="border-b border-border text-left text-text3">
+                <th scope="col" className="py-1 pr-3 font-semibold">Task</th>
+                <th scope="col" className="py-1 pr-3 font-semibold">Trigger</th>
+                <th scope="col" className="py-1 pr-3 text-right font-semibold">Cache duration</th>
+                <th scope="col" className="py-1 pr-3 text-right font-semibold">Max calls/interaction</th>
+                <th scope="col" className="py-1 font-semibold">Dedupe in-flight</th>
+              </tr>
+            </thead>
+            <tbody>
+              {usagePolicies.map((p) => (
+                <tr key={p.task} className="border-b border-border last:border-0">
+                  <td className="py-1 pr-3 font-mono text-text">{p.task}</td>
+                  <td className="py-1 pr-3 text-text2">{p.trigger}</td>
+                  <td className="py-1 pr-3 text-right text-text2">{Math.round(p.cacheDurationMs / 60000)} min</td>
+                  <td className="py-1 pr-3 text-right text-text2">{p.maxCallsPerInteraction}</td>
+                  <td className="py-1 text-text2">{p.dedupeInFlight ? "yes" : "no"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </Panel>
+      )}
 
       <Panel className="p-5">
         <SectionHeading title="Artifact History" subtitle="Local, bounded (last 30) — an artifact is a rendering, never a second source of truth (§16)." />

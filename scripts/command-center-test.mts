@@ -148,8 +148,7 @@ import {
   WORK_RELEVANCE_EXPLANATIONS,
   // V2.6 — Work Policy Intelligence & Operational Calibration
   computeOverallWorkRelevanceCoverage,
-  computeStatusCoverage,
-  countOpenItemsForProjectStatus,
+  countOpenItemsForStatus,
   listStatusesByRelevance,
 } from "../src/lib/command-center/jira/work-relevance";
 // V2.7 — Work Relevance Operational Calibration
@@ -170,7 +169,7 @@ import {
   listCandidatePoolActionableItems,
   listJiraItemsInPersonalFocus,
 } from "../src/lib/command-center/execution-path";
-import type { JiraStatusPolicy, WorkRelevance } from "../src/lib/command-center/types";
+import type { WorkRelevance } from "../src/lib/command-center/types";
 // V2.10 — Real-time mention/assignment tracking
 import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt } from "../src/lib/command-center/jira/mentions";
 import { detectNewAssignments } from "../src/lib/command-center/assignment-detection";
@@ -178,6 +177,8 @@ import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "../src/lib/
 import { fetchMentionedIssuesWith, fetchIssueCommentsWith } from "../src/lib/command-center/jira/http";
 import type { JiraComment } from "../src/lib/command-center/jira/types";
 import type { MentionEvent } from "../src/lib/command-center/types";
+// V2.11 §2 — Slack destination visibility: GET/POST /api/command-center/notify
+import { GET as notifyStatusGET, POST as notifyPOST } from "../src/app/api/command-center/notify/route";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -1525,6 +1526,90 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
     secondPassSignals.length === 1 && secondPassSignals[0].id === sixthNewMention.id,
     "once a real baseline exists (the 5 mentions committed from the first pass), the next sync correctly notifies for exactly the one genuinely new 6th mention, and none of the already-tracked 5"
   );
+}
+
+// ===== V2.11 §2 — /api/command-center/notify: status route + test-mode, real webhook mocked =====
+{
+  const originalWebhook = process.env.SLACK_WEBHOOK_URL;
+  const originalLabel = process.env.SLACK_CHANNEL_LABEL;
+  const originalFetch = globalThis.fetch;
+
+  delete process.env.SLACK_WEBHOOK_URL;
+  delete process.env.SLACK_CHANNEL_LABEL;
+
+  const statusUnconfigured = (await (await notifyStatusGET()).json()) as { configured: boolean; channelLabel?: string };
+  ok("V2.11 Notify status", statusUnconfigured.configured === false, "GET /notify reports configured:false when SLACK_WEBHOOK_URL is unset");
+
+  const testWithNoWebhook = (await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", body: JSON.stringify({ test: true }) }))).json();
+  const testWithNoWebhookBody = (await testWithNoWebhook) as { sent: boolean; reason?: string };
+  ok(
+    "V2.11 Notify test-mode",
+    testWithNoWebhookBody.sent === false && testWithNoWebhookBody.reason === "not-configured",
+    "a {test:true} request with no SLACK_WEBHOOK_URL still returns {sent:false, reason:'not-configured'} — same contract as real signals"
+  );
+
+  process.env.SLACK_WEBHOOK_URL = "https://hooks.slack.example/services/mock";
+  process.env.SLACK_CHANNEL_LABEL = "#daily-command-alerts";
+
+  const statusConfigured = (await (await notifyStatusGET()).json()) as { configured: boolean; channelLabel?: string };
+  ok("V2.11 Notify status", statusConfigured.configured === true && statusConfigured.channelLabel === "#daily-command-alerts", "GET /notify reports configured:true and the real SLACK_CHANNEL_LABEL");
+  ok("V2.11 Notify status", JSON.stringify(statusConfigured).includes("hooks.slack.example") === false, "the webhook URL itself is never present anywhere in the status response — only the boolean and the non-secret label");
+
+  let capturedUrl: string | null = null;
+  let capturedBody: { text?: string } | null = null;
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (url: string, init?: { body?: string }) => {
+    capturedUrl = String(url);
+    capturedBody = init?.body ? JSON.parse(init.body) : null;
+    return { ok: true } as Response;
+  }) as typeof fetch;
+
+  const testWithWebhook = (await (await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", body: JSON.stringify({ test: true }) }))).json()) as {
+    sent: boolean;
+  };
+  ok("V2.11 Notify test-mode", testWithWebhook.sent === true, "a {test:true} request with a configured (mocked) webhook reports sent:true");
+  ok("V2.11 Notify test-mode", capturedUrl === "https://hooks.slack.example/services/mock", "the test request posts to the real configured webhook URL — the exact same call a real signal would make");
+  ok(
+    "V2.11 Notify test-mode",
+    capturedBody?.text === "✅ Daily Command test notification — if you can see this, your Slack destination is correctly configured.",
+    "the test request sends exactly the fixed test string, never a fabricated signal"
+  );
+
+  // A real signal request reuses the SAME postToSlack code path — proven by landing in the
+  // same mocked fetch with genuinely different, real signal text, never a second parallel
+  // implementation.
+  capturedBody = null;
+  const realSignalRes = await notifyPOST(
+    new Request("http://localhost/api/command-center/notify", {
+      method: "POST",
+      body: JSON.stringify({ signals: [{ issueKey: "MENT-1", summary: "Test", kind: "MENTION", detail: 'Alice: "hi"' }] }),
+    })
+  );
+  const realSignalBody = (await realSignalRes.json()) as { sent: boolean; delivered: number };
+  ok("V2.11 Notify test-mode", realSignalBody.sent === true && realSignalBody.delivered === 1, "a real signal request still delivers via the identical webhook-call path");
+  ok("V2.11 Notify test-mode", capturedBody?.text?.includes("MENT-1") === true, "a real signal's rendered text is genuinely different from the fixed test string, proving no accidental cross-contamination between the two paths");
+
+  globalThis.fetch = originalFetch;
+  if (originalWebhook === undefined) delete process.env.SLACK_WEBHOOK_URL;
+  else process.env.SLACK_WEBHOOK_URL = originalWebhook;
+  if (originalLabel === undefined) delete process.env.SLACK_CHANNEL_LABEL;
+  else process.env.SLACK_CHANNEL_LABEL = originalLabel;
+}
+
+// ===== V2.11 §3B — showAdvancedSettings toggle: default, store setter, persistence =====
+{
+  commandCenterStore.resetAll();
+  ok("V2.11 Advanced toggle", commandCenterStore.getSnapshot().showAdvancedSettings === false, "the advanced/rarely-used sections toggle defaults to false (hidden)");
+
+  commandCenterStore.setShowAdvancedSettings(true);
+  ok("V2.11 Advanced toggle", commandCenterStore.getSnapshot().showAdvancedSettings === true, "setShowAdvancedSettings persists the explicit choice");
+
+  const roundTrip = parseStoredState(JSON.stringify(commandCenterStore.getSnapshot()));
+  ok("V2.11 Advanced toggle", roundTrip.showAdvancedSettings === true, "the toggle round-trips through JSON serialization/parseStoredState unchanged");
+
+  const fallback = parseStoredState("not valid json");
+  ok("V2.11 Advanced toggle", fallback.showAdvancedSettings === false, "malformed stored state falls back to the safe default (hidden), never a crash");
+
+  commandCenterStore.resetAll();
 }
 
 // ===== V2.10 §2 — fetchMentionedIssuesWith / fetchIssueCommentsWith =====
@@ -5282,23 +5367,27 @@ function jiraItem(overrides: Partial<WorkItem> = {}): WorkItem {
   });
 }
 
-function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Record<string, JiraStatusPolicy> {
-  const out: Record<string, JiraStatusPolicy> = {};
-  for (const [projectKey, statusMap] of Object.entries(entries)) out[projectKey] = { projectKey, statusMap };
-  return out;
+// V2.11 §1 — GLOBAL policy: the map itself is now flat status -> relevance, identity here
+// for readability at call sites migrated from the old per-project `policyMap()` helper.
+function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, WorkRelevance> {
+  return entries;
 }
 
 // ----- Policy model: parsing, project isolation, unknown project/status -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE", "Waiting for Client": "WAITING", Done: "COMPLETED", "Pending PCI Evidence": "EXCLUDED" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE", "Waiting for Client": "WAITING", Done: "COMPLETED", "Pending PCI Evidence": "EXCLUDED" }));
 
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "To Do" }), idx) === "ACTIONABLE", "a status mapped ACTIONABLE resolves to ACTIONABLE");
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Waiting for Client" }), idx) === "WAITING", "a status mapped WAITING resolves to WAITING");
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Ready for UAT/Business Test" }), idx) === "OBSERVE", "a status mapped OBSERVE resolves to OBSERVE");
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Done" }), idx) === "COMPLETED", "a status mapped COMPLETED resolves to COMPLETED");
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Pending PCI Evidence" }), idx) === "EXCLUDED", "a status mapped EXCLUDED resolves to EXCLUDED");
-  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Some Custom Status" }), idx) === "UNKNOWN", "an unmapped status on a KNOWN project resolves to UNKNOWN, never guessed");
-  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ projectId: "jira-project-UNKNOWNPROJ", jiraStatusName: "To Do" }), idx) === "UNKNOWN", "a status on a project with NO policy at all resolves to UNKNOWN, not a crash");
+  ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: "Some Custom Status" }), idx) === "UNKNOWN", "an unmapped status resolves to UNKNOWN, never guessed");
+  ok(
+    "V2.11 Global policy",
+    resolveWorkRelevance(jiraItem({ projectId: "jira-project-UNKNOWNPROJ", jiraStatusName: "To Do" }), idx) === "ACTIONABLE",
+    "a status classified globally applies even to a project that's never been separately configured — the policy is global, not per-project (§1)"
+  );
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ sourceType: undefined, jiraStatusName: undefined }), idx) === "NOT_APPLICABLE", "a non-Jira work item (demo/local-import) is NOT_APPLICABLE — the policy never applies to it");
   ok("V2.5 Policy", resolveWorkRelevance(jiraItem({ jiraStatusName: undefined }), idx) === "NOT_APPLICABLE", "a Jira-sourced item with no captured status name is NOT_APPLICABLE rather than guessed");
 
@@ -5316,56 +5405,95 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
   ok("V2.5 Policy", jiraProjectKeyForWorkItem(jiraItem()) === "JPMC", "the Jira project key is derived from the WorkItem's own projectId FK, no second lookup");
   ok("V2.5 Policy", jiraProjectKeyForWorkItem(jiraItem({ sourceType: undefined })) === undefined, "a non-Jira item has no Jira project key");
 
-  // Project isolation (§37-38, §5): the SAME raw status string classified differently in
-  // two different projects must never leak across them.
-  const twoProjectIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" }, UBS: { "Ready for UAT/Business Test": "ACTIONABLE" } }));
-  ok("V2.5 Project isolation", resolveWorkRelevance(jiraItem({ projectId: "jira-project-JPMC" }), twoProjectIdx) === "OBSERVE", "JPMC's own classification of the status applies to JPMC");
+  // V2.11 §1 — GLOBAL policy: the SAME raw status string classified ONCE must apply
+  // identically across every project — this reverses the V2.5-V2.8 "project isolation"
+  // premise by explicit product decision (see the fix prompt's Task 1).
+  const globalIdx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE" }));
+  ok("V2.11 Global policy", resolveWorkRelevance(jiraItem({ projectId: "jira-project-JPMC" }), globalIdx) === "OBSERVE", "JPMC resolves the one shared classification for this status");
   ok(
-    "V2.5 Project isolation",
-    resolveWorkRelevance(jiraItem({ projectId: "jira-project-UBS" }), twoProjectIdx) === "ACTIONABLE",
-    "the identical status string classified differently in UBS resolves independently — JPMC's OBSERVE classification never leaks into UBS"
+    "V2.11 Global policy",
+    resolveWorkRelevance(jiraItem({ projectId: "jira-project-UBS" }), globalIdx) === "OBSERVE",
+    "UBS's identical status string resolves to the SAME classification as JPMC's — a single classification now applies everywhere, never independently configurable per project"
   );
-  const wfUnclassifiedIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
   ok(
-    "V2.5 Project isolation",
-    resolveWorkRelevance(jiraItem({ projectId: "jira-project-WF" }), wfUnclassifiedIdx) === "UNKNOWN",
-    "a third project (WF) with no policy of its own is UNKNOWN, unaffected by JPMC's configured policy"
+    "V2.11 Global policy",
+    resolveWorkRelevance(jiraItem({ projectId: "jira-project-WF" }), globalIdx) === "OBSERVE",
+    "a third project (WF) that has never been separately configured still resolves the same shared classification — there is no per-project fallback to UNKNOWN anymore"
   );
 }
 
 // ----- Malformed / missing policy state must never throw (§26, §29) -----
 {
-  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(undefined)).length === 0, "undefined policy state parses to an empty map rather than crashing");
-  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(null)).length === 0, "null policy state parses to an empty map");
-  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap("garbage")).length === 0, "a wrong-typed (string) policy value parses to an empty map rather than crashing");
-  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(42)).length === 0, "a wrong-typed (number) policy value parses to an empty map");
-  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap([])).length === 0, "a wrong-typed (array) policy value parses to an empty map");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(undefined).policy).length === 0, "undefined policy state parses to an empty map rather than crashing");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(null).policy).length === 0, "null policy state parses to an empty map");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap("garbage").policy).length === 0, "a wrong-typed (string) policy value parses to an empty map rather than crashing");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap(42).policy).length === 0, "a wrong-typed (number) policy value parses to an empty map");
+  ok("V2.5 Backward compatibility", Object.keys(parseWorkRelevancePolicyMap([]).policy).length === 0, "a wrong-typed (array) policy value parses to an empty map");
 
+  // V2.11 §1 — an already-global (new-shape) blob just parses directly, no migration.
+  const alreadyGlobal = parseWorkRelevancePolicyMap({ "To Do": "ACTIONABLE", "Bad Value": "NOT_A_REAL_RELEVANCE" });
+  ok("V2.11 Global policy", alreadyGlobal.policy["To Do"] === "ACTIONABLE", "a well-formed global entry parses correctly");
+  ok("V2.11 Global policy", alreadyGlobal.policy["Bad Value"] === undefined, "an invalid WorkRelevance value is dropped, never trusted as-is");
+  ok("V2.11 Global policy", alreadyGlobal.migration === undefined, "an already-global blob never triggers a migration notice");
+
+  // V2.11 §1 migration — an old per-project blob with malformed siblings still migrates
+  // safely: blank project key dropped, non-object project value dropped, non-object
+  // statusMap contributing zero statuses, invalid relevance value dropped.
   const messy = parseWorkRelevancePolicyMap({
     JPMC: { projectKey: "JPMC", statusMap: { "To Do": "ACTIONABLE", "Bad Value": "NOT_A_REAL_RELEVANCE", 42: "WAITING" } },
     "": { statusMap: { "To Do": "ACTIONABLE" } }, // blank project key — dropped
     UBS: "not-an-object", // dropped entirely
-    WF: { statusMap: "not-an-object" }, // survives as an empty statusMap
+    WF: { statusMap: "not-an-object" }, // survives as contributing zero statuses
   });
-  ok("V2.5 Backward compatibility", messy.JPMC?.statusMap["To Do"] === "ACTIONABLE", "a well-formed entry survives parsing alongside malformed siblings");
-  ok("V2.5 Backward compatibility", messy.JPMC?.statusMap["Bad Value"] === undefined, "an invalid WorkRelevance value is dropped, never trusted as-is");
-  ok("V2.5 Backward compatibility", Object.keys(messy).includes("") === false, "a blank project key is dropped");
-  ok("V2.5 Backward compatibility", messy.UBS === undefined, "a non-object project policy value is dropped entirely rather than crashing");
-  ok("V2.5 Backward compatibility", messy.WF !== undefined && Object.keys(messy.WF.statusMap).length === 0, "a non-object statusMap degrades to an empty map rather than crashing");
+  ok("V2.11 Global policy", messy.policy["To Do"] === "ACTIONABLE", "a well-formed status survives migration alongside malformed siblings");
+  ok("V2.11 Global policy", messy.policy["Bad Value"] === undefined, "an invalid WorkRelevance value is dropped, never trusted as-is");
+  ok("V2.11 Global policy", messy.migration !== undefined && messy.migration.fromProjectCount === 2, "migration counts only the well-formed project entries (JPMC, WF) — the blank key and non-object UBS value are not real projects");
+
+  // V2.11 §1 migration — the actual scenario this fix is for: 3 projects set the SAME
+  // status to 3 different relevance values; must migrate to exactly one, deterministically,
+  // and never throw. JPMC has the most classified statuses (2) so its value wins.
+  const threeWayConflict = parseWorkRelevancePolicyMap({
+    JPMC: { statusMap: { "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE" } },
+    UBS: { statusMap: { "Ready for UAT/Business Test": "ACTIONABLE" } },
+    MASTERCARD: { statusMap: { "Ready for UAT/Business Test": "WAITING" } },
+  });
+  ok("V2.11 Global policy", threeWayConflict.policy["Ready for UAT/Business Test"] === "OBSERVE", "a status set to 3 different values across 3 projects migrates to exactly one value, deterministically (most-classified project wins)");
+  ok("V2.11 Global policy", threeWayConflict.policy["To Do"] === "ACTIONABLE", "an unambiguous status (only JPMC classified it) migrates through untouched");
+  ok("V2.11 Global policy", threeWayConflict.migration?.fromProjectCount === 3, "migration reports the real number of pre-upgrade projects");
+  ok(
+    "V2.11 Global policy",
+    threeWayConflict.migration?.collapsedStatuses.includes("Ready for UAT/Business Test") === true && threeWayConflict.migration?.collapsedStatuses.includes("To Do") === false,
+    "only the genuinely conflicting status is reported as collapsed — the unambiguous one is not"
+  );
 
   // parseStoredState — a pre-V2.5 blob has no jiraWorkRelevancePolicy key at all.
   const preV25Blob = JSON.stringify({ schemaVersion: 5, data: emptyData(), loaded: true, isDemo: false, dataSource: "jira", jiraSync: { lastSyncStatus: "success" } });
   const migrated = parseStoredState(preV25Blob);
   ok("V2.5 Backward compatibility", Object.keys(migrated.jiraWorkRelevancePolicy).length === 0, "a pre-V2.5 stored blob with no jiraWorkRelevancePolicy key loads with the safe empty default");
   ok("V2.5 Backward compatibility", migrated.dataSource === "jira" && migrated.jiraSync.lastSyncStatus === "success", "every other pre-V2.5 field still loads unchanged alongside the new default policy");
+  ok("V2.11 Global policy", migrated.workRelevancePolicyMigrationNotice === undefined, "no migration notice is generated when there was no prior policy at all to migrate");
 
   const malformedBlob = JSON.stringify({ ...JSON.parse(preV25Blob), jiraWorkRelevancePolicy: "not-an-object" });
   ok("V2.5 Backward compatibility", Object.keys(parseStoredState(malformedBlob).jiraWorkRelevancePolicy).length === 0, "a malformed jiraWorkRelevancePolicy value never crashes parseStoredState");
+
+  // V2.11 §1 — the actual upgrade path end-to-end through parseStoredState: a real
+  // pre-V2.11 per-project blob round-trips into the new global shape with a migration
+  // notice attached, ready for Data & Settings to show its one-time notice.
+  const preV211Blob = JSON.stringify({
+    ...JSON.parse(preV25Blob),
+    jiraWorkRelevancePolicy: {
+      JPMC: { projectKey: "JPMC", statusMap: { "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE" } },
+      UBS: { projectKey: "UBS", statusMap: { "Ready for UAT/Business Test": "ACTIONABLE" } },
+    },
+  });
+  const upgraded = parseStoredState(preV211Blob);
+  ok("V2.11 Global policy", upgraded.jiraWorkRelevancePolicy["To Do"] === "ACTIONABLE", "an unambiguous status survives the full parseStoredState upgrade path");
+  ok("V2.11 Global policy", upgraded.workRelevancePolicyMigrationNotice?.fromProjectCount === 2, "parseStoredState surfaces the migration notice for Data & Settings to show");
 }
 
 // ----- Personal Focus / action-plan gating (§10-11, §29 Personal Focus + Ownership) -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE", "Waiting for Client": "WAITING", Done: "COMPLETED", "Pending PCI Evidence": "EXCLUDED", "To Do": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE", "Waiting for Client": "WAITING", Done: "COMPLETED", "Pending PCI Evidence": "EXCLUDED", "To Do": "ACTIONABLE" }));
 
   // §11 Critical Example — even a HIGH priority item explicitly OWNED by the configured
   // identity must never become a personal task when its status is OBSERVE. Ownership must
@@ -5415,7 +5543,7 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 // ----- Attention: non-actionable status never creates attention merely by existing, but
 // existing risk/dependency/decision attention is never broken by this feature (§14, §29). -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE" }));
   const blockedObserveItem = jiraItem({ id: "wi-risk-observe", key: "JPMC-200", jiraStatusName: "Ready for UAT/Business Test", blocked: true, blockerReason: "Flagged", lastUpdated: "2026-05-01" });
   const data = { ...emptyData(), workItems: [blockedObserveItem] };
   const risks = detectRisks(data, TODAY);
@@ -5431,7 +5559,7 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 {
   // "Pending PCI Evidence" is deliberately left out of the map so it exercises the real
   // unmapped/UNKNOWN path below.
-  const realIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE", "Waiting for Client": "WAITING" } }));
+  const realIdx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE", "Waiting for Client": "WAITING" }));
 
   const uat1 = jiraItem({ id: "wi-uat-1", key: "JPMC-300", title: "Coverage report", jiraStatusName: "Ready for UAT/Business Test" });
   const uat2 = jiraItem({ id: "wi-uat-2", key: "JPMC-301", title: "Another UAT item", jiraStatusName: "Ready for UAT/Business Test" });
@@ -5470,7 +5598,7 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 
 // ----- Trust / explainability (§18, §29) -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE" }));
   const observeExplanation = explainWorkItemRelevance(jiraItem({ key: "JPMC-400" }), idx);
   ok("V2.5 Trust", observeExplanation.isApplicable && observeExplanation.relevance === "OBSERVE", "explainWorkItemRelevance reports the real classification");
   ok("V2.5 Trust", observeExplanation.answer.includes("JPMC-400") && observeExplanation.answer.includes("Ready for UAT/Business Test") && observeExplanation.answer.includes("OBSERVE"), "the explanation names the real issue key, real status, and real classification — deterministic, not AI-generated");
@@ -5485,16 +5613,22 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 }
 
 // ----- Data Health / unclassified-status signal (§19) -----
+// V2.11 §1 — global: an unclassified status counts once no matter how many projects
+// observe it, since classifying it once fixes it everywhere.
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
   const items = [jiraItem({ id: "a", jiraStatusName: "To Do" }), jiraItem({ id: "b", jiraStatusName: "Some Unmapped Status" }), jiraItem({ id: "c", projectId: "jira-project-UBS", jiraStatusName: "Some Unmapped Status" })];
   const data = { ...emptyData(), workItems: items };
-  ok("V2.5 Data Health", countUnclassifiedJiraStatuses(data, idx) === 2, "counts distinct (project, status) UNKNOWN pairs — JPMC's and UBS's identical status string count as two separate unclassified entries, never deduped across projects");
+  ok(
+    "V2.11 Global policy",
+    countUnclassifiedJiraStatuses(data, idx) === 1,
+    "counts distinct UNKNOWN status NAMES — JPMC's and UBS's identical unmapped status string count as ONE unclassified entry, not two, since classifying it once would fix it everywhere"
+  );
   const rows = listUnclassifiedJiraStatuses(data, idx);
-  ok("V2.5 Data Health", rows.some((r) => r.projectKey === "JPMC" && r.status === "Some Unmapped Status") && rows.some((r) => r.projectKey === "UBS"), "listUnclassifiedJiraStatuses reports each project's own unclassified status separately");
+  ok("V2.11 Global policy", rows.length === 1 && rows[0].status === "Some Unmapped Status", "listUnclassifiedJiraStatuses reports the shared unclassified status once, globally");
 
   const health = computeDataHealth(data, "jira", undefined, undefined, idx);
-  ok("V2.5 Data Health", health.unclassifiedJiraStatusCount === 2, "computeDataHealth surfaces the same count");
+  ok("V2.11 Global policy", health.unclassifiedJiraStatusCount === 1, "computeDataHealth surfaces the same global count");
   ok(
     "V2.5 Data Health",
     (health.remediation ?? []).some((r) => r.dimension === "Unclassified Jira statuses"),
@@ -5509,34 +5643,27 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 }
 
 // ----- Store: setJiraStatusRelevance, persistence, no memory-event noise (§23) -----
+// V2.11 §1 — global: setJiraStatusRelevance no longer takes a projectKey at all.
 {
   commandCenterStore.resetAll();
   commandCenterStore.loadDemoData();
   const beforeMemory = JSON.stringify(commandCenterStore.getSnapshot().memoryEvents);
 
-  commandCenterStore.setJiraStatusRelevance("JPMC", "Ready for UAT/Business Test", "OBSERVE");
+  commandCenterStore.setJiraStatusRelevance("Ready for UAT/Business Test", "OBSERVE");
   const afterFirst = commandCenterStore.getSnapshot();
-  ok("V2.5 Store", afterFirst.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE", "setJiraStatusRelevance persists the classification for the given project/status");
+  ok("V2.5 Store", afterFirst.jiraWorkRelevancePolicy["Ready for UAT/Business Test"] === "OBSERVE", "setJiraStatusRelevance persists the classification for the given status");
   ok("V2.5 Store", JSON.stringify(afterFirst.memoryEvents) === beforeMemory, "classifying a status is configuration, not a delivery event — no memory event is emitted (§23)");
 
-  commandCenterStore.setJiraStatusRelevance("JPMC", "To Do", "ACTIONABLE");
+  commandCenterStore.setJiraStatusRelevance("To Do", "ACTIONABLE");
   const afterSecond = commandCenterStore.getSnapshot();
   ok(
     "V2.5 Store",
-    afterSecond.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE" && afterSecond.jiraWorkRelevancePolicy.JPMC?.statusMap["To Do"] === "ACTIONABLE",
-    "classifying a second status for the same project preserves the first classification (statusMap merges, never replaces)"
+    afterSecond.jiraWorkRelevancePolicy["Ready for UAT/Business Test"] === "OBSERVE" && afterSecond.jiraWorkRelevancePolicy["To Do"] === "ACTIONABLE",
+    "classifying a second status preserves the first classification (the map merges, never replaces)"
   );
 
-  commandCenterStore.setJiraStatusRelevance("UBS", "Ready for UAT/Business Test", "ACTIONABLE");
-  const afterThird = commandCenterStore.getSnapshot();
-  ok(
-    "V2.5 Store",
-    afterThird.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE" && afterThird.jiraWorkRelevancePolicy.UBS?.statusMap["Ready for UAT/Business Test"] === "ACTIONABLE",
-    "classifying UBS's copy of the same status string never mutates JPMC's own classification — project isolation holds through the store too"
-  );
-
-  const roundTrip = parseStoredState(JSON.stringify(afterThird));
-  ok("V2.5 Store", roundTrip.jiraWorkRelevancePolicy.JPMC?.statusMap["Ready for UAT/Business Test"] === "OBSERVE", "the policy round-trips through JSON serialization/parseStoredState unchanged");
+  const roundTrip = parseStoredState(JSON.stringify(afterSecond));
+  ok("V2.5 Store", roundTrip.jiraWorkRelevancePolicy["Ready for UAT/Business Test"] === "OBSERVE", "the policy round-trips through JSON serialization/parseStoredState unchanged");
 
   commandCenterStore.resetAll();
 }
@@ -5554,9 +5681,8 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 
 // ----- Performance (§28): Map-based O(1) lookups, no O(n × numberOfStatuses) blowup. -----
 {
-  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF${i}`);
   const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
-  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigPolicy = globalPolicy(Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]])));
   const bigIndex = buildWorkRelevanceIndex(bigPolicy);
 
   for (const size of [100, 500, 2000]) {
@@ -5577,7 +5703,7 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 
 // ----- Status coverage arithmetic (§3-4, §26 coverage: full / partial / zero / no data) -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" }));
   const items = [
     jiraItem({ id: "a", jiraStatusName: "To Do" }),
     jiraItem({ id: "b", jiraStatusName: "Ready for UAT/Business Test" }),
@@ -5585,63 +5711,74 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
   ];
   const data = { ...emptyData(), workItems: items };
 
-  const partial = computeStatusCoverage(data, idx, "JPMC");
-  ok("V2.6 Coverage", partial.observedStatusCount === 3 && partial.classifiedStatusCount === 2 && partial.unclassifiedStatusCount === 1, "computeStatusCoverage counts observed/classified/unclassified statuses correctly");
+  const partial = computeOverallWorkRelevanceCoverage(data, idx, ["JPMC"]);
+  ok("V2.6 Coverage", partial.observedStatusCount === 3 && partial.classifiedStatusCount === 2 && partial.unclassifiedStatusCount === 1, "computeOverallWorkRelevanceCoverage counts observed/classified/unclassified statuses correctly");
   ok("V2.6 Coverage", partial.coveragePct === 67, "coverage percentage is deterministic rounded arithmetic (2/3 = 67%), never a blended score");
   ok("V2.6 Coverage", partial.state === "PARTIALLY_CLASSIFIED", "2 of 3 classified is PARTIALLY_CLASSIFIED");
 
-  const fullyIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE", Blocked: "WAITING" } }));
-  const full = computeStatusCoverage(data, fullyIdx, "JPMC");
+  const fullyIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE", Blocked: "WAITING" }));
+  const full = computeOverallWorkRelevanceCoverage(data, fullyIdx, ["JPMC"]);
   ok("V2.6 Coverage", full.state === "FULLY_CLASSIFIED" && full.coveragePct === 100, "every observed status classified is FULLY_CLASSIFIED at 100%");
 
   const zeroIdx = buildWorkRelevanceIndex({});
-  const zero = computeStatusCoverage(data, zeroIdx, "JPMC");
-  ok("V2.6 Coverage", zero.state === "NOT_CLASSIFIED" && zero.coveragePct === 0 && zero.classifiedStatusCount === 0, "an entirely unclassified project (observed statuses exist, none mapped) is NOT_CLASSIFIED at 0%");
+  const zero = computeOverallWorkRelevanceCoverage(data, zeroIdx, ["JPMC"]);
+  ok("V2.6 Coverage", zero.state === "NOT_CLASSIFIED" && zero.coveragePct === 0 && zero.classifiedStatusCount === 0, "an entirely unclassified scope (observed statuses exist, none mapped) is NOT_CLASSIFIED at 0%");
 
-  const noData = computeStatusCoverage({ ...emptyData() }, idx, "GHOST");
-  ok("V2.6 Coverage", noData.state === "NO_JIRA_DATA" && noData.observedStatusCount === 0, "a project with no observed statuses at all is NO_JIRA_DATA, never NOT_CLASSIFIED (§4)");
+  const noData = computeOverallWorkRelevanceCoverage({ ...emptyData() }, idx, ["GHOST"]);
+  ok("V2.6 Coverage", noData.state === "NO_JIRA_DATA" && noData.observedStatusCount === 0, "a scope with no observed statuses at all is NO_JIRA_DATA, never NOT_CLASSIFIED (§4)");
 
   // §10 — overall coverage across every project, optionally scoped to Focus Projects.
+  // V2.11 §1 — global: a status observed in two different projects is the SAME status now,
+  // counted once, not once per project (JPMC's "To Do" and UBS's "To Do" are identical).
   const twoProjectItems = [...items, jiraItem({ id: "d", projectId: "jira-project-UBS", jiraStatusName: "To Do" })];
   const twoProjectData = { ...emptyData(), workItems: twoProjectItems };
   const overallAll = computeOverallWorkRelevanceCoverage(twoProjectData, idx);
-  ok("V2.6 Coverage", overallAll.observedStatusCount === 4, "overall coverage (ALL scope) counts distinct (project, status) pairs across every project — JPMC's 3 plus UBS's own 'To Do'");
-  const overallFocused = computeOverallWorkRelevanceCoverage(twoProjectData, idx, ["JPMC"]);
-  ok("V2.6 Coverage", overallFocused.observedStatusCount === 3, "overall coverage narrowed to Focus Projects (['JPMC']) excludes UBS's status entirely — never leaks scope");
+  ok("V2.11 Global policy", overallAll.observedStatusCount === 3, "overall coverage counts distinct STATUS NAMES across every project — UBS's 'To Do' is the same status as JPMC's, not double-counted");
+  const overallFocused = computeOverallWorkRelevanceCoverage(twoProjectData, idx, ["UBS"]);
+  ok("V2.11 Global policy", overallFocused.observedStatusCount === 1, "overall coverage narrowed to Focus Projects (['UBS']) counts only UBS's own OBSERVED vocabulary ('To Do') — scoping still applies to what's observed, even though classification itself is global");
 
   const emptyOverall = computeOverallWorkRelevanceCoverage({ ...emptyData() }, idx);
   ok("V2.6 Coverage", emptyOverall.state === "NO_JIRA_DATA", "no Jira data at all is honestly reported as NO_JIRA_DATA, not 0% classified");
 }
 
 // ----- Policy Change Impact Preview: deterministic affected-item counts (§8-9) -----
+// V2.11 §1 — global: a policy change now affects every project's items in that status, so
+// countOpenItemsForStatus is no longer scoped to one project.
 {
   const items = [
     jiraItem({ id: "a", key: "JPMC-1", jiraStatusName: "Ready for UAT/Business Test" }),
     jiraItem({ id: "b", key: "JPMC-2", jiraStatusName: "Ready for UAT/Business Test" }),
     jiraItem({ id: "c", key: "JPMC-3", jiraStatusName: "Ready for UAT/Business Test", status: "Done" }), // closed — excluded
     jiraItem({ id: "d", key: "JPMC-4", jiraStatusName: "Waiting for Client" }),
-    jiraItem({ id: "e", key: "UBS-1", projectId: "jira-project-UBS", jiraStatusName: "Ready for UAT/Business Test" }), // different project
+    jiraItem({ id: "e", key: "UBS-1", projectId: "jira-project-UBS", jiraStatusName: "Ready for UAT/Business Test" }), // different project, same status
   ];
   const data = { ...emptyData(), workItems: items };
 
-  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "JPMC", "Ready for UAT/Business Test") === 2, "impact count is exactly the number of OPEN items matching the (project, status) pair — closed items excluded");
-  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "JPMC", "Waiting for Client") === 1, "impact count is scoped to the specific status, not every item in the project");
-  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "UBS", "Ready for UAT/Business Test") === 1, "impact count respects project isolation — the identical status string in a different project is counted separately");
-  ok("V2.6 Impact preview", countOpenItemsForProjectStatus(data, "JPMC", "Never Seen") === 0, "a status with no matching items yields 0, never a fabricated number");
+  ok(
+    "V2.11 Global policy",
+    countOpenItemsForStatus(data, "Ready for UAT/Business Test") === 3,
+    "impact count is the number of OPEN items matching this status ACROSS EVERY PROJECT — JPMC's 2 plus UBS's 1, since a policy change now applies everywhere; the closed item is excluded"
+  );
+  ok("V2.6 Impact preview", countOpenItemsForStatus(data, "Waiting for Client") === 1, "impact count is scoped to the specific status, not every item");
+  ok("V2.6 Impact preview", countOpenItemsForStatus(data, "Never Seen") === 0, "a status with no matching items yields 0, never a fabricated number");
 }
 
 // ----- listStatusesByRelevance: generalizes the V2.5 UNKNOWN-only listing (§17) -----
+// V2.11 §1 — global: one row per distinct STATUS NAME, never one per (project, status) pair.
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" }, UBS: { "To Do": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" }));
   const items = [jiraItem({ id: "a", jiraStatusName: "To Do" }), jiraItem({ id: "b", jiraStatusName: "Ready for UAT/Business Test" }), jiraItem({ id: "c", projectId: "jira-project-UBS", jiraStatusName: "To Do" })];
   const data = { ...emptyData(), workItems: items };
 
   const actionableRows = listStatusesByRelevance(data, idx, "ACTIONABLE");
-  ok("V2.6 Status listing", actionableRows.length === 2, "listStatusesByRelevance(ACTIONABLE) returns each project's own ACTIONABLE status once, never deduped across projects");
-  ok("V2.6 Status listing", actionableRows.some((r) => r.projectKey === "JPMC" && r.status === "To Do") && actionableRows.some((r) => r.projectKey === "UBS" && r.status === "To Do"), "the same status string classified ACTIONABLE in two projects is reported as two independent rows");
+  ok(
+    "V2.11 Global policy",
+    actionableRows.length === 1 && actionableRows[0].status === "To Do",
+    "listStatusesByRelevance(ACTIONABLE) returns 'To Do' exactly once, even though it's observed on both JPMC and UBS items — the policy is global, so it's one status, not two rows"
+  );
 
   const observeRows = listStatusesByRelevance(data, idx, "OBSERVE");
-  ok("V2.6 Status listing", observeRows.length === 1 && observeRows[0].projectKey === "JPMC", "listStatusesByRelevance(OBSERVE) returns only the OBSERVE-classified row");
+  ok("V2.6 Status listing", observeRows.length === 1 && observeRows[0].status === "Ready for UAT/Business Test", "listStatusesByRelevance(OBSERVE) returns only the OBSERVE-classified row");
 
   // listUnclassifiedJiraStatuses must still behave identically after being rewritten as a thin wrapper.
   const unclassified = listUnclassifiedJiraStatuses(data, idx);
@@ -5655,7 +5792,7 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
     jiraItem({ id: "b", key: "JPMC-501", title: "UAT coverage", jiraStatusName: "Ready for UAT/Business Test" }),
   ];
   const cbData = { ...emptyData(), workItems: items };
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", "Ready for UAT/Business Test": "OBSERVE" }));
   const derived = deriveData(cbData, null, TODAY);
 
   ok("V2.6 Command Bar", classifyQuery("Which statuses are actionable?", cbData).intent === "jira-statuses-actionable", "'which statuses are actionable?' routes to the new jira-statuses-actionable intent");
@@ -5681,9 +5818,8 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 
 // ----- Performance (§23/§28): coverage/impact calculations use Map-based indexes, no O(n²). -----
 {
-  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF${i}`);
   const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
-  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigPolicy = globalPolicy(Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]])));
   const bigIndex = buildWorkRelevanceIndex(bigPolicy);
 
   for (const size of [100, 500, 2000]) {
@@ -5694,12 +5830,12 @@ function policyMap(entries: Record<string, Record<string, WorkRelevance>>): Reco
 
     const start = Date.now();
     const overall = computeOverallWorkRelevanceCoverage(perfData, bigIndex);
-    const perProject = computeStatusCoverage(perfData, bigIndex, "PERF0");
-    const impact = countOpenItemsForProjectStatus(perfData, "PERF0", "Status 0");
+    const scoped = computeOverallWorkRelevanceCoverage(perfData, bigIndex, ["PERF0"]);
+    const impact = countOpenItemsForStatus(perfData, "Status 0");
     const elapsedMs = Date.now() - start;
 
     ok("V2.6 Performance", elapsedMs < 2000, `coverage + impact calculations over ${size} Jira work items complete well within a generous bound (${elapsedMs}ms)`);
-    ok("V2.6 Performance", overall.observedStatusCount > 0 && perProject.observedStatusCount > 0 && impact >= 0, `coverage/impact results over ${size} items are well-formed, not degenerate`);
+    ok("V2.6 Performance", overall.observedStatusCount > 0 && scoped.observedStatusCount > 0 && impact >= 0, `coverage/impact results over ${size} items are well-formed, not degenerate`);
   }
 }
 
@@ -5711,7 +5847,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
 // ----- §4 Distribution: counts per relevance, project breakdown -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Waiting for Client": "WAITING", "Ready for UAT/Business Test": "OBSERVE", Done: "COMPLETED" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", "Waiting for Client": "WAITING", "Ready for UAT/Business Test": "OBSERVE", Done: "COMPLETED" }));
   const items = [
     jiraItem({ id: "a", jiraStatusName: "To Do" }),
     jiraItem({ id: "b", jiraStatusName: "To Do" }),
@@ -5719,7 +5855,9 @@ function calAction(overrides: Partial<Action> = {}): Action {
     jiraItem({ id: "d", jiraStatusName: "Ready for UAT/Business Test" }),
     jiraItem({ id: "e", jiraStatusName: "Done", status: "Done" }),
     jiraItem({ id: "f", jiraStatusName: "Never Classified" }), // UNKNOWN
-    jiraItem({ id: "g", projectId: "jira-project-UBS", jiraStatusName: "To Do" }), // no UBS policy at all
+    // V2.11 §1 — "To Do" is now classified globally, so a status UBS observes that nobody
+    // has EVER classified (not just "not classified for UBS") is the one that stays UNKNOWN.
+    jiraItem({ id: "g", projectId: "jira-project-UBS", jiraStatusName: "Something Nobody Classified" }),
   ];
   const data = { ...emptyData(), workItems: items };
   const rows = computeWorkRelevanceDistribution(data, idx);
@@ -5729,7 +5867,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
   ok("V2.7 Distribution", jpmc.counts.ACTIONABLE === 2 && jpmc.counts.WAITING === 1 && jpmc.counts.OBSERVE === 1 && jpmc.counts.COMPLETED === 1 && jpmc.counts.UNKNOWN === 1, "JPMC's counts match the real classified data exactly, including a Done/COMPLETED item and an UNKNOWN one");
   ok("V2.7 Distribution", jpmc.totalItems === 6, "totalItems is the sum across every relevance bucket for that project");
   const ubs = rows.find((r) => r.projectKey === "UBS")!;
-  ok("V2.7 Distribution", ubs.counts.UNKNOWN === 1 && ubs.totalItems === 1, "UBS (no policy configured at all) reports its item as UNKNOWN, never guessed from JPMC's policy");
+  ok("V2.7 Distribution", ubs.counts.UNKNOWN === 1 && ubs.totalItems === 1, "UBS's status (never classified by anyone) reports UNKNOWN — distribution is still counted per-project even though the policy itself is global");
 
   const scoped = computeWorkRelevanceDistribution(data, idx, ["JPMC"]);
   ok("V2.7 Distribution", scoped.length === 1 && scoped[0].projectKey === "JPMC", "narrowing to Focus Projects (['JPMC']) excludes UBS entirely — never leaks scope");
@@ -5737,7 +5875,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
 // ----- §5 Actionable calibration: candidate pool / acted-on / completed evidence -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
   const untouched = jiraItem({ id: "act-1", key: "JPMC-1", jiraStatusName: "To Do", businessImpact: 1, priority: "P4" }); // low score -> may not enter pool
   const highScore = jiraItem({ id: "act-2", key: "JPMC-2", jiraStatusName: "To Do", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY }); // high score -> enters pool
   const actedOn = jiraItem({ id: "act-3", key: "JPMC-3", jiraStatusName: "To Do", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
@@ -5755,7 +5893,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
   ok("V2.7 Actionable calibration", result.candidatePoolCount >= result.actedOnCount - 1, "candidatePoolCount is derived from the real, reused action-plan.ts buildCandidates() — not reimplemented scoring");
 
   // A single ACTIONABLE item with zero action evidence and not enough volume for a signal.
-  const noEvidenceIdx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const noEvidenceIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
   const noEvidenceData = { ...emptyData(), workItems: [jiraItem({ id: "solo", jiraStatusName: "To Do" })], actions: [] };
   const soloResult = computeActionableCalibration(noEvidenceData, noEvidenceIdx, TODAY);
   ok("V2.7 Actionable calibration", soloResult.actionableItemCount === 1 && soloResult.actedOnCount === 0 && soloResult.completedCount === 0, "no action evidence at all is reported as zero, never estimated");
@@ -5763,7 +5901,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
 // ----- §6 Observe calibration: OBSERVE items stay outside the candidate pool -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE" }));
   const observeItems = [
     jiraItem({ id: "obs-1", jiraStatusName: "Ready for UAT/Business Test", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY, owner: "Minh Tran" }),
     jiraItem({ id: "obs-2", jiraStatusName: "Ready for UAT/Business Test" }),
@@ -5782,7 +5920,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
 // ----- §7 Unknown visibility -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
   const items = [
     jiraItem({ id: "u1", jiraStatusName: "Some New Status" }),
     jiraItem({ id: "u2", jiraStatusName: "Some New Status" }),
@@ -5799,9 +5937,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
 // ----- §8-11 Policy Review Signals: REVIEW / NONE / INSUFFICIENT_EVIDENCE -----
 {
   const idx = buildWorkRelevanceIndex(
-    policyMap({
-      JPMC: { "To Do": "ACTIONABLE", "Ready for Prod Release": "OBSERVE", "Almost Never Seen": "WAITING", "Well Behaved": "ACTIONABLE" },
-    })
+    globalPolicy({ "To Do": "ACTIONABLE", "Ready for Prod Release": "OBSERVE", "Almost Never Seen": "WAITING", "Well Behaved": "ACTIONABLE" })
   );
 
   // Signal A — OBSERVE status with repeated (>=2) explicit Action evidence -> REVIEW.
@@ -5862,9 +5998,12 @@ function calAction(overrides: Partial<Action> = {}): Action {
   ok("V2.7 Data Health", computeCalibrationHealthState([]) === "INSUFFICIENT_EVIDENCE", "no observed statuses at all is INSUFFICIENT_EVIDENCE, never HEALTHY");
 }
 
-// ----- §13 Project isolation: same status name, different projects, independent signals -----
+// ----- V2.11 §1 Global policy: same status name, different projects, SHARED policy and
+// SHARED calibration evidence pool. This block replaces the old "V2.7 Project isolation"
+// suite, which explicitly asserted the opposite (independent per-project signals) — the
+// exact premise V2.11 §1 intentionally reverses (see the fix prompt's Task 1 item 6). -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" }, UBS: { "Ready for Prod Release": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for Prod Release": "ACTIONABLE" }));
   const data = {
     ...emptyData(),
     workItems: [
@@ -5875,20 +6014,27 @@ function calAction(overrides: Partial<Action> = {}): Action {
       jiraItem({ id: "iso-5", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" }),
       jiraItem({ id: "iso-6", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" }),
     ],
-    actions: [calAction({ id: "iso-a1", relatedWorkItemId: "iso-1" }), calAction({ id: "iso-a2", relatedWorkItemId: "iso-2" })],
+    actions: [calAction({ id: "iso-a1", relatedWorkItemId: "iso-1" }), calAction({ id: "iso-a2", relatedWorkItemId: "iso-2" }), calAction({ id: "iso-a3", relatedWorkItemId: "iso-4" })],
   };
   const signals = computePolicyReviewSignals(data, idx);
-  const jpmcSignal = signals.find((s) => s.projectKey === "JPMC" && s.statusName === "Ready for Prod Release")!;
-  const ubsSignal = signals.find((s) => s.projectKey === "UBS" && s.statusName === "Ready for Prod Release")!;
-  ok("V2.7 Project isolation", jpmcSignal.currentRelevance === "OBSERVE" && ubsSignal.currentRelevance === "ACTIONABLE", "the identical raw status name carries independent policies per project");
-  ok("V2.7 Project isolation", jpmcSignal.signalType === "REVIEW", "JPMC's OBSERVE status with 2 linked Actions is REVIEW");
-  ok("V2.7 Project isolation", ubsSignal.signalType === "REVIEW", "UBS's ACTIONABLE status with zero linked Actions is independently REVIEW — for a completely different reason, never influenced by JPMC's evidence");
-  ok("V2.7 Project isolation", ubsSignal.actionEvidenceCount === 0, "UBS's own action evidence count is unaffected by JPMC's 2 linked Actions on the same raw status string");
+  ok(
+    "V2.11 Global policy",
+    signals.length === 1,
+    "the identical raw status name observed on both JPMC and UBS items produces exactly ONE PolicyReviewSignal row, never two — the policy (and its evidence pool) is shared, not per-project"
+  );
+  const signal = signals[0];
+  ok("V2.11 Global policy", signal.observedItemCount === 6, "observed item count is the sum across every project observing this status — JPMC's 3 plus UBS's 3");
+  ok(
+    "V2.11 Global policy",
+    signal.actionEvidenceCount === 3,
+    "an ACTIONABLE status with 2 linked Actions from JPMC and 1 from UBS reports 3 total linked Actions for that status, not 2 and 1 counted separately — the exact worked example from Task 1"
+  );
+  ok("V2.11 Global policy", signal.signalType === "NONE", "with real action evidence present across the combined pool, no REVIEW signal fires");
 }
 
 // ----- Explicit Actions remain intact / authoritative (§22) -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for UAT/Business Test": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE" }));
   const item = jiraItem({ id: "explicit-1", key: "JPMC-999", jiraStatusName: "Ready for UAT/Business Test" });
   const explicitAction: Action = { id: "explicit-action", title: "Confirm production release", why: "manual tracking", status: "open", estimateMinutes: 10, createdAt: TODAY, relatedWorkItemId: "explicit-1" };
   const data = { ...emptyData(), workItems: [item], actions: [explicitAction] };
@@ -5905,7 +6051,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
   // test documents that boundary: a demo-sourced item (sourceType !== "jira") is simply
   // NOT_APPLICABLE and contributes nothing to any V2.7 calculation, so even if a caller
   // forgot to gate the UI, no false ACTIONABLE/OBSERVE/etc. claim could be produced for it.
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
   const demoItem = makeItem({ id: "demo-1", sourceType: undefined, jiraStatusName: undefined });
   const data = { ...emptyData(), workItems: [demoItem] };
   const distribution = computeWorkRelevanceDistribution(data, idx);
@@ -5927,7 +6073,7 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
 // ----- Command Bar: new V2.7 intents + near-miss regression matrix (§19) -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "To Do": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" }));
   const items = [
     jiraItem({ id: "cb7-1", key: "JPMC-701", jiraStatusName: "To Do" }),
     jiraItem({ id: "cb7-2", key: "JPMC-702", jiraStatusName: "To Do" }),
@@ -5968,9 +6114,8 @@ function calAction(overrides: Partial<Action> = {}): Action {
 
 // ----- Performance (§25): 100 / 500 / 2000 items, Map-based grouping, no O(n²). -----
 {
-  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF7-${i}`);
   const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
-  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigPolicy = globalPolicy(Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]])));
   const bigIndex = buildWorkRelevanceIndex(bigPolicy);
 
   for (const size of [100, 500, 2000]) {
@@ -6022,7 +6167,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §5-6 Execution Path Trace: a full ACTIONABLE path (candidate -> plan -> action -> focus -> outcome) -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE" }));
   const item = jiraItem({ id: "exec-1", key: "JPMC-800", jiraStatusName: "In Progress", status: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY, owner: "Minh Tran" });
   const openAction = calAction({ id: "exec-action-1", relatedWorkItemId: "exec-1", status: "open" });
 
@@ -6057,7 +6202,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §5-6 OBSERVE item with an explicit Action: OBSERVE stays OBSERVE, Action stays intact -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for Prod Release": "OBSERVE" }));
   const item = jiraItem({ id: "exec-2", key: "JPMC-801", jiraStatusName: "Ready for Prod Release" });
   const explicitAction = calAction({ id: "exec-action-2", relatedWorkItemId: "exec-2" });
   const data = { ...emptyData(), workItems: [item], actions: [explicitAction] };
@@ -6071,7 +6216,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §4 Not enough evidence: proactive/personalFocus unavailable -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for Prod Release": "OBSERVE" }));
   const item = jiraItem({ id: "exec-3", key: "JPMC-802", jiraStatusName: "Ready for Prod Release" });
   const data = { ...emptyData(), workItems: [item] };
   const trace = computeExecutionPathTrace(item, data, TODAY, idx, null, null);
@@ -6096,7 +6241,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §7-8 ExecutionSurfaceExplanation: neutral, evidence-based, never causal -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" }));
   const forbidden = /policy is (wrong|incorrect)|should be (actionable|observe|waiting)|you failed|because you didn'?t/i;
 
   const selectedItem = jiraItem({ id: "why-1", key: "JPMC-810", jiraStatusName: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
@@ -6136,7 +6281,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §22 Explicit Actions remain authoritative through the trace -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for Prod Release": "OBSERVE" }));
   const item = jiraItem({ id: "explicit-exec-1", key: "JPMC-999", jiraStatusName: "Ready for Prod Release" });
   const explicitAction = { id: "explicit-action-exec", title: "Confirm production release", why: "manual tracking", status: "open" as const, estimateMinutes: 10, createdAt: TODAY, relatedWorkItemId: "explicit-exec-1" };
   const data = { ...emptyData(), workItems: [item], actions: [explicitAction] };
@@ -6146,7 +6291,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §10 Status-level execution path table + §11 Signal C -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE", "Blocked Investigation": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE", "Blocked Investigation": "ACTIONABLE", "Ready for Prod Release": "OBSERVE" }));
   const highScore = { businessImpact: 5 as const, priority: "P1" as const, blocked: true, dueDate: TODAY };
   const items = [
     jiraItem({ id: "st-1", key: "JPMC-900", jiraStatusName: "In Progress", ...highScore }),
@@ -6178,7 +6323,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §17 Command Bar helpers -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE" }));
   const eligible = jiraItem({ id: "cbh-1", key: "JPMC-950", jiraStatusName: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
   const notEligible = jiraItem({ id: "cbh-2", key: "JPMC-951", jiraStatusName: "In Progress", businessImpact: 1, priority: "P4" });
   const data = { ...emptyData(), workItems: [eligible, notEligible] };
@@ -6196,9 +6341,12 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.8 Command Bar helper", listJiraItemsInPersonalFocus(focusData, null, null).length === 0, "no proactive/personalFocus evidence yields an empty list, never a guess");
 }
 
-// ----- §18 Project isolation: identical status, different projects, independent connections -----
+// ----- V2.11 §1 Global policy + §18 FK isolation: identical status shares ONE relevance
+// across projects, but Risk/Attention FK connections are a completely separate concept and
+// stay correctly per-item regardless of policy globality. Replaces the old "V2.8 Project
+// isolation" block, whose first assertion asserted the now-reversed per-project premise. -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "Ready for Prod Release": "OBSERVE" }, UBS: { "Ready for Prod Release": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "Ready for Prod Release": "ACTIONABLE" }));
   const jpmcItem = jiraItem({ id: "iso-exec-1", key: "JPMC-960", projectId: "jira-project-JPMC", jiraStatusName: "Ready for Prod Release" });
   const ubsItem = jiraItem({ id: "iso-exec-2", key: "UBS-960", projectId: "jira-project-UBS", jiraStatusName: "Ready for Prod Release" });
   const jpmcRisk: Risk = { id: "iso-risk-jpmc", projectId: "proj-jpmc", title: "JPMC-only risk", level: "HIGH", reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: ["iso-exec-1"] };
@@ -6212,15 +6360,19 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   const jpmcTrace = computeExecutionPathTrace(jpmcItem, data, TODAY, idx, proactive, personalFocus);
   const ubsTrace = computeExecutionPathTrace(ubsItem, data, TODAY, idx, proactive, personalFocus);
 
-  ok("V2.8 Project isolation", jpmcTrace.relevance === "OBSERVE" && ubsTrace.relevance === "ACTIONABLE", "the identical raw status carries independent policies per project, exactly as V2.5/V2.7 already guarantee");
+  ok(
+    "V2.11 Global policy",
+    jpmcTrace.relevance === "ACTIONABLE" && ubsTrace.relevance === "ACTIONABLE",
+    "the identical raw status resolves to the SAME relevance for both JPMC's and UBS's item — the policy is global, not independently configurable per project"
+  );
   ok("V2.8 Project isolation", jpmcTrace.attention.presentInPersonalFocus === true, "JPMC's item is correctly connected to its own real risk/attention/focus evidence");
-  ok("V2.8 Project isolation", ubsTrace.attention.presentInPersonalFocus === false, "UBS's item is NOT connected to JPMC's risk evidence — no cross-project leakage via any foreign key");
+  ok("V2.8 Project isolation", ubsTrace.attention.presentInPersonalFocus === false, "UBS's item is NOT connected to JPMC's risk evidence — no cross-project leakage via any foreign key (unaffected by the policy becoming global — this is a completely separate FK-based mechanism)");
   ok("V2.8 Project isolation", ubsTrace.attention.connectedAttentionItems.length === 0, "UBS's connectedAttentionItems is empty — the FK chain (Risk.sourceWorkItemIds) never crosses items");
 }
 
 // ----- §21 Synthetic data structural safety: demo item never fabricates real behavior -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE" }));
   const demoItem = makeItem({ id: "synth-1", key: "DEMO-2", sourceType: undefined, jiraStatusName: undefined });
   const data = { ...emptyData(), workItems: [demoItem] };
   const trace = computeExecutionPathTrace(demoItem, data, TODAY, idx, null, null);
@@ -6242,7 +6394,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §17 Command Bar: new intents + near-miss regression matrix -----
 {
-  const idx = buildWorkRelevanceIndex(policyMap({ JPMC: { "In Progress": "ACTIONABLE" } }));
+  const idx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE" }));
   const item = jiraItem({ id: "cb8-1", key: "JPMC-980", jiraStatusName: "In Progress", businessImpact: 5, priority: "P1", blocked: true, dueDate: TODAY });
   const cbData = { ...emptyData(), workItems: [item] };
   const derived = deriveData(cbData, null, TODAY);
@@ -6269,9 +6421,8 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ----- §23 Performance: 100 / 500 / 2000 items, indexed relationships, no O(n²). -----
 {
-  const projectKeys = Array.from({ length: 20 }, (_, i) => `PERF8-${i}`);
   const statusNames = Array.from({ length: 30 }, (_, i) => `Status ${i}`);
-  const bigPolicy = policyMap(Object.fromEntries(projectKeys.map((pk) => [pk, Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]]))])));
+  const bigPolicy = globalPolicy(Object.fromEntries(statusNames.map((s, i) => [s, (["ACTIONABLE", "WAITING", "OBSERVE", "COMPLETED", "EXCLUDED"] as const)[i % 5]])));
   const bigIndex = buildWorkRelevanceIndex(bigPolicy);
 
   for (const size of [100, 500, 2000]) {

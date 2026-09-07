@@ -146,35 +146,39 @@ export function computeObserveCalibration(data: CommandCenterData, index: WorkRe
 // ===== §7 — Unknown Visibility =====
 
 export interface UnknownVisibilitySummary {
-  statusCount: number; // distinct (project, status) pairs currently UNKNOWN
+  statusCount: number; // distinct statuses currently UNKNOWN (V2.11 §1 — global, no project dimension)
   affectedItemCount: number; // open items carrying one of those statuses
 }
 
 export function computeUnknownVisibility(data: CommandCenterData, index: WorkRelevanceIndex, projectKeys?: string[]): UnknownVisibilitySummary {
-  const pairs = new Set<string>();
+  const statuses = new Set<string>();
   let affectedItemCount = 0;
   for (const item of jiraItemsInScope(data, projectKeys)) {
     if (item.status === "Done" || !item.jiraStatusName) continue;
     if (resolveWorkRelevance(item, index) !== "UNKNOWN") continue;
-    pairs.add(`${jiraProjectKeyForWorkItem(item)}::${item.jiraStatusName}`);
+    statuses.add(item.jiraStatusName);
     affectedItemCount++;
   }
-  return { statusCount: pairs.size, affectedItemCount };
+  return { statusCount: statuses.size, affectedItemCount };
 }
 
 // ===== §8-11 — Policy Review Signals / Status-Level Calibration Table =====
-// One PolicyReviewSignal row per observed (project, status) pair — doubles as both the
-// §10 status-level table and the §11 "PolicyReviewSignal" concept; there is no separate
-// architecture for these, by design (§37 scope discipline — one structure, two views).
+// One PolicyReviewSignal row per observed status — doubles as both the §10 status-level
+// table and the §11 "PolicyReviewSignal" concept; there is no separate architecture for
+// these, by design (§37 scope discipline — one structure, two views).
+//
+// V2.11 §1 — GLOBAL policy: grouped by status name alone, across every project. An
+// ACTIONABLE status with 2 linked Actions from one project and 1 from another now reports
+// 3 total candidates for that status, not two independent rows — the same raw status means
+// the same thing everywhere, so its evidence pool is shared too.
 
 export type PolicySignalType = "REVIEW" | "NONE" | "INSUFFICIENT_EVIDENCE";
 
 export interface PolicyReviewSignal {
-  projectKey: string;
   statusName: string;
   currentRelevance: WorkRelevance;
   observedItemCount: number;
-  actionEvidenceCount: number; // count of Actions linked to items in this (project, status) — not distinct items
+  actionEvidenceCount: number; // count of Actions linked to items in this status (any project) — not distinct items
   completionEvidenceCount: number; // of those linked Actions, how many are completed
   signalType: PolicySignalType;
   explanation: string;
@@ -198,18 +202,16 @@ function explainSignal(relevance: WorkRelevance, signalType: PolicySignalType, o
  *  own safety category, not folded into "review" language here. */
 export function computePolicyReviewSignals(data: CommandCenterData, index: WorkRelevanceIndex, projectKeys?: string[]): PolicyReviewSignal[] {
   const actionsByWorkItemId = buildActionsByWorkItemId(data);
-  const groups = new Map<string, { projectKey: string; statusName: string; relevance: WorkRelevance; items: WorkItem[] }>();
+  const groups = new Map<string, { statusName: string; relevance: WorkRelevance; items: WorkItem[] }>();
 
   for (const item of jiraItemsInScope(data, projectKeys)) {
     if (item.status === "Done" || !item.jiraStatusName) continue;
     const relevance = resolveWorkRelevance(item, index);
     if (relevance === "NOT_APPLICABLE" || relevance === "UNKNOWN") continue;
-    const projectKey = jiraProjectKeyForWorkItem(item)!;
-    const key = `${projectKey}::${item.jiraStatusName}`;
-    let group = groups.get(key);
+    let group = groups.get(item.jiraStatusName);
     if (!group) {
-      group = { projectKey, statusName: item.jiraStatusName, relevance, items: [] };
-      groups.set(key, group);
+      group = { statusName: item.jiraStatusName, relevance, items: [] };
+      groups.set(item.jiraStatusName, group);
     }
     group.items.push(item);
   }
@@ -231,7 +233,6 @@ export function computePolicyReviewSignals(data: CommandCenterData, index: WorkR
     }
 
     rows.push({
-      projectKey: group.projectKey,
       statusName: group.statusName,
       currentRelevance: group.relevance,
       observedItemCount,
@@ -242,7 +243,7 @@ export function computePolicyReviewSignals(data: CommandCenterData, index: WorkR
     });
   }
 
-  return rows.sort((a, b) => a.projectKey.localeCompare(b.projectKey) || a.statusName.localeCompare(b.statusName));
+  return rows.sort((a, b) => a.statusName.localeCompare(b.statusName));
 }
 
 // ===== §12 — Data Health integration state =====

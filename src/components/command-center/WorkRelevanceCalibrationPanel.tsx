@@ -57,12 +57,13 @@ export function WorkRelevanceCalibrationPanel({
   const signals = useMemo(() => (isSyntheticData ? [] : computePolicyReviewSignals(data, workRelevanceIndex, projectKeys)), [isSyntheticData, data, workRelevanceIndex, projectKeys]);
   const reviewSignals = signals.filter((s) => s.signalType === "REVIEW");
   // V2.8 §10 — extends the SAME status table with Candidates/Outcomes columns rather than
-  // a parallel table; keyed the same way (project::status) so it merges cleanly below.
+  // a parallel table; V2.11 §1 keyed by status name alone (global policy), so it merges
+  // cleanly below.
   const executionPathRows = useMemo(
     () => (isSyntheticData ? [] : computeExecutionPathStatusTable(data, workRelevanceIndex, today, projectKeys)),
     [isSyntheticData, data, workRelevanceIndex, today, projectKeys]
   );
-  const executionPathByKey = useMemo(() => new Map(executionPathRows.map((r) => [`${r.projectKey}::${r.statusName}`, r])), [executionPathRows]);
+  const executionPathByKey = useMemo(() => new Map(executionPathRows.map((r) => [r.statusName, r])), [executionPathRows]);
   // V2.8 §11 Signal C — a distinct pipeline stage (candidate evaluation) from V2.7's Policy
   // Review Signals (action evidence); shown separately so the two never blur together.
   const candidateGapSignals = useMemo(
@@ -158,17 +159,19 @@ export function WorkRelevanceCalibrationPanel({
             </div>
           )}
 
-          {/* §10 — Status-level calibration table */}
+          {/* §10 — Status-level calibration table. V2.11 §1 — one row per status name,
+              aggregated across every project (the policy is global, so its evidence pool is
+              too — e.g. an ACTIONABLE status with 2 linked Actions from one project and 1
+              from another reports 3 total candidates for that status, not two rows). */}
           <div>
             <p className="mb-1 flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-text3">
               <TrustLabel kind="calculated" /> Status-level calibration
             </p>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] text-xs">
+              <table className="w-full min-w-[640px] text-xs">
                 <caption className="sr-only">Per-status calibration: policy, observed item count, candidate pool entries, linked personal Actions, completions, outcomes, and any review signal.</caption>
                 <thead>
                   <tr className="border-b border-border text-left text-text3">
-                    <th scope="col" className="py-1 pr-3 font-semibold">Project</th>
                     <th scope="col" className="py-1 pr-3 font-semibold">Status</th>
                     <th scope="col" className="py-1 pr-3 font-semibold">Policy</th>
                     <th scope="col" className="py-1 pr-3 text-right font-semibold">Items</th>
@@ -181,10 +184,9 @@ export function WorkRelevanceCalibrationPanel({
                 </thead>
                 <tbody>
                   {signals.map((s) => {
-                    const execRow = executionPathByKey.get(`${s.projectKey}::${s.statusName}`);
+                    const execRow = executionPathByKey.get(s.statusName);
                     return (
-                      <tr key={`${s.projectKey}::${s.statusName}`} className="border-b border-border last:border-0">
-                        <td className="py-1 pr-3 font-mono text-text3">{s.projectKey}</td>
+                      <tr key={s.statusName} className="border-b border-border last:border-0">
                         <td className="py-1 pr-3 text-text">{s.statusName}</td>
                         <td className="py-1 pr-3 text-text2">{s.currentRelevance}</td>
                         <td className="py-1 pr-3 text-right text-text2">{s.observedItemCount}</td>
@@ -206,10 +208,8 @@ export function WorkRelevanceCalibrationPanel({
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-text3">Policy review signals</p>
               {reviewSignals.map((s) => (
-                <div key={`${s.projectKey}::${s.statusName}`} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
-                  <p className="font-mono text-text">
-                    {s.projectKey} — {s.statusName}
-                  </p>
+                <div key={s.statusName} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
+                  <p className="font-mono text-text">{s.statusName}</p>
                   <p className="mt-0.5 text-text3">
                     Current policy: <span className="text-text2">{s.currentRelevance}</span>
                   </p>
@@ -228,10 +228,8 @@ export function WorkRelevanceCalibrationPanel({
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-text3">Candidate evaluation signals</p>
               {candidateGapSignals.map((s) => (
-                <div key={`${s.projectKey}::${s.statusName}`} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
-                  <p className="font-mono text-text">
-                    {s.projectKey} — {s.statusName}
-                  </p>
+                <div key={s.statusName} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
+                  <p className="font-mono text-text">{s.statusName}</p>
                   <p className="mt-1 text-text2">{s.explanation}</p>
                   <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">
                     Review Policy

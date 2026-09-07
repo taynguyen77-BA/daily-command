@@ -21,7 +21,6 @@ const RELEVANCE_LABEL: Record<WorkRelevance, string> = {
 };
 
 export interface PendingPolicyChange {
-  projectKey: string;
   status: string;
   from: WorkRelevance;
   to: WorkRelevance;
@@ -55,9 +54,7 @@ export function PolicyChangeImpactDialog({ change, onCancel, onApply }: { change
         <h2 id="policy-change-impact-title" className="font-display text-base text-text">
           Change Work Relevance
         </h2>
-        <p className="mt-1 font-mono text-xs text-text3">
-          {change.projectKey} — &quot;{change.status}&quot;
-        </p>
+        <p className="mt-1 font-mono text-xs text-text3">&quot;{change.status}&quot;</p>
 
         <div className="mt-4 flex items-center gap-3 text-sm">
           <div className="rounded-md border border-border bg-surface2 px-3 py-2">
@@ -77,7 +74,7 @@ export function PolicyChangeImpactDialog({ change, onCancel, onApply }: { change
             <p className="mt-1 text-yellow">Impact unavailable — could not be calculated from current data.</p>
           ) : (
             <p className="mt-1 text-text">
-              {change.affectedCount} work item{change.affectedCount === 1 ? "" : "s"} currently in this status.
+              {change.affectedCount} work item{change.affectedCount === 1 ? "" : "s"} currently in this status, across every synced project.
             </p>
           )}
           <p className="mt-2 text-xs text-text3">Surfaces:</p>
@@ -90,7 +87,7 @@ export function PolicyChangeImpactDialog({ change, onCancel, onApply }: { change
         </div>
 
         <p className="mt-3 text-xs text-text3">
-          This changes how Daily Command Center interprets this Jira status. It does not change the Jira ticket or Jira status.
+          This changes how Daily Command Center interprets this Jira status everywhere it&apos;s observed, across every project. It does not change the Jira ticket or Jira status.
         </p>
 
         <div className="mt-4 flex justify-end gap-2">

@@ -3,67 +3,128 @@
 // the user needs to do (ACTIONABLE), work waiting on someone else (WAITING), delivery/process
 // state to observe (OBSERVE), finished work (COMPLETED), work explicitly excluded (EXCLUDED),
 // or a status nobody has classified yet (UNKNOWN). Nothing here is a second task system, a
-// second scoring engine, or an AI call — see types.ts for the WorkRelevance/JiraStatusPolicy
+// second scoring engine, or an AI call — see types.ts for the WorkRelevance/JiraWorkRelevancePolicyMap
 // shapes this module operates on.
 //
-// Mirrors jira/project-scope.ts's own split: the policy is configured PER PROJECT, keyed by
-// the same Jira project KEY every other Jira code path in this codebase already uses
-// (JiraProjectScope.projectKeys, Project.sourceId, WorkItem.projectId's `jira-project-${key}`
-// prefix) — no second identity scheme, no cross-project status normalization (§6 — the same
-// status name can mean different things in different projects, so classification is always
-// project-scoped, never global).
+// V2.11 §1 — GLOBAL policy (explicit product decision, overriding the V2.6/V2.7 per-project
+// design): the same raw Jira status name means the same thing everywhere it's observed, across
+// every synced project/site. The policy map is keyed directly by status name — no project
+// dimension in the key at all. `jiraProjectKeyForWorkItem` below is unchanged and still used
+// elsewhere (labeling which project a WorkItem belongs to, e.g. the per-project Distribution
+// panel) — it's just no longer part of a policy's identity.
 //
 // CONSERVATISM (§7, §26): a status with no explicit classification is UNKNOWN, and UNKNOWN is
 // NEVER treated as actionable. A non-Jira work item (demo/local-import) has no Jira status
 // identity at all — the policy simply does not apply (NOT_APPLICABLE), which preserves every
 // pre-V2.5 behavior for anyone not using Jira.
 
-import type { CommandCenterData, JiraStatusPolicy, WorkItem, WorkRelevance } from "../types";
+import type { CommandCenterData, JiraWorkRelevancePolicyMap, WorkItem, WorkRelevance, WorkRelevancePolicyMigrationNotice } from "../types";
 
-export const DEFAULT_WORK_RELEVANCE_POLICY_MAP: Record<string, JiraStatusPolicy> = {};
+export const DEFAULT_WORK_RELEVANCE_POLICY_MAP: JiraWorkRelevancePolicyMap = {};
 
 function isValidRelevance(v: unknown): v is WorkRelevance {
   return v === "ACTIONABLE" || v === "WAITING" || v === "OBSERVE" || v === "COMPLETED" || v === "EXCLUDED" || v === "UNKNOWN";
 }
 
-/** Defensive parse for persisted state — malformed/missing/wrong-typed data always degrades
- *  to an empty policy map (every Jira status UNKNOWN, the safe conservative default) rather
- *  than crashing or guessing (§26 backward compatibility). */
-export function parseWorkRelevancePolicyMap(raw: unknown): Record<string, JiraStatusPolicy> {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
-  const out: Record<string, JiraStatusPolicy> = {};
-  for (const [projectKey, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof projectKey !== "string" || !projectKey.trim()) continue;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
-    const entry = value as Partial<JiraStatusPolicy>;
-    const rawMap = typeof entry.statusMap === "object" && entry.statusMap !== null && !Array.isArray(entry.statusMap) ? (entry.statusMap as Record<string, unknown>) : {};
-    const statusMap: Record<string, WorkRelevance> = {};
-    for (const [status, relevance] of Object.entries(rawMap)) {
-      if (typeof status === "string" && status.trim() && isValidRelevance(relevance)) statusMap[status] = relevance;
-    }
-    const updatedAt = typeof entry.updatedAt === "string" ? entry.updatedAt : undefined;
-    out[projectKey] = { projectKey, statusMap, updatedAt };
-  }
-  return out;
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-/** §28 performance — Map<ProjectKey, Map<JiraStatus, WorkRelevance>>, built once per render
- *  (see use-command-center.ts) rather than re-scanned per work item inside a loop. */
-export type WorkRelevanceIndex = Map<string, Map<string, WorkRelevance>>;
+/** V2.11 §1 migration — the pre-V2.11 shape was `{ [projectKey]: { projectKey, statusMap,
+ *  updatedAt } }`; the new shape is a flat `{ [status]: WorkRelevance }`. Old-shape entries are
+ *  objects carrying a `statusMap` field — a shape a valid new-shape value (a plain
+ *  WorkRelevance string) can never take, so this detection is unambiguous. */
+function looksLikeOldPerProjectShape(raw: Record<string, unknown>): boolean {
+  return Object.values(raw).some((v) => isPlainObject(v) && "statusMap" in v);
+}
 
-export function buildWorkRelevanceIndex(policyMap: Record<string, JiraStatusPolicy> | undefined | null): WorkRelevanceIndex {
-  const index: WorkRelevanceIndex = new Map();
-  if (!policyMap) return index;
-  for (const policy of Object.values(policyMap)) {
-    index.set(policy.projectKey, new Map(Object.entries(policy.statusMap)));
+function parseOldShapeProjectStatusMap(value: unknown): Record<string, WorkRelevance> {
+  if (!isPlainObject(value)) return {};
+  const rawMap = isPlainObject(value.statusMap) ? value.statusMap : {};
+  const statusMap: Record<string, WorkRelevance> = {};
+  for (const [status, relevance] of Object.entries(rawMap)) {
+    if (typeof status === "string" && status.trim() && isValidRelevance(relevance)) statusMap[status] = relevance;
   }
-  return index;
+  return statusMap;
+}
+
+export interface ParsedWorkRelevancePolicy {
+  policy: JiraWorkRelevancePolicyMap;
+  migration?: WorkRelevancePolicyMigrationNotice;
+}
+
+/** V2.11 §1 — for a status classified differently by different pre-upgrade projects, prefer
+ *  the value from whichever project had the most statuses classified overall (a proxy for "the
+ *  most deliberately-calibrated project's judgment"), tie-broken alphabetically by projectKey
+ *  for full determinism. Every collapsed status is reported so Data & Settings can show a
+ *  one-time "consolidated from N per-project settings — review below" notice. */
+function migrateOldShape(raw: Record<string, unknown>): ParsedWorkRelevancePolicy {
+  const projects: { projectKey: string; statusMap: Record<string, WorkRelevance> }[] = [];
+  for (const [projectKey, value] of Object.entries(raw)) {
+    if (typeof projectKey !== "string" || !projectKey.trim()) continue;
+    if (!isPlainObject(value)) continue;
+    projects.push({ projectKey, statusMap: parseOldShapeProjectStatusMap(value) });
+  }
+
+  const projectsRanked = [...projects].sort((a, b) => Object.keys(b.statusMap).length - Object.keys(a.statusMap).length || a.projectKey.localeCompare(b.projectKey));
+
+  const valuesByStatus = new Map<string, Set<WorkRelevance>>();
+  for (const p of projects) {
+    for (const [status, relevance] of Object.entries(p.statusMap)) {
+      const set = valuesByStatus.get(status) ?? new Set<WorkRelevance>();
+      set.add(relevance);
+      valuesByStatus.set(status, set);
+    }
+  }
+
+  const policy: JiraWorkRelevancePolicyMap = {};
+  const collapsedStatuses: string[] = [];
+  for (const [status, values] of Array.from(valuesByStatus.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (values.size === 1) {
+      policy[status] = Array.from(values)[0];
+      continue;
+    }
+    const winner = projectsRanked.find((p) => status in p.statusMap)!;
+    policy[status] = winner.statusMap[status];
+    collapsedStatuses.push(status);
+  }
+
+  return {
+    policy,
+    migration: { fromProjectCount: projects.length, collapsedStatuses, migratedAt: new Date().toISOString() },
+  };
+}
+
+/** Defensive parse for persisted state — malformed/missing/wrong-typed data always degrades
+ *  to an empty policy map (every Jira status UNKNOWN, the safe conservative default) rather
+ *  than crashing or guessing (§26 backward compatibility). V2.11 §1 additionally migrates a
+ *  pre-V2.11 per-project blob into the new global shape — see migrateOldShape above. */
+export function parseWorkRelevancePolicyMap(raw: unknown): ParsedWorkRelevancePolicy {
+  if (!isPlainObject(raw)) return { policy: {} };
+
+  if (looksLikeOldPerProjectShape(raw)) return migrateOldShape(raw);
+
+  const policy: JiraWorkRelevancePolicyMap = {};
+  for (const [status, relevance] of Object.entries(raw)) {
+    if (typeof status === "string" && status.trim() && isValidRelevance(relevance)) policy[status] = relevance;
+  }
+  return { policy };
+}
+
+/** §28 performance — Map<JiraStatus, WorkRelevance>, built once per render (see
+ *  use-command-center.ts) rather than re-scanned per work item inside a loop. */
+export type WorkRelevanceIndex = Map<string, WorkRelevance>;
+
+export function buildWorkRelevanceIndex(policyMap: JiraWorkRelevancePolicyMap | undefined | null): WorkRelevanceIndex {
+  return new Map(Object.entries(policyMap ?? {}));
 }
 
 const JIRA_PROJECT_ID_PREFIX = "jira-project-";
 
 /** The Jira project KEY a work item belongs to, derived from its own `projectId` foreign key
- *  (already `jira-project-${key}` per jira/normalize.ts) — never a second lookup table. */
+ *  (already `jira-project-${key}` per jira/normalize.ts) — never a second lookup table. Still
+ *  used for per-project labeling/grouping (e.g. the Distribution panel, Focus Project Scope) —
+ *  the policy itself is global (§1), but a WorkItem's own project identity is not. */
 export function jiraProjectKeyForWorkItem(item: Pick<WorkItem, "sourceType" | "projectId">): string | undefined {
   if (item.sourceType !== "jira") return undefined;
   return item.projectId.startsWith(JIRA_PROJECT_ID_PREFIX) ? item.projectId.slice(JIRA_PROJECT_ID_PREFIX.length) : undefined;
@@ -76,9 +137,8 @@ export function jiraProjectKeyForWorkItem(item: Pick<WorkItem, "sourceType" | "p
 export type EffectiveWorkRelevance = WorkRelevance | "NOT_APPLICABLE";
 
 export function resolveWorkRelevance(item: Pick<WorkItem, "sourceType" | "projectId" | "jiraStatusName">, index: WorkRelevanceIndex): EffectiveWorkRelevance {
-  const projectKey = jiraProjectKeyForWorkItem(item);
-  if (!projectKey || !item.jiraStatusName) return "NOT_APPLICABLE";
-  return index.get(projectKey)?.get(item.jiraStatusName) ?? "UNKNOWN";
+  if (!jiraProjectKeyForWorkItem(item) || !item.jiraStatusName) return "NOT_APPLICABLE";
+  return index.get(item.jiraStatusName) ?? "UNKNOWN";
 }
 
 /** §10 — the ONLY gate personal-work surfaces apply: ACTIONABLE is eligible, and so is a
@@ -120,29 +180,38 @@ export function explainWorkItemRelevance(item: WorkItem, index: WorkRelevanceInd
     return {
       isApplicable: true,
       relevance,
-      answer: `${item.key} is currently "${item.jiraStatusName}". This Jira status has not been classified yet for this project. Daily Command does not treat unclassified statuses as actionable.`,
+      answer: `${item.key} is currently "${item.jiraStatusName}". This Jira status has not been classified yet. Daily Command does not treat unclassified statuses as actionable.`,
     };
   }
-  const projectKey = jiraProjectKeyForWorkItem(item);
   return {
     isApplicable: true,
     relevance,
-    answer: `${item.key} is currently "${item.jiraStatusName}". This status is classified as ${relevance}${projectKey ? ` for ${projectKey}` : ""}. ${WORK_RELEVANCE_EXPLANATIONS[relevance]}`,
+    // V2.11 §1 — no longer "... for {projectKey}": the classification is global, so naming a
+    // project here would misleadingly imply it could differ elsewhere.
+    answer: `${item.key} is currently "${item.jiraStatusName}". This status is classified as ${relevance}. ${WORK_RELEVANCE_EXPLANATIONS[relevance]}`,
   };
 }
 
-/** §6 — statuses the settings UI can offer to classify, derived from OBSERVED Jira data for
- *  one project rather than a hard-coded list. Sorted for a stable UI. */
-export function collectObservedStatuses(data: CommandCenterData, projectKey: string): string[] {
+/** §6 — statuses the settings UI can offer to classify, derived from OBSERVED Jira data
+ *  rather than a hard-coded list. V2.11 §1 — global by default (every synced project);
+ *  `projectKeys` optionally narrows to a subset (e.g. Focus Project Scope), same convention as
+ *  computeOverallWorkRelevanceCoverage below. Sorted for a stable UI. */
+export function collectObservedStatuses(data: CommandCenterData, projectKeys?: string[]): string[] {
+  const scope = projectKeys && projectKeys.length > 0 ? new Set(projectKeys) : undefined;
   const seen = new Set<string>();
   for (const item of data.workItems) {
-    if (jiraProjectKeyForWorkItem(item) === projectKey && item.jiraStatusName) seen.add(item.jiraStatusName);
+    const projectKey = jiraProjectKeyForWorkItem(item);
+    if (!projectKey || !item.jiraStatusName) continue;
+    if (scope && !scope.has(projectKey)) continue;
+    seen.add(item.jiraStatusName);
   }
   return Array.from(seen).sort((a, b) => a.localeCompare(b));
 }
 
-/** §19 Data Health / Trust signal — count of distinct (project, status) pairs currently
- *  UNKNOWN among open Jira work items in `data`. A dimension of its own, never blended into
+/** §19 Data Health / Trust signal — count of distinct statuses currently UNKNOWN among open
+ *  Jira work items in `data`. V2.11 §1 — deduped by STATUS NAME alone: since the policy is
+ *  global, classifying a status once fixes it everywhere it's observed, so it's one
+ *  remediation action, not one per project. A dimension of its own, never blended into
  *  Delivery Confidence or any other score. */
 export function countUnclassifiedJiraStatuses(data: CommandCenterData, index: WorkRelevanceIndex): number {
   const unclassified = new Set<string>();
@@ -150,15 +219,15 @@ export function countUnclassifiedJiraStatuses(data: CommandCenterData, index: Wo
     if (item.status === "Done") continue;
     const projectKey = jiraProjectKeyForWorkItem(item);
     if (!projectKey || !item.jiraStatusName) continue;
-    if (resolveWorkRelevance(item, index) === "UNKNOWN") unclassified.add(`${projectKey}::${item.jiraStatusName}`);
+    if (resolveWorkRelevance(item, index) === "UNKNOWN") unclassified.add(item.jiraStatusName);
   }
   return unclassified.size;
 }
 
-/** One row per unclassified (project, status) pair — used by the Command Bar's "which Jira
- *  statuses are not classified?" intent and the Data & Settings unclassified list. */
+/** One row per unclassified status — used by the Command Bar's "which Jira statuses are not
+ *  classified?" intent and the Data & Settings unclassified list. V2.11 §1 — global, one row
+ *  per distinct status name (no project dimension; see countUnclassifiedJiraStatuses above). */
 export interface UnclassifiedStatusRow {
-  projectKey: string;
   status: string;
 }
 
@@ -166,20 +235,21 @@ export function listUnclassifiedJiraStatuses(data: CommandCenterData, index: Wor
   return listStatusesByRelevance(data, index, "UNKNOWN");
 }
 
-/** V2.6 §17 — generalized (project, status) rows currently classified as `relevance`, e.g.
- *  for the Command Bar's "which statuses are actionable?" intent. `listUnclassifiedJiraStatuses`
- *  above is the UNKNOWN special case, kept as its own export since it's the one V2.5 already
- *  wired everywhere (Data & Settings, Command Bar) — this is purely additive. */
+/** V2.6 §17 — generalized status rows currently classified as `relevance`, e.g. for the
+ *  Command Bar's "which statuses are actionable?" intent. `listUnclassifiedJiraStatuses` above
+ *  is the UNKNOWN special case, kept as its own export since it's the one V2.5 already wired
+ *  everywhere (Data & Settings, Command Bar) — this is purely additive. V2.11 §1 — global,
+ *  deduped by status name alone. */
 export function listStatusesByRelevance(data: CommandCenterData, index: WorkRelevanceIndex, relevance: WorkRelevance): UnclassifiedStatusRow[] {
-  const seen = new Map<string, UnclassifiedStatusRow>();
+  const seen = new Set<string>();
   for (const item of data.workItems) {
-    const projectKey = jiraProjectKeyForWorkItem(item);
-    if (!projectKey || !item.jiraStatusName) continue;
+    if (!jiraProjectKeyForWorkItem(item) || !item.jiraStatusName) continue;
     if (resolveWorkRelevance(item, index) !== relevance) continue;
-    const key = `${projectKey}::${item.jiraStatusName}`;
-    if (!seen.has(key)) seen.set(key, { projectKey, status: item.jiraStatusName });
+    seen.add(item.jiraStatusName);
   }
-  return Array.from(seen.values()).sort((a, b) => a.projectKey.localeCompare(b.projectKey) || a.status.localeCompare(b.status));
+  return Array.from(seen)
+    .sort((a, b) => a.localeCompare(b))
+    .map((status) => ({ status }));
 }
 
 /** Work items whose CURRENT effective relevance matches `relevance` exactly — used by the
@@ -189,13 +259,11 @@ export function workItemsByRelevance(data: CommandCenterData, index: WorkRelevan
   return data.workItems.filter((w) => resolveWorkRelevance(w, index) === relevance);
 }
 
-/** Pure updater for one (project, status) classification — store.ts's setJiraStatusRelevance
- *  delegates here, same split as jira/project-scope.ts's parse/apply functions vs store.ts's
- *  thin setJiraProjectScope wrapper. */
-export function withStatusRelevance(policyMap: Record<string, JiraStatusPolicy>, projectKey: string, status: string, relevance: WorkRelevance): Record<string, JiraStatusPolicy> {
-  const existing = policyMap[projectKey];
-  const nextStatusMap = { ...(existing?.statusMap ?? {}), [status]: relevance };
-  return { ...policyMap, [projectKey]: { projectKey, statusMap: nextStatusMap, updatedAt: new Date().toISOString() } };
+/** Pure updater for one status's classification — store.ts's setJiraStatusRelevance delegates
+ *  here. V2.11 §1 — global: no projectKey parameter at all, since a classification now applies
+ *  to every project at once. */
+export function withStatusRelevance(policyMap: JiraWorkRelevancePolicyMap, status: string, relevance: WorkRelevance): JiraWorkRelevancePolicyMap {
+  return { ...policyMap, [status]: relevance };
 }
 
 // ===== V2.6 — Work Policy Intelligence & Operational Calibration =====
@@ -203,8 +271,8 @@ export function withStatusRelevance(policyMap: Record<string, JiraStatusPolicy>,
 // deterministic policy-change impact count. No new classification logic — every function
 // below is a read over the SAME index/policy map V2.5 already builds and enforces.
 
-/** §4 — deterministic coverage state for one project's (or the whole scope's) observed
- *  Jira status vocabulary. Plain arithmetic, never a blended score (§4). */
+/** §4 — deterministic coverage state for the observed Jira status vocabulary (optionally
+ *  scoped to a subset of projects). Plain arithmetic, never a blended score (§4). */
 export type WorkRelevanceCoverageState = "FULLY_CLASSIFIED" | "PARTIALLY_CLASSIFIED" | "NOT_CLASSIFIED" | "NO_JIRA_DATA";
 
 export interface WorkRelevanceCoverage {
@@ -225,18 +293,14 @@ function coverageFrom(observedCount: number, classifiedCount: number): WorkRelev
   return { observedStatusCount: observedCount, classifiedStatusCount: classifiedCount, unclassifiedStatusCount: observedCount - classifiedCount, coveragePct: pctOf(classifiedCount, observedCount), state };
 }
 
-/** §4 — per-project status coverage, computed from OBSERVED Jira data (never invented). */
-export function computeStatusCoverage(data: CommandCenterData, index: WorkRelevanceIndex, projectKey: string): WorkRelevanceCoverage {
-  const observed = collectObservedStatuses(data, projectKey);
-  const statusMap = index.get(projectKey);
-  const classifiedCount = observed.filter((s) => !!statusMap?.get(s)).length;
-  return coverageFrom(observed.length, classifiedCount);
-}
-
-/** §4, §10 — coverage across every OBSERVED (project, status) pair currently in scope, for
- *  the single "X% classified" figure the Data Health panel shows (§10 "do not create a
- *  second status-management page"). `projectKeys` narrows to Focused Projects when
- *  supplied; omitted/empty means every project observed in `data` (ALL scope). */
+/** §4, §10 — coverage across every OBSERVED status currently in scope, for the single "X%
+ *  classified" figure the Data Health panel (and, since V2.11 §1, the single global Work
+ *  Relevance Policy panel) shows (§10 "do not create a second status-management page").
+ *  V2.11 §1 — deduped by status name alone, matching the now-global policy: `projectKeys`
+ *  still narrows which projects' OBSERVED vocabulary counts (e.g. Focus Projects), but the
+ *  classification itself is the same regardless of which project asks. Supersedes the old
+ *  per-project `computeStatusCoverage` (identical arithmetic once policy is global — a single
+ *  project is just `projectKeys: [thatKey]`). */
 export function computeOverallWorkRelevanceCoverage(data: CommandCenterData, index: WorkRelevanceIndex, projectKeys?: string[]): WorkRelevanceCoverage {
   const scope = projectKeys && projectKeys.length > 0 ? new Set(projectKeys) : undefined;
   const seen = new Set<string>();
@@ -246,24 +310,25 @@ export function computeOverallWorkRelevanceCoverage(data: CommandCenterData, ind
     const projectKey = jiraProjectKeyForWorkItem(item);
     if (!projectKey || !item.jiraStatusName) continue;
     if (scope && !scope.has(projectKey)) continue;
-    const pairKey = `${projectKey}::${item.jiraStatusName}`;
-    if (seen.has(pairKey)) continue;
-    seen.add(pairKey);
+    if (seen.has(item.jiraStatusName)) continue;
+    seen.add(item.jiraStatusName);
     observedCount++;
-    if (index.get(projectKey)?.get(item.jiraStatusName)) classifiedCount++;
+    if (index.get(item.jiraStatusName)) classifiedCount++;
   }
   return coverageFrom(observedCount, classifiedCount);
 }
 
-/** §8-9 — deterministic policy-change impact: how many currently-open work items carry
- *  this exact (project, raw status) pair right now. Used to preview "+N personal work
- *  items" BEFORE a classification change is applied — never a guess, always a live count
- *  over `data` (§8 "the impact calculation must use actual current data"). */
-export function countOpenItemsForProjectStatus(data: CommandCenterData, projectKey: string, status: string): number {
+/** §8-9 — deterministic policy-change impact: how many currently-open work items across ALL
+ *  projects carry this exact raw status right now. Used to preview "+N personal work items"
+ *  BEFORE a classification change is applied — never a guess, always a live count over `data`
+ *  (§8 "the impact calculation must use actual current data"). V2.11 §1 — global: a status
+ *  change now affects every project's items in that status, so the count is no longer scoped
+ *  to one project. */
+export function countOpenItemsForStatus(data: CommandCenterData, status: string): number {
   let count = 0;
   for (const item of data.workItems) {
     if (item.status === "Done") continue;
-    if (jiraProjectKeyForWorkItem(item) === projectKey && item.jiraStatusName === status) count++;
+    if (jiraProjectKeyForWorkItem(item) && item.jiraStatusName === status) count++;
   }
   return count;
 }

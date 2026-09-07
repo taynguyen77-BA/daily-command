@@ -4,7 +4,7 @@
 // entity cache (./ai-cache.ts) both point to, so "how long is this cached for" lives in
 // one place instead of being re-decided ad hoc at every call site.
 
-import type { AITask } from "./schemas";
+import { aiTaskSchema, type AITask } from "./schemas";
 
 export interface AIUsagePolicyEntry {
   task: AITask;
@@ -56,6 +56,12 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {
   return POLICY[task];
+}
+
+/** V2.11 §3A — every task's policy, for the Data & Settings "AI Usage Policy" table (this
+ *  registry existed since V2.0 but was never surfaced anywhere in the UI). */
+export function listAllUsagePolicies(): AIUsagePolicyEntry[] {
+  return aiTaskSchema.options.map(getUsagePolicy);
 }
 
 export type AIDiagnosticState = "AI available" | "AI unavailable" | "Mock fallback" | "Cached result";

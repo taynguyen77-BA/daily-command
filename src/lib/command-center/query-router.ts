@@ -626,7 +626,7 @@ export function answerFromRoute(
       const rows = listUnclassifiedJiraStatuses(data, idx);
       if (rows.length === 0) return none("Every observed Jira status is currently classified.");
       return {
-        facts: rows.map((r) => `${r.projectKey}: "${r.status}" has not been classified.`),
+        facts: rows.map((r) => `"${r.status}" has not been classified.`),
         evidence: [],
         recommendedAction: "Classify these in Data & Settings → Jira Work Relevance Policy.",
       };
@@ -638,7 +638,7 @@ export function answerFromRoute(
       const rows = listStatusesByRelevance(data, idx, "ACTIONABLE");
       if (rows.length === 0) return none("No Jira status is currently classified ACTIONABLE.");
       return {
-        facts: rows.map((r) => `${r.projectKey}: "${r.status}" is classified ACTIONABLE.`),
+        facts: rows.map((r) => `"${r.status}" is classified ACTIONABLE.`),
         evidence: [],
         recommendedAction: "Review or change this in Data & Settings → Jira Work Relevance Policy.",
       };
@@ -660,7 +660,7 @@ export function answerFromRoute(
       const signals = computePolicyReviewSignals(data, idx).filter((s) => s.signalType === "REVIEW");
       if (signals.length === 0) return none("No status currently shows a policy review signal.");
       return {
-        facts: signals.map((s) => `${s.projectKey}: "${s.statusName}" (${s.currentRelevance}) — ${s.explanation}`),
+        facts: signals.map((s) => `"${s.statusName}" (${s.currentRelevance}) — ${s.explanation}`),
         evidence: [],
         recommendedAction: "This may be worth reviewing in Data & Settings → Work Relevance Calibration. The policy is not changed automatically.",
       };
@@ -671,7 +671,7 @@ export function answerFromRoute(
       const signals = computePolicyReviewSignals(data, idx).filter((s) => s.currentRelevance === "ACTIONABLE" && s.signalType === "REVIEW");
       if (signals.length === 0) return none("No ACTIONABLE status currently shows a review signal — every ACTIONABLE status with enough evidence has at least one linked Action.");
       return {
-        facts: signals.map((s) => `${s.projectKey}: "${s.statusName}" — ${s.explanation}`),
+        facts: signals.map((s) => `"${s.statusName}" — ${s.explanation}`),
         evidence: [],
         recommendedAction: "This may be worth reviewing — it does not mean the policy is wrong.",
       };
@@ -682,7 +682,7 @@ export function answerFromRoute(
       const rows = computePolicyReviewSignals(data, idx).filter((s) => s.actionEvidenceCount > 0);
       if (rows.length === 0) return none("No observed Jira status currently has a linked Action.");
       return {
-        facts: rows.map((s) => `${s.projectKey}: "${s.statusName}" (${s.currentRelevance}) — ${s.actionEvidenceCount} linked Action(s), ${s.completionEvidenceCount} completed.`),
+        facts: rows.map((s) => `"${s.statusName}" (${s.currentRelevance}) — ${s.actionEvidenceCount} linked Action(s), ${s.completionEvidenceCount} completed.`),
         evidence: [],
         recommendedAction: "",
       };

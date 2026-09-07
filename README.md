@@ -60,8 +60,9 @@ Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser on
 | Variable | Behavior when missing |
 | --- | --- |
 | `SLACK_WEBHOOK_URL` | No Slack notifications are ever sent; everything else (mention/assignment tracking in the Attention Queue and Personal Focus, the app itself) is unaffected. |
+| `SLACK_CHANNEL_LABEL` (V2.11, optional, display-only) | A free-text label you choose (e.g. `#daily-command-alerts` or `DM to Tay`) purely so Data & Settings can answer "where do my alerts go?" without server access — it has zero effect on where the webhook actually sends (that's entirely `SLACK_WEBHOOK_URL`, set on the Slack side). Shown as "Not labeled" when missing. |
 
-Read server-only inside `src/app/api/command-center/notify/route.ts`; the browser only ever POSTs already-built, non-secret signal payloads (issue key, summary, Jira link, mention/assignment detail) and never sees the webhook URL. Requires a `PersonalIdentity.accountId` configured in Data & Settings (see the Jira account ID field) — without one, mention/assignment tracking has nothing to match against and no notification is ever produced, regardless of whether this variable is set.
+Read server-only inside `src/app/api/command-center/notify/route.ts`; the browser only ever POSTs already-built, non-secret signal payloads (issue key, summary, Jira link, mention/assignment detail) and never sees the webhook URL. Requires a `PersonalIdentity.accountId` configured in Data & Settings (see the Jira account ID field) — without one, mention/assignment tracking has nothing to match against and no notification is ever produced, regardless of whether this variable is set. Data & Settings' "Slack Notifications" panel shows whether `SLACK_WEBHOOK_URL` is configured (boolean only, never the URL), the `SLACK_CHANNEL_LABEL` value, and a "Send test notification" button that exercises the exact same webhook-call path as a real signal.
 
 ### Configuring in Vercel
 
