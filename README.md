@@ -87,6 +87,8 @@ See the assistant's final report for this pass in the project conversation histo
 
 **Version-line reconciliation:** this README's "Current version" line had drifted stale at V2.2.1 even though the codebase's own doc-comments (`src/`) had already moved through V2.3–V2.9 (Focus Project Scope, Work Relevance Policy, Execution Path & Work Signal Calibration, and more) without ever being reflected here. That gap was closed as part of this pass — the line was corrected to V2.9 (the real pre-V2.10 state) before V2.10's own changes were layered on top, which is why it reads V2.2.1 → V2.10 above rather than skipping a step silently.
 
+**Post-deploy fix:** `vercel.json`'s cron was originally `*/15 * * * *`, which Vercel Hobby plans reject outright at deploy time ("Hobby accounts are limited to daily cron jobs") — every deploy since V2.10 landed had been silently failing because of this, leaving production stuck on the pre-V2.10 build despite successful pushes. Fixed to a Hobby-safe daily schedule (`0 6 * * *`); the GitHub Actions workflow still covers the tighter 15-minute cadence.
+
 # V2.2.1 — Production Completion & Deployment Readiness
 
 See the assistant's final report for this pass (baseline, fixes made, production readiness gate, and the full Post-V2.2.1 backlog) in the project conversation history. Summary: no new product capabilities were added — this was a completion/stabilization pass fixing trust-label inconsistencies, a duplicate-memory-event bug, a static-rendering bug on two Jira API routes, and adding request timeouts to every outbound Jira/Claude call.
