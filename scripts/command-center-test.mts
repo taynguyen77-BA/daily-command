@@ -1530,7 +1530,11 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const vercelJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
   ok("V2.10 Cron", Array.isArray(vercelJson.crons) && vercelJson.crons.length === 1, "vercel.json declares exactly one cron job");
   ok("V2.10 Cron", vercelJson.crons[0].path === "/api/command-center/jira/sync", "the cron job targets the real sync endpoint");
-  ok("V2.10 Cron", vercelJson.crons[0].schedule === "*/15 * * * *", "the cron job runs every 15 minutes");
+  // Vercel Hobby plans reject any cron more frequent than once/day at deploy time (a real,
+  // hard failure discovered post-implementation — every deploy since */15 was added had been
+  // failing with "Hobby accounts are limited to daily cron jobs"). Fixed to a Hobby-safe daily
+  // schedule; the GitHub Actions fallback still provides the tighter 15-minute cadence.
+  ok("V2.10 Cron", /^(\d+|\*)\s+(\d+|\*)\s+\*\s+\*\s+\*$/.test(vercelJson.crons[0].schedule) && !vercelJson.crons[0].schedule.includes("/"), "the Vercel cron schedule is Hobby-plan-safe — at most once per day, no step syntax");
 
   const workflowSrc = fs.readFileSync(path.join(repoRoot, ".github/workflows/sync.yml"), "utf8");
   ok("V2.10 Cron", /CRON_SECRET/.test(workflowSrc) && /secrets\.CRON_SECRET/.test(workflowSrc), "the GitHub Actions fallback reads CRON_SECRET from a repo secret, never a hardcoded value");
