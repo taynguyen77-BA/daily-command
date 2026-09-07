@@ -1491,6 +1491,42 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   ok("V2.10 Notify", payloads.length === 1 && payloads[0].issueKey === "MENT-1" && payloads[0].url === "https://example.atlassian.net/browse/MENT-1", "buildSlackNotifyPayloads resolves the real issue key and Jira link from the linked WorkItem");
 }
 
+// ===== V2.10.1 — cold-start guard: the real upgrade-path scenario =====
+// A pre-V2.10 install already has DRIFT/RISK/etc ids in attentionState (from before MENTION/
+// ASSIGNMENT ever existed), then the user configures accountId for the first time and 5
+// currently-open tickets match the mention JQL. None of them may notify on this pass — but
+// the NEXT sync, with a genuinely new 6th mention, must notify for exactly that one.
+{
+  const preV210AttentionState: Record<string, AttentionItemState> = {
+    "DRIFT:overall": { lifecycle: "ACKNOWLEDGED", firstSeenDate: "2026-05-01", lastSeenDate: "2026-06-01" },
+    "RISK:some-risk": { lifecycle: "NEW", firstSeenDate: "2026-06-10", lastSeenDate: "2026-06-14" },
+  };
+  const fiveMentionItems: AttentionItem[] = Array.from({ length: 5 }, (_, i) =>
+    makeAttentionItem({ id: `MENTION:upgrade-${i}`, category: "MENTION", lifecycle: "NEW", ownershipExplicit: true })
+  );
+
+  const firstPassSignals = computeNewPersonalSignals(preV210AttentionState, fiveMentionItems);
+  ok(
+    "V2.10.1 Cold start",
+    firstPassSignals.length === 0,
+    "an upgrade from pre-V2.10 (DRIFT/RISK ids already present, but zero MENTION/ASSIGNMENT ids ever computed) suppresses all 5 historically-open mentions on the first pass — old news is never reported as breaking news"
+  );
+
+  // Simulate commitAttentionState persisting this pass's items as the new baseline, then a
+  // 6th, genuinely new mention arrives on the next sync.
+  const baselineAfterFirstSync: Record<string, AttentionItemState> = {
+    ...preV210AttentionState,
+    ...Object.fromEntries(fiveMentionItems.map((item) => [item.id, { lifecycle: "NEW" as const, firstSeenDate: TODAY, lastSeenDate: TODAY }])),
+  };
+  const sixthNewMention = makeAttentionItem({ id: "MENTION:upgrade-5", category: "MENTION", lifecycle: "NEW", ownershipExplicit: true });
+  const secondPassSignals = computeNewPersonalSignals(baselineAfterFirstSync, [...fiveMentionItems, sixthNewMention]);
+  ok(
+    "V2.10.1 Cold start",
+    secondPassSignals.length === 1 && secondPassSignals[0].id === sixthNewMention.id,
+    "once a real baseline exists (the 5 mentions committed from the first pass), the next sync correctly notifies for exactly the one genuinely new 6th mention, and none of the already-tracked 5"
+  );
+}
+
 // ===== V2.10 §2 — fetchMentionedIssuesWith / fetchIssueCommentsWith =====
 {
   const jqlConfig: JiraConnectionConfig = { baseUrl: "https://example.atlassian.net", email: "a@b.com", apiToken: "tok" };

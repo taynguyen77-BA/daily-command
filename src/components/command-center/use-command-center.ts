@@ -103,6 +103,15 @@ export function useCommandCenter() {
   // freshly computed attentionQueue" are both available together, exactly matching
   // computeNewPersonalSignals' signature. `state.attentionState` is read from the render
   // closure that produced `proactive`, i.e. genuinely pre-commit.
+  //
+  // V2.10.1 — firing on every `[proactive]` recompute, including a pure filter/scope change
+  // with no real Jira sync behind it, is intentionally tolerated: computeNewPersonalSignals
+  // is cold-start-safe per-id (not per-computation), so a filter change that merely reveals a
+  // previously-out-of-scope-but-already-tracked item produces zero signals (its id is already
+  // in `previousAttentionState`), and a filter change that reveals a project never tracked
+  // before is covered by the same "no prior MENTION:/ASSIGNMENT: id at all" cold-start guard
+  // as a fresh install (see notify.ts). If this stops holding, that's a distinct bug — surface
+  // it, don't silently patch around it here.
   useEffect(() => {
     if (!proactive) return;
     commandCenterStore.commitAttentionState(proactive.nextAttentionState, proactive.attentionQueue);

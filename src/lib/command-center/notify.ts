@@ -13,7 +13,23 @@
 
 import type { AttentionItem, AttentionItemState, CommandCenterData } from "./types";
 
+// V2.10.1 — cold-start guard. `previousAttentionState[item.id]` being absent is NOT enough
+// to mean "genuinely new": the very first computation for these two categories (a fresh
+// install, OR — the actually-common case — an existing pre-V2.10 install where DRIFT/RISK/
+// etc ids already populate attentionState but zero MENTION:/ASSIGNMENT: ids have ever been
+// computed yet, e.g. right after accountId is configured or jiraProjectScope is widened to a
+// never-synced project) would otherwise report every historically-open matching ticket as a
+// brand-new personal signal — old news read out as breaking news. The correct "cold start"
+// signal is therefore per-category, not "is attentionState totally empty": no prior entry
+// exists for ANY MENTION/ASSIGNMENT id specifically. `commitAttentionState` still persists
+// this pass's items normally (see use-command-center.ts), so the next sync has a real
+// baseline and only genuinely new ids notify from then on.
+function hasAnyPriorPersonalSignal(previousAttentionState: Record<string, AttentionItemState>): boolean {
+  return Object.keys(previousAttentionState).some((id) => id.startsWith("MENTION:") || id.startsWith("ASSIGNMENT:"));
+}
+
 export function computeNewPersonalSignals(previousAttentionState: Record<string, AttentionItemState>, currentAttentionQueue: AttentionItem[]): AttentionItem[] {
+  if (!hasAnyPriorPersonalSignal(previousAttentionState)) return [];
   return currentAttentionQueue.filter(
     (item) =>
       (item.category === "MENTION" || item.category === "ASSIGNMENT") &&
