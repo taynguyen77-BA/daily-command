@@ -10,6 +10,8 @@ import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
 import { explainWorkItemRelevance, listStatusesByRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { computePolicyReviewSignals, computeWorkRelevanceDistribution } from "./jira/work-relevance-calibration";
+import { computeActionableSignals } from "./jira/work-relevance-signals";
+import type { WorkItemCalibrationHistory } from "./jira/work-relevance-history";
 import { computeExecutionPathTrace, listCandidatePoolActionableItems, listJiraItemsInPersonalFocus } from "./execution-path";
 import type { CommandCenterData, Evidence, EvidenceSourceType, PersonalDeliveryReviewFacts } from "./types";
 import type { DerivedData } from "./selectors";
@@ -386,7 +388,11 @@ export function answerFromRoute(
   proactive?: ProactiveIntelligence,
   personalFocus?: PersonalFocusResult,
   personalReview?: PersonalDeliveryReviewFacts,
-  workRelevanceIndex?: WorkRelevanceIndex
+  workRelevanceIndex?: WorkRelevanceIndex,
+  // V2.12 — see jira/work-relevance-history.ts. Defaults to "no history yet" rather than
+  // failing: that just means the ACTIONABLE Policy Review Signal can't fire (honestly —
+  // there's no evidence yet), never a fabricated one.
+  workItemCalibrationHistory: WorkItemCalibrationHistory = {}
 ): QueryFacts {
   const none = (msg: string): QueryFacts => ({ facts: [msg], evidence: [], recommendedAction: "No action needed right now." });
   if (!proactive && route.intent !== "unrecognized" && isProactiveIntent(route.intent)) {
@@ -654,22 +660,28 @@ export function answerFromRoute(
         recommendedAction: "Review the full calibration breakdown in Data & Settings → Work Relevance Calibration.",
       };
     }
-    // V2.7 §8-11 — deterministic REVIEW signals only; never a claim that the policy is wrong.
+    // V2.7 §8-9 (non-ACTIONABLE, untouched) + V2.12 Requirement 1 (ACTIONABLE, time-window +
+    // percentage + sample-size gated) — deterministic REVIEW signals only; never a claim
+    // that the policy is wrong. Never the old "ACTIONABLE + zero action evidence" inference
+    // (see the V2.12 signal-semantics fix) — that conflated three distinct pipeline stages.
     case "policy-review-signals": {
       const idx = workRelevanceIndex ?? new Map();
-      const signals = computePolicyReviewSignals(data, idx).filter((s) => s.signalType === "REVIEW");
-      if (signals.length === 0) return none("No status currently shows a policy review signal.");
+      const nonActionable = computePolicyReviewSignals(data, idx).filter((s) => s.signalType === "REVIEW" && s.currentRelevance !== "ACTIONABLE");
+      const actionable = computeActionableSignals(data, idx, workItemCalibrationHistory, today, undefined, proactive ?? null, personalFocus ?? null).policyReview;
+      if (nonActionable.length === 0 && actionable.length === 0) return none("No status currently shows a policy review signal.");
       return {
-        facts: signals.map((s) => `"${s.statusName}" (${s.currentRelevance}) — ${s.explanation}`),
+        facts: [...nonActionable.map((s) => `"${s.statusName}" (${s.currentRelevance}) — ${s.explanation}`), ...actionable.map((s) => `"${s.statusName}" (ACTIONABLE) — ${s.explanation}`)],
         evidence: [],
         recommendedAction: "This may be worth reviewing in Data & Settings → Work Relevance Calibration. The policy is not changed automatically.",
       };
     }
-    // V2.7 §8 Signal B — ACTIONABLE statuses with zero linked personal-work evidence.
+    // V2.12 Requirement 1 — supersedes V2.7 §8 Signal B's old "ACTIONABLE + zero linked
+    // Action" inference (real classification-risk evidence only: time window + percentage
+    // never entering the candidate pool + minimum sample size, not just "currently zero").
     case "actionable-low-personal-work": {
       const idx = workRelevanceIndex ?? new Map();
-      const signals = computePolicyReviewSignals(data, idx).filter((s) => s.currentRelevance === "ACTIONABLE" && s.signalType === "REVIEW");
-      if (signals.length === 0) return none("No ACTIONABLE status currently shows a review signal — every ACTIONABLE status with enough evidence has at least one linked Action.");
+      const signals = computeActionableSignals(data, idx, workItemCalibrationHistory, today, undefined, proactive ?? null, personalFocus ?? null).policyReview;
+      if (signals.length === 0) return none("No ACTIONABLE status currently shows a review signal — every ACTIONABLE status with enough evidence has at least one linked Action or enters the candidate pool.");
       return {
         facts: signals.map((s) => `"${s.statusName}" — ${s.explanation}`),
         evidence: [],

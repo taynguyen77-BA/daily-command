@@ -18,7 +18,8 @@ import {
 } from "@/lib/command-center/jira/work-relevance";
 import { PolicyChangeImpactDialog, type PendingPolicyChange } from "@/components/command-center/PolicyChangeImpactDialog";
 import { WorkRelevanceCalibrationPanel } from "@/components/command-center/WorkRelevanceCalibrationPanel";
-import { computeCalibrationHealthState, computePolicyReviewSignals } from "@/lib/command-center/jira/work-relevance-calibration";
+import { computePolicyReviewSignals, type CalibrationHealthState } from "@/lib/command-center/jira/work-relevance-calibration";
+import { computeActionableSignals } from "@/lib/command-center/jira/work-relevance-signals";
 import { WORK_RELEVANCE_VALUES, type WorkRelevance } from "@/lib/command-center/types";
 import { computeDataHealth } from "@/lib/command-center/data-health";
 import { clearAiTrace, getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
@@ -607,11 +608,20 @@ export default function DataSettingsPage() {
   // is never presented as if it reflects real operating behavior, so calibration is simply
   // unavailable rather than showing a fabricated state for it.
   const isSyntheticData = state.isDemo || state.dataSource !== "jira";
-  const calibrationHealthState = useMemo(() => {
+  // V2.12 — the non-ACTIONABLE branch of computePolicyReviewSignals (repeated user Actions
+  // on a WAITING/OBSERVE/etc status) is untouched by the signal-semantics fix; the
+  // ACTIONABLE branch now comes exclusively from the new, evidence-gated Requirement 1
+  // signal — never the old "zero action evidence" inference this fix retired.
+  const calibrationHealthState = useMemo<CalibrationHealthState | null>(() => {
     if (isSyntheticData) return null;
     const scopeKeys = state.jiraProjectScope.mode === "FOCUSED" ? state.jiraProjectScope.projectKeys : undefined;
-    return computeCalibrationHealthState(computePolicyReviewSignals(state.data, workRelevanceIndex, scopeKeys));
-  }, [isSyntheticData, state.data, workRelevanceIndex, state.jiraProjectScope]);
+    const nonActionableSignals = computePolicyReviewSignals(state.data, workRelevanceIndex, scopeKeys).filter((s) => s.currentRelevance !== "ACTIONABLE");
+    const actionablePolicyReview = computeActionableSignals(state.data, workRelevanceIndex, state.workItemCalibrationHistory, today, scopeKeys, proactive, personalFocus).policyReview;
+    if (nonActionableSignals.length === 0 && actionablePolicyReview.length === 0) return "INSUFFICIENT_EVIDENCE";
+    if (actionablePolicyReview.length > 0 || nonActionableSignals.some((s) => s.signalType === "REVIEW")) return "REVIEW";
+    if (nonActionableSignals.every((s) => s.signalType === "INSUFFICIENT_EVIDENCE")) return "INSUFFICIENT_EVIDENCE";
+    return "HEALTHY";
+  }, [isSyntheticData, state.data, workRelevanceIndex, state.jiraProjectScope, state.workItemCalibrationHistory, today, proactive, personalFocus]);
   const trustDiagnostic = useMemo(
     () =>
       computeTrustDiagnostic({
@@ -961,6 +971,9 @@ export default function DataSettingsPage() {
         jiraConfigured={jiraStatus?.configured}
         jiraProjectScope={state.jiraProjectScope}
         workRelevanceIndex={workRelevanceIndex}
+        workItemCalibrationHistory={state.workItemCalibrationHistory}
+        proactive={proactive}
+        personalFocus={personalFocus}
         today={today}
       />
 

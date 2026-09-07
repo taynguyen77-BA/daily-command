@@ -133,7 +133,8 @@ export function CommandBar() {
       view.proactive ?? undefined,
       view.personalFocus ?? undefined,
       view.personalReview,
-      view.workRelevanceIndex
+      view.workRelevanceIndex,
+      state.workItemCalibrationHistory
     );
     const answer = await getAIProvider().answerQuery(q, facts, evidence, recommendedAction);
     setResult(answer);

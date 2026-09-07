@@ -11,7 +11,8 @@ import { todayLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
-import { DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
+import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
+import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "./jira/work-relevance-history";
 import { computeActionEffectiveness } from "./action-effectiveness";
 import { computeDecisionRadar } from "./decision-radar";
 import { computeDeliveryDrift } from "./delivery-drift";
@@ -133,6 +134,11 @@ export interface StoreState {
   // confidently-identified sections from the V2.11 nav/section audit; see that audit's
   // report for sections still marked as open questions.
   showAdvancedSettings: boolean;
+  // V2.12 — first-observed timestamps for "how long has this status been ACTIONABLE" and
+  // "did this item ever enter the candidate pool", updated on every real Jira sync. Neither
+  // question is answerable from any other persisted field (see jira/work-relevance-history.ts)
+  // — this is additive-only history, never backfilled, never mutated by anything else.
+  workItemCalibrationHistory: WorkItemCalibrationHistory;
 }
 
 function initialJiraSync(): JiraSyncState {
@@ -161,6 +167,7 @@ function initialState(): StoreState {
     usageCounters: {},
     mentionEvents: [],
     showAdvancedSettings: false,
+    workItemCalibrationHistory: {},
   };
 }
 
@@ -223,6 +230,24 @@ function asMigrationNotice(v: unknown): WorkRelevancePolicyMigrationNotice | und
   return { fromProjectCount: n.fromProjectCount, collapsedStatuses: n.collapsedStatuses.filter((s): s is string => typeof s === "string"), migratedAt: n.migratedAt };
 }
 
+// V2.12 — a malformed entry (or a corrupted map) is dropped rather than trusted, same
+// discipline as every other parsed field here; a missing/invalid entry just means that
+// item/status pair starts tracking fresh from today, never a crash.
+function isCalibrationHistoryEntryShape(v: unknown): v is WorkItemCalibrationHistory[string] {
+  if (typeof v !== "object" || v === null) return false;
+  const e = v as Partial<WorkItemCalibrationHistory[string]>;
+  return typeof e.itemId === "string" && typeof e.statusName === "string" && typeof e.firstObservedAt === "string" && (e.firstSeenInCandidatePoolAt === undefined || typeof e.firstSeenInCandidatePoolAt === "string");
+}
+
+function asWorkItemCalibrationHistory(v: unknown): WorkItemCalibrationHistory {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: WorkItemCalibrationHistory = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (isCalibrationHistoryEntryShape(value)) out[key] = value;
+  }
+  return out;
+}
+
 export function parseStoredState(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
@@ -260,6 +285,7 @@ export function parseStoredState(raw: string): StoreState {
       usageCounters: asUsageCounters(parsed.usageCounters),
       mentionEvents: Array.isArray(parsed.mentionEvents) ? parsed.mentionEvents : [],
       showAdvancedSettings: parsed.showAdvancedSettings === true,
+      workItemCalibrationHistory: asWorkItemCalibrationHistory(parsed.workItemCalibrationHistory),
     };
   } catch {
     return initialState();
@@ -626,6 +652,11 @@ export class CommandCenterStore {
             return Array.from(byIssueKey.values());
           })();
 
+    // V2.12 — first-observed timestamps for the Policy Review / Execution Gap signals
+    // (jira/work-relevance-signals.ts). Additive-only, updated once per real Jira sync —
+    // never touched by demo data, local-import, or any other mutation path.
+    const workItemCalibrationHistory = updateWorkItemCalibrationHistory(this.state.workItemCalibrationHistory, merged, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), getTodayIso());
+
     this.set({
       ...this.state,
       data: merged,
@@ -635,6 +666,7 @@ export class CommandCenterStore {
       snapshotHistory: prevSnapshot ? [...this.state.snapshotHistory, prevSnapshot].slice(-MAX_SNAPSHOT_HISTORY) : this.state.snapshotHistory,
       memoryEvents: newMemoryEvents.length > 0 ? [...this.state.memoryEvents, ...newMemoryEvents].slice(-MAX_MEMORY_EVENTS) : this.state.memoryEvents,
       mentionEvents: mergedMentionEvents,
+      workItemCalibrationHistory,
       jiraSync: {
         lastSyncStartedAt: startedAt,
         lastSyncCompletedAt: result.syncedAt ?? new Date().toISOString(),

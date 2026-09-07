@@ -162,13 +162,15 @@ import {
 } from "../src/lib/command-center/jira/work-relevance-calibration";
 // V2.8 — Execution Path & Work Signal Calibration
 import {
-  computeCandidateGapSignals,
   computeExecutionPathStatusTable,
   computeExecutionPathTrace,
   explainExecutionSurface,
   listCandidatePoolActionableItems,
   listJiraItemsInPersonalFocus,
 } from "../src/lib/command-center/execution-path";
+// V2.12 — Signal Semantics Fix (Policy Review / Candidate Evaluation / Execution Gap)
+import { computeActionableSignals } from "../src/lib/command-center/jira/work-relevance-signals";
+import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "../src/lib/command-center/jira/work-relevance-history";
 import type { WorkRelevance } from "../src/lib/command-center/types";
 // V2.10 — Real-time mention/assignment tracking
 import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt } from "../src/lib/command-center/jira/mentions";
@@ -6315,10 +6317,87 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.8 Status table", blockedInv.candidateCount === 0, "a low-scoring ACTIONABLE status can legitimately have 0 candidates");
   ok("V2.8 Status table", observeRow.candidateCount === undefined, "candidateCount is undefined ('N/A') for a non-ACTIONABLE status — candidate evaluation doesn't apply, never fabricated as 0");
 
-  const gapSignals = computeCandidateGapSignals(data, idx, TODAY);
-  ok("V2.8 Signal C", gapSignals.some((s) => s.statusName === "Blocked Investigation"), "an ACTIONABLE status with enough volume (3) and 0 candidates produces a Signal C row");
-  ok("V2.8 Signal C", !gapSignals.some((s) => s.statusName === "In Progress"), "a status with real candidates never produces a Signal C row");
-  ok("V2.8 Signal C", gapSignals.every((s) => !/too broad|policy is (wrong|incorrect)/i.test(s.explanation)), "Signal C never claims the policy is too broad or wrong — observation only (§11)");
+  // V2.12 — supersedes the old, undifferentiated "Signal C": with no calibration history yet
+  // (empty history, the honest cold-start state), a 0-candidate ACTIONABLE status can never
+  // clear Requirement 1's time-window bar, so it always lands in Requirement 2's
+  // informational Candidate Evaluation Signal instead — never Policy Review.
+  const actionableSignals = computeActionableSignals(data, idx, {}, TODAY, undefined, null, null);
+  ok("V2.12 Candidate Evaluation", actionableSignals.candidateEvaluation.some((s) => s.statusName === "Blocked Investigation"), "an ACTIONABLE status with enough volume (3) and 0 candidates produces a Candidate Evaluation signal");
+  ok("V2.12 Candidate Evaluation", !actionableSignals.candidateEvaluation.some((s) => s.statusName === "In Progress"), "a status with real candidates never produces a Candidate Evaluation signal");
+  ok("V2.12 Candidate Evaluation", actionableSignals.candidateEvaluation.every((s) => !/too broad|policy is (wrong|incorrect)/i.test(s.explanation)), "Candidate Evaluation never claims the policy is too broad or wrong — observation only");
+  ok("V2.12 Policy Review", actionableSignals.policyReview.length === 0, "with no calibration history yet, Policy Review Signal never fires — insufficient time-window evidence is reported honestly, never fabricated");
+}
+
+// ----- V2.12 Signal Semantics Fix: Policy Review requires ALL of time-window + percentage +
+// minimum sample size simultaneously; falling short of any one gate demotes it to the
+// informational Candidate Evaluation Signal instead, never silently dropped. -----
+{
+  const policy = buildWorkRelevanceIndex(globalPolicy({ "Long Stuck": "ACTIONABLE", "Small Sample Stuck": "ACTIONABLE", "Recently Stuck": "ACTIONABLE" }));
+  const longStuck = Array.from({ length: 10 }, (_, i) => jiraItem({ id: `pr-${i}`, key: `JPMC-PR-${i}`, jiraStatusName: "Long Stuck" })); // low score — never a candidate
+  const smallSample = Array.from({ length: 5 }, (_, i) => jiraItem({ id: `ss-${i}`, key: `JPMC-SS-${i}`, jiraStatusName: "Small Sample Stuck" }));
+  const recentlyStuck = Array.from({ length: 10 }, (_, i) => jiraItem({ id: `rs-${i}`, key: `JPMC-RS-${i}`, jiraStatusName: "Recently Stuck" }));
+  const data = { ...emptyData(), workItems: [...longStuck, ...smallSample] };
+
+  // "Long Stuck" and "Small Sample Stuck" have been observed since day 1 (50 days ago, past
+  // the 42-day/3-sprint bar); "Recently Stuck" is only added on TODAY's sync, so it has zero
+  // days of observed history — deliberately NOT included in the seed pass below.
+  let history = updateWorkItemCalibrationHistory({}, data, policy, "2026-04-26");
+  const dataWithRecent = { ...data, workItems: [...data.workItems, ...recentlyStuck] };
+  history = updateWorkItemCalibrationHistory(history, dataWithRecent, policy, TODAY);
+
+  const signals = computeActionableSignals(dataWithRecent, policy, history, TODAY, undefined, null, null);
+  const policyReviewStatuses = new Set(signals.policyReview.map((s) => s.statusName));
+  const candidateEvalStatuses = new Set(signals.candidateEvaluation.map((s) => s.statusName));
+
+  ok("V2.12 Policy Review", policyReviewStatuses.has("Long Stuck"), "ACTIONABLE for 50 days, 100% never entered the candidate pool, 10 observed items — clears all three Requirement 1 gates");
+  ok("V2.12 Policy Review", signals.policyReview.find((s) => s.statusName === "Long Stuck")?.neverEnteredPoolPercent === 100, "neverEnteredPoolPercent is computed exactly, not assumed");
+  ok("V2.12 Policy Review", !candidateEvalStatuses.has("Long Stuck"), "a status that clears the Policy Review bar never ALSO appears as an informational Candidate Evaluation signal");
+
+  ok("V2.12 Policy Review", !policyReviewStatuses.has("Small Sample Stuck"), "5 observed items is below the 10-item minimum sample size — Policy Review never fires even at 100% never-entered and a 50-day window");
+  ok("V2.12 Candidate Evaluation", candidateEvalStatuses.has("Small Sample Stuck"), "falls back to the informational Candidate Evaluation signal instead of being silently dropped");
+
+  ok("V2.12 Policy Review", !policyReviewStatuses.has("Recently Stuck"), "a status newly observed as ACTIONABLE (0 days of history) never fires Policy Review — insufficient time-window evidence, even with 10 items and 0% conversion");
+  ok("V2.12 Candidate Evaluation", candidateEvalStatuses.has("Recently Stuck"), "insufficient-time-window statuses still surface as the informational Candidate Evaluation signal, never total silence");
+}
+
+// ----- V2.12 Signal Semantics Fix: Execution Gap Signal is item-level, requires a REAL
+// recorded candidate-pool entry date (not just "currently a live candidate"), respects the
+// grace period, and a linked Action always excludes an item regardless of how long ago it
+// entered the pool. -----
+{
+  const policy = buildWorkRelevanceIndex(globalPolicy({ "In Review": "ACTIONABLE" }));
+  // No dueDate here deliberately — it's fixed to a single calendar date, but this test
+  // scores the SAME items as of three different simulated "today"s (day 1, day 2, TODAY),
+  // and a fixed due date's urgency contribution would drift across them (e.g. "due in 10
+  // days" vs "due today"), making eligibility flicker independently of what this test is
+  // actually verifying. businessImpact + blocked alone clear the >=40 candidate bar at any
+  // of the three dates.
+  const highScore = { businessImpact: 5 as const, priority: "P1" as const, blocked: true };
+  const stale = jiraItem({ id: "eg-1", key: "JPMC-EG-1", jiraStatusName: "In Review", ...highScore }); // entered pool 10 days ago, no Action -> execution gap
+  const fresh = jiraItem({ id: "eg-2", key: "JPMC-EG-2", jiraStatusName: "In Review", ...highScore }); // entered pool 3 days ago -> still inside the 5-day grace period
+  const acted = jiraItem({ id: "eg-3", key: "JPMC-EG-3", jiraStatusName: "In Review", ...highScore }); // entered pool 10 days ago, but now has a linked Action
+
+  // Day 1 (10 days ago) — only `stale` and `acted` exist yet, neither has an Action, both
+  // score high enough to be real live candidates.
+  let history = updateWorkItemCalibrationHistory({}, { ...emptyData(), workItems: [stale, acted] }, policy, "2026-06-05");
+  // Day 2 (3 days ago) — `fresh` is observed for the first time, also a live candidate.
+  history = updateWorkItemCalibrationHistory(history, { ...emptyData(), workItems: [stale, fresh, acted] }, policy, "2026-06-12");
+  // TODAY — a real Action now exists for `acted` (it no longer needs the automatic
+  // candidate slot, but its earlier candidate-pool entry stays on record as a real fact).
+  const dataToday = { ...emptyData(), workItems: [stale, fresh, acted], actions: [calAction({ id: "eg-action-1", relatedWorkItemId: "eg-3" })] };
+  history = updateWorkItemCalibrationHistory(history, dataToday, policy, TODAY);
+
+  const signals = computeActionableSignals(dataToday, policy, history, TODAY, undefined, null, null);
+  const gapItemIds = new Set(signals.executionGap.map((s) => s.itemId));
+
+  ok("V2.12 Execution Gap", gapItemIds.has("eg-1"), "a candidate for 10+ days with no linked Action or Focus is a real execution gap");
+  ok("V2.12 Execution Gap", !gapItemIds.has("eg-2"), "a candidate for only 3 days is still inside the 5-day grace period — no signal yet");
+  ok("V2.12 Execution Gap", !gapItemIds.has("eg-3"), "a linked Action always excludes an item from Execution Gap, no matter how long ago it entered the candidate pool");
+  ok(
+    "V2.12 Execution Gap",
+    signals.executionGap.every((s) => !/policy|review policy/i.test(s.explanation)),
+    "Execution Gap explanations never mention policy — this is item-level triage, not a classification question"
+  );
 }
 
 // ----- §17 Command Bar helpers -----
@@ -6434,13 +6513,17 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
     const start = Date.now();
     const statusRows = computeExecutionPathStatusTable(perfData, bigIndex, TODAY);
-    const gapSignals = computeCandidateGapSignals(perfData, bigIndex, TODAY);
+    const actionableSignals = computeActionableSignals(perfData, bigIndex, {}, TODAY, undefined, null, null);
     const poolItems = listCandidatePoolActionableItems(perfData, bigIndex, TODAY);
     const oneTrace = computeExecutionPathTrace(items[0], perfData, TODAY, bigIndex, null, null);
     const elapsedMs = Date.now() - start;
 
     ok("V2.8 Performance", elapsedMs < 3000, `full execution-path calculation pass over ${size} Jira work items completes well within a generous bound (${elapsedMs}ms)`);
-    ok("V2.8 Performance", statusRows.length > 0 && gapSignals.length >= 0 && poolItems.length >= 0 && !!oneTrace.item, `results over ${size} items are well-formed, not degenerate`);
+    ok(
+      "V2.8 Performance",
+      statusRows.length > 0 && actionableSignals.candidateEvaluation.length >= 0 && actionableSignals.executionGap.length >= 0 && poolItems.length >= 0 && !!oneTrace.item,
+      `results over ${size} items are well-formed, not degenerate`
+    );
   }
 }
 

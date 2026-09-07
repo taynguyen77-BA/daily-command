@@ -34,10 +34,6 @@ import type { PersonalFocusResult } from "./types";
 // the one the product's own default already answers to.
 const REFERENCE_ACTION_PLAN_BUDGET_MINUTES = 30;
 
-// A status needs at least this many observed items before a Signal C verdict is trusted —
-// same conservatism threshold V2.7's policy-review signals already use.
-const MIN_ITEMS_FOR_SIGNAL = 3;
-
 export type CandidateEvaluationState = "ELIGIBLE" | "NOT_ELIGIBLE" | "NOT_APPLICABLE";
 export type ActionPlanState = "SELECTED" | "NOT_SELECTED" | "NOT_APPLICABLE";
 
@@ -343,31 +339,11 @@ export function computeExecutionPathStatusTable(data: CommandCenterData, index: 
   return rows.sort((a, b) => a.statusName.localeCompare(b.statusName));
 }
 
-// ===== §11 Signal C — ACTIONABLE but no items entered the candidate pool =====
-
-export interface CandidateGapSignal {
-  statusName: string;
-  observedItemCount: number;
-  explanation: string;
-}
-
-/** §11 Signal C — deliberately separate from V2.7's PolicyReviewSignal (which is about
- *  Action EVIDENCE); this is specifically about CANDIDATE EVALUATION, an earlier pipeline
- *  stage. Never claims "policy is too broad" — states the observation only (§11). V2.11 §1 —
- *  global: observedItemCount is now summed across every project observing this status. */
-export function computeCandidateGapSignals(data: CommandCenterData, index: WorkRelevanceIndex, today: string, projectKeys?: string[]): CandidateGapSignal[] {
-  return computeExecutionPathStatusTable(data, index, today, projectKeys)
-    .filter((r) => r.relevance === "ACTIONABLE" && r.candidateCount === 0)
-    .map((r) => {
-      const observedItemCount = data.workItems.filter((w) => w.sourceType === "jira" && w.status !== "Done" && w.jiraStatusName === r.statusName).length;
-      return { statusName: r.statusName, observedItemCount };
-    })
-    .filter((r) => r.observedItemCount >= MIN_ITEMS_FOR_SIGNAL)
-    .map((r) => ({
-      ...r,
-      explanation: `Current policy allows this status to be ACTIONABLE, but none of the ${r.observedItemCount} observed item(s) entered the existing candidate pool.`,
-    }));
-}
+// §11 Signal C ("ACTIONABLE but no items entered the candidate pool") was superseded by the
+// V2.12 signal-semantics fix — see jira/work-relevance-signals.ts's Policy Review /
+// Candidate Evaluation split, which replaces this single undifferentiated signal with two
+// properly-evidenced ones (time-windowed + percentage + sample-size gated vs. an
+// informational note).
 
 // ===== §17 Command Bar helpers =====
 

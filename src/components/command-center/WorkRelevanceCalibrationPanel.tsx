@@ -6,7 +6,7 @@
 // policy map, action-plan.ts candidate pool, and Action model — never AI, never a score,
 // never an automatic policy change (§21-23, §34).
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import {
   computeActionableCalibration,
@@ -16,12 +16,20 @@ import {
   computeWorkRelevanceDistribution,
   type PolicyReviewSignal,
 } from "@/lib/command-center/jira/work-relevance-calibration";
-import { computeCandidateGapSignals, computeExecutionPathStatusTable } from "@/lib/command-center/execution-path";
+import { computeExecutionPathStatusTable } from "@/lib/command-center/execution-path";
+import { computeActionableSignals } from "@/lib/command-center/jira/work-relevance-signals";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
-import { WORK_RELEVANCE_VALUES, type CommandCenterData, type JiraProjectScope } from "@/lib/command-center/types";
+import type { WorkItemCalibrationHistory } from "@/lib/command-center/jira/work-relevance-history";
+import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
+import { WORK_RELEVANCE_VALUES, type CommandCenterData, type JiraProjectScope, type PersonalFocusResult } from "@/lib/command-center/types";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
 
-const SIGNAL_STYLE: Record<PolicyReviewSignal["signalType"], string> = {
+// V2.12 — for the status-level table, a NON-ACTIONABLE row's signal still uses V2.7's own
+// REVIEW/NONE/INSUFFICIENT_EVIDENCE language unchanged (that concept — "this status has
+// repeated user Actions even though it's classified WAITING/OBSERVE" — is a different,
+// already-correctly-scoped question this fix does not touch). An ACTIONABLE row's signal
+// column is instead driven by the new three-way taxonomy below.
+const NON_ACTIONABLE_SIGNAL_STYLE: Record<PolicyReviewSignal["signalType"], string> = {
   REVIEW: "text-yellow",
   NONE: "text-text3",
   INSUFFICIENT_EVIDENCE: "text-text3",
@@ -34,6 +42,9 @@ export function WorkRelevanceCalibrationPanel({
   jiraConfigured,
   jiraProjectScope,
   workRelevanceIndex,
+  workItemCalibrationHistory,
+  proactive,
+  personalFocus,
   today,
 }: {
   data: CommandCenterData;
@@ -42,8 +53,12 @@ export function WorkRelevanceCalibrationPanel({
   jiraConfigured: boolean | undefined;
   jiraProjectScope: JiraProjectScope;
   workRelevanceIndex: WorkRelevanceIndex;
+  workItemCalibrationHistory: WorkItemCalibrationHistory;
+  proactive: ProactiveIntelligence | null;
+  personalFocus: PersonalFocusResult | null;
   today: string;
 }) {
+  const [expandedCandidateEvalStatus, setExpandedCandidateEvalStatus] = useState<string | null>(null);
   const projectKeys = jiraProjectScope.mode === "FOCUSED" ? jiraProjectScope.projectKeys : undefined;
 
   // §16 — real Jira + real user Action data only; synthetic (demo/import) data must never
@@ -55,7 +70,11 @@ export function WorkRelevanceCalibrationPanel({
   const observe = useMemo(() => (isSyntheticData ? null : computeObserveCalibration(data, workRelevanceIndex, today, projectKeys)), [isSyntheticData, data, workRelevanceIndex, today, projectKeys]);
   const unknown = useMemo(() => (isSyntheticData ? null : computeUnknownVisibility(data, workRelevanceIndex, projectKeys)), [isSyntheticData, data, workRelevanceIndex, projectKeys]);
   const signals = useMemo(() => (isSyntheticData ? [] : computePolicyReviewSignals(data, workRelevanceIndex, projectKeys)), [isSyntheticData, data, workRelevanceIndex, projectKeys]);
-  const reviewSignals = signals.filter((s) => s.signalType === "REVIEW");
+  // V2.12 — this fix's own scope is ACTIONABLE-status signals only (see work-relevance-
+  // signals.ts). A non-ACTIONABLE REVIEW row (repeated user Actions on a WAITING/OBSERVE/etc
+  // status) is a different, already-correctly-scoped classification-risk question, untouched
+  // here — it keeps the "Review Policy" CTA it always had.
+  const nonActionableReviewSignals = signals.filter((s) => s.signalType === "REVIEW" && s.currentRelevance !== "ACTIONABLE");
   // V2.8 §10 — extends the SAME status table with Candidates/Outcomes columns rather than
   // a parallel table; V2.11 §1 keyed by status name alone (global policy), so it merges
   // cleanly below.
@@ -64,12 +83,19 @@ export function WorkRelevanceCalibrationPanel({
     [isSyntheticData, data, workRelevanceIndex, today, projectKeys]
   );
   const executionPathByKey = useMemo(() => new Map(executionPathRows.map((r) => [r.statusName, r])), [executionPathRows]);
-  // V2.8 §11 Signal C — a distinct pipeline stage (candidate evaluation) from V2.7's Policy
-  // Review Signals (action evidence); shown separately so the two never blur together.
-  const candidateGapSignals = useMemo(
-    () => (isSyntheticData ? [] : computeCandidateGapSignals(data, workRelevanceIndex, today, projectKeys)),
-    [isSyntheticData, data, workRelevanceIndex, today, projectKeys]
+  // V2.12 — replaces the old, single, conflated "ACTIONABLE + no candidate/action evidence
+  // -> Review Policy" inference with three semantically distinct signals. See
+  // jira/work-relevance-signals.ts for the full rationale and thresholds.
+  const actionableSignals = useMemo(
+    () =>
+      isSyntheticData
+        ? { policyReview: [], candidateEvaluation: [], executionGap: [] }
+        : computeActionableSignals(data, workRelevanceIndex, workItemCalibrationHistory, today, projectKeys, proactive, personalFocus),
+    [isSyntheticData, data, workRelevanceIndex, workItemCalibrationHistory, today, projectKeys, proactive, personalFocus]
   );
+  const policyReviewStatusNames = useMemo(() => new Set(actionableSignals.policyReview.map((s) => s.statusName)), [actionableSignals.policyReview]);
+  const candidateEvaluationStatusNames = useMemo(() => new Set(actionableSignals.candidateEvaluation.map((s) => s.statusName)), [actionableSignals.candidateEvaluation]);
+  const executionGapStatusNames = useMemo(() => new Set(actionableSignals.executionGap.map((s) => s.statusName)), [actionableSignals.executionGap]);
 
   if (!jiraConfigured) {
     return (
@@ -185,6 +211,25 @@ export function WorkRelevanceCalibrationPanel({
                 <tbody>
                   {signals.map((s) => {
                     const execRow = executionPathByKey.get(s.statusName);
+                    // V2.12 — an ACTIONABLE row's signal comes from the new three-way
+                    // taxonomy (never the old action-evidence-only REVIEW/NONE), so its
+                    // funnel (Items -> Candidates -> Actions, Requirement 4) and its signal
+                    // label always agree with the sections below.
+                    let signalLabel = "—";
+                    let signalStyle = "text-text3";
+                    if (s.currentRelevance !== "ACTIONABLE") {
+                      signalLabel = s.signalType === "INSUFFICIENT_EVIDENCE" ? "Insufficient evidence" : s.signalType === "REVIEW" ? "Review" : "—";
+                      signalStyle = NON_ACTIONABLE_SIGNAL_STYLE[s.signalType];
+                    } else if (policyReviewStatusNames.has(s.statusName)) {
+                      signalLabel = "Policy review";
+                      signalStyle = "text-yellow";
+                    } else if (candidateEvaluationStatusNames.has(s.statusName)) {
+                      signalLabel = "Candidate evaluation";
+                      signalStyle = "text-text2";
+                    } else if (executionGapStatusNames.has(s.statusName)) {
+                      signalLabel = "Execution gap";
+                      signalStyle = "text-yellow";
+                    }
                     return (
                       <tr key={s.statusName} className="border-b border-border last:border-0">
                         <td className="py-1 pr-3 text-text">{s.statusName}</td>
@@ -194,7 +239,7 @@ export function WorkRelevanceCalibrationPanel({
                         <td className="py-1 pr-3 text-right text-text2">{s.actionEvidenceCount}</td>
                         <td className="py-1 pr-3 text-right text-text2">{s.completionEvidenceCount}</td>
                         <td className="py-1 pr-3 text-right text-text2">{execRow?.outcomeCount ?? 0}</td>
-                        <td className={`py-1 ${SIGNAL_STYLE[s.signalType]}`}>{s.signalType === "INSUFFICIENT_EVIDENCE" ? "Insufficient evidence" : s.signalType === "REVIEW" ? "Review" : "—"}</td>
+                        <td className={`py-1 ${signalStyle}`}>{signalLabel}</td>
                       </tr>
                     );
                   })}
@@ -203,12 +248,29 @@ export function WorkRelevanceCalibrationPanel({
             </div>
           </div>
 
-          {/* §8-9 — Policy Review Signals: neutral evidence language, never a causal claim. */}
-          {reviewSignals.length > 0 && (
+          {/* V2.12 — Policy Review Signals. The ONLY signal type allowed the "Review Policy"
+              CTA (see the V2.12 audit's confirmed bug: Candidate Evaluation used to render
+              this same CTA too). Two sources feed this section, both real classification-
+              risk evidence: (a) an ACTIONABLE status that's cleared the time-window +
+              percentage + sample-size bar below (Requirement 1), and (b) a non-ACTIONABLE
+              status with repeated user Actions (V2.7 §8-9, untouched by this fix). */}
+          {(actionableSignals.policyReview.length > 0 || nonActionableReviewSignals.length > 0) && (
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-text3">Policy review signals</p>
-              {reviewSignals.map((s) => (
-                <div key={s.statusName} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
+              {actionableSignals.policyReview.map((s) => (
+                <div key={`actionable-${s.statusName}`} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
+                  <p className="font-mono text-text">{s.statusName}</p>
+                  <p className="mt-0.5 text-text3">
+                    Current policy: <span className="text-text2">ACTIONABLE</span> for {s.daysActionable} day(s) · {s.observedItemCount} item(s) observed
+                  </p>
+                  <p className="mt-1 text-text2">{s.explanation}</p>
+                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">
+                    Review Policy
+                  </Link>
+                </div>
+              ))}
+              {nonActionableReviewSignals.map((s) => (
+                <div key={`non-actionable-${s.statusName}`} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
                   <p className="font-mono text-text">{s.statusName}</p>
                   <p className="mt-0.5 text-text3">
                     Current policy: <span className="text-text2">{s.currentRelevance}</span>
@@ -222,18 +284,76 @@ export function WorkRelevanceCalibrationPanel({
             </div>
           )}
 
-          {/* V2.8 §11 Signal C — a distinct pipeline stage from Policy Review Signals above:
-              candidate EVALUATION, not action evidence. Never claims "policy is too broad". */}
-          {candidateGapSignals.length > 0 && (
+          {/* V2.12 Requirement 2 — Candidate Evaluation Signal. Deliberately NEUTRAL/gray,
+              never amber/warning: this is informational, not an alert, and must never show
+              the "Review Policy" CTA (the confirmed bug this fix corrects). "View Items"
+              expands the real, filtered item list inline rather than linking to a policy
+              config screen. */}
+          {actionableSignals.candidateEvaluation.length > 0 && (
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-text3">Candidate evaluation signals</p>
-              {candidateGapSignals.map((s) => (
-                <div key={s.statusName} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
-                  <p className="font-mono text-text">{s.statusName}</p>
+              {actionableSignals.candidateEvaluation.map((s) => {
+                const expanded = expandedCandidateEvalStatus === s.statusName;
+                const items = expanded ? data.workItems.filter((w) => w.sourceType === "jira" && w.status !== "Done" && w.jiraStatusName === s.statusName) : [];
+                return (
+                  <div key={s.statusName} className="rounded-md border border-border bg-surface2 p-2.5 text-xs">
+                    <p className="font-mono text-text">{s.statusName}</p>
+                    <p className="mt-1 text-text2">{s.explanation}</p>
+                    <button
+                      onClick={() => setExpandedCandidateEvalStatus(expanded ? null : s.statusName)}
+                      className="mt-2 inline-block font-medium text-accent2 hover:underline"
+                    >
+                      {expanded ? "Hide items" : "View Items"}
+                    </button>
+                    {expanded && (
+                      <ul className="mt-2 space-y-1 border-t border-border pt-2">
+                        {items.map((item) =>
+                          item.sourceUrl ? (
+                            <li key={item.id}>
+                              <a href={item.sourceUrl} target="_blank" rel="noreferrer" className="text-accent2 hover:underline">
+                                {item.key}
+                              </a>{" "}
+                              <span className="text-text2">{item.title}</span>
+                            </li>
+                          ) : (
+                            <li key={item.id} className="text-text2">
+                              {item.key} {item.title}
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* V2.12 Requirement 3 — Execution Gap Signal. Item-level triage ("Review Items"),
+              not a policy question — these items already passed candidate evaluation, so
+              "Review Policy" would misleadingly point at the wrong stage of the pipeline.
+              Links straight to the real Jira issue when a source URL is configured. */}
+          {actionableSignals.executionGap.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-text3">Execution gap signals</p>
+              {actionableSignals.executionGap.map((s) => (
+                <div key={s.itemId} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
+                  <p className="font-mono text-text">
+                    {s.itemKey} <span className="text-text3">({s.statusName})</span>
+                  </p>
                   <p className="mt-1 text-text2">{s.explanation}</p>
-                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">
-                    Review Policy
-                  </Link>
+                  {data.workItems.find((w) => w.id === s.itemId)?.sourceUrl ? (
+                    <a
+                      href={data.workItems.find((w) => w.id === s.itemId)!.sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-2 inline-block font-medium text-accent2 hover:underline"
+                    >
+                      Review Item
+                    </a>
+                  ) : (
+                    <span className="mt-2 block font-medium text-text3">Review Item — no Jira URL configured</span>
+                  )}
                 </div>
               ))}
             </div>

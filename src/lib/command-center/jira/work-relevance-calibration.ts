@@ -250,6 +250,12 @@ export function computePolicyReviewSignals(data: CommandCenterData, index: WorkR
 
 export type CalibrationHealthState = "HEALTHY" | "REVIEW" | "INSUFFICIENT_EVIDENCE";
 
+/** A plain rollup over whatever PolicyReviewSignal[] it's given — callers decide the scope.
+ *  V2.12 — data-settings/page.tsx's own Data Health dimension no longer calls this directly
+ *  with the full unfiltered signal set: it must ALSO fold in the separately-computed
+ *  ACTIONABLE Policy Review Signal (jira/work-relevance-signals.ts), which this module's own
+ *  ACTIONABLE branch (action-evidence-only) no longer speaks for. This function still calls
+ *  it correctly for a signals array that's already scoped the way the caller wants. */
 export function computeCalibrationHealthState(signals: PolicyReviewSignal[]): CalibrationHealthState {
   if (signals.length === 0) return "INSUFFICIENT_EVIDENCE";
   if (signals.some((s) => s.signalType === "REVIEW")) return "REVIEW";
