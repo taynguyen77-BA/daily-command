@@ -8,8 +8,16 @@
 // file only supplies the real fetch implementation and the real (secret) config.
 
 import "server-only";
-import { fetchIssueChangelogWith, fetchJiraIssuesWith, fetchJiraProjectsWith, type FetchIssuesOptions, type JiraFetchResult } from "../command-center/jira/http";
-import type { JiraChangelogHistory, JiraConnectionConfig, JiraIssue, JiraProject } from "../command-center/jira/types";
+import {
+  fetchIssueChangelogWith,
+  fetchIssueCommentsWith,
+  fetchJiraIssuesWith,
+  fetchJiraProjectsWith,
+  fetchMentionedIssuesWith,
+  type FetchIssuesOptions,
+  type JiraFetchResult,
+} from "../command-center/jira/http";
+import type { JiraChangelogHistory, JiraComment, JiraConnectionConfig, JiraIssue, JiraProject } from "../command-center/jira/types";
 
 export function getJiraConfig(): JiraConnectionConfig | null {
   const baseUrl = process.env.JIRA_BASE_URL;
@@ -68,4 +76,14 @@ export async function fetchJiraIssues(config: JiraConnectionConfig, options: Fet
 /** V1.4 §32 — best-effort, called only for a small prioritized set of issue keys. */
 export async function fetchJiraIssueChangelog(config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraChangelogHistory[]>> {
   return fetchIssueChangelogWith(fetch, config, issueKey);
+}
+
+/** V2.10 §2 — "which issues have a comment mentioning this account?" */
+export async function fetchMentionedIssues(config: JiraConnectionConfig, accountId: string, sinceIso?: string): Promise<JiraFetchResult<JiraIssue[]>> {
+  return fetchMentionedIssuesWith(fetch, config, accountId, sinceIso);
+}
+
+/** V2.10 §2 — best-effort, called only for the small set of issue keys fetchMentionedIssues returned. */
+export async function fetchIssueComments(config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraComment[]>> {
+  return fetchIssueCommentsWith(fetch, config, issueKey);
 }

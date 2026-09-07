@@ -8,6 +8,21 @@ import { applyProjectScope } from "@/lib/command-center/jira/project-scope";
 import { buildWorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { computeProactiveIntelligence } from "@/lib/command-center/proactive";
 import { computePersonalFocus } from "@/lib/command-center/personal-focus";
+import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "@/lib/command-center/notify";
+import type { AttentionItem, AttentionItemState, CommandCenterData } from "@/lib/command-center/types";
+
+const NOTIFY_ENDPOINT = "/api/command-center/notify";
+
+/** V2.10 §3 — fire-and-forget: a Slack delivery failure (or SLACK_WEBHOOK_URL simply not
+ *  being configured, the common case) must never surface as an app error or block the UI. */
+function sendSlackNotifications(data: CommandCenterData, previousAttentionState: Record<string, AttentionItemState>, attentionQueue: AttentionItem[]) {
+  const signals = computeNewPersonalSignals(previousAttentionState, attentionQueue);
+  if (signals.length === 0) return;
+  const payloads = buildSlackNotifyPayloads(signals, data);
+  fetch(NOTIFY_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ signals: payloads }) }).catch(() => {
+    // best-effort — never surfaces as an app error
+  });
+}
 
 export function useCommandCenter() {
   const state = useSyncExternalStore(
@@ -56,25 +71,51 @@ export function useCommandCenter() {
   // V1.4 — one composed bundle for every proactive engine, mirroring `derived` above.
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
   const proactive = useMemo(
-    () => (state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, workRelevanceIndex) : null),
+    () =>
+      state.loaded
+        ? computeProactiveIntelligence(
+            filteredData,
+            derived,
+            state.snapshotHistory,
+            previousSnapshot,
+            state.attentionState,
+            sourceType,
+            today,
+            workRelevanceIndex,
+            state.mentionEvents,
+            state.personalIdentity?.accountId
+          )
+        : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, state.mentionEvents, state.personalIdentity?.accountId]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
   // RE_ESCALATED, etc) computed above — a no-op when nothing changed (commitAttentionState
   // diffs internally). `attentionQueue` is passed too so a RE_ESCALATED transition can log
   // a readable memory event.
+  //
+  // V2.10 §3 — real-time delivery is wired HERE, not at the end of the (stateless)
+  // jira/sync/route.ts the dev prompt named: attentionState/attentionQueue only ever exist
+  // client-side in this architecture (the sync route returns raw normalized data and
+  // explicitly never persists anything — see its own top comment), so this is the one place
+  // "previous attentionState" (still `state.attentionState`, not yet committed) and "the
+  // freshly computed attentionQueue" are both available together, exactly matching
+  // computeNewPersonalSignals' signature. `state.attentionState` is read from the render
+  // closure that produced `proactive`, i.e. genuinely pre-commit.
   useEffect(() => {
-    if (proactive) commandCenterStore.commitAttentionState(proactive.nextAttentionState, proactive.attentionQueue);
+    if (!proactive) return;
+    commandCenterStore.commitAttentionState(proactive.nextAttentionState, proactive.attentionQueue);
+    sendSlackNotifications(filteredData, state.attentionState, proactive.attentionQueue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [proactive]);
 
   // V1.6 — deterministic Personal Focus Engine, composed the same way `proactive` is
   // composed above. No AI calls; recomputed fresh every render from live project state.
   const personalFocus = useMemo(
-    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today) : null),
+    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, proactive, state.ownerName, today]
+    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId]
   );
 
   // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
@@ -99,7 +140,20 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const derived = deriveData(filteredData, previousSnapshot, today);
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
   const workRelevanceIndex = buildWorkRelevanceIndex(state.jiraWorkRelevancePolicy);
-  const proactive = state.loaded ? computeProactiveIntelligence(filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, workRelevanceIndex) : null;
-  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today) : null;
+  const proactive = state.loaded
+    ? computeProactiveIntelligence(
+        filteredData,
+        derived,
+        state.snapshotHistory,
+        previousSnapshot,
+        state.attentionState,
+        sourceType,
+        today,
+        workRelevanceIndex,
+        state.mentionEvents,
+        state.personalIdentity?.accountId
+      )
+    : null;
+  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId) : null;
   return { filteredData, derived, proactive, personalFocus, workRelevanceIndex };
 }

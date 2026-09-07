@@ -3,7 +3,7 @@
 // client or touches credentials. Same "dumb caller, server does the real work" pattern as
 // ClaudeProvider (see ../ai/claude-provider.ts).
 
-import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary } from "../types";
+import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary, MentionEvent } from "../types";
 import type { DataSourceProvider, DataSourceSyncResult } from "./types";
 
 const SYNC_ENDPOINT = "/api/command-center/jira/sync";
@@ -13,7 +13,7 @@ const PROJECTS_ENDPOINT = "/api/command-center/jira/projects";
 export class JiraDataSource implements DataSourceProvider {
   readonly type = "jira" as const;
 
-  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[] }): Promise<DataSourceSyncResult> {
+  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string }): Promise<DataSourceSyncResult> {
     try {
       const res = await fetch(SYNC_ENDPOINT, {
         method: "POST",
@@ -36,6 +36,7 @@ export class JiraDataSource implements DataSourceProvider {
         scopeMode?: JiraProjectScopeMode;
         focusedProjectCount?: number;
         focusedProjects?: string[];
+        mentionEvents?: MentionEvent[];
       };
       if (!res.ok || !json.ok) {
         return { ok: false, error: json.error ?? `Jira sync failed (${res.status}).`, errorKind: json.errorKind ?? "unknown" };
@@ -54,6 +55,7 @@ export class JiraDataSource implements DataSourceProvider {
         scopeMode: json.scopeMode,
         focusedProjectCount: json.focusedProjectCount,
         focusedProjects: json.focusedProjects,
+        mentionEvents: json.mentionEvents,
       };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Network error contacting the sync endpoint.", errorKind: "network-error" };

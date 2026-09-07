@@ -131,3 +131,28 @@ export const jiraChangelogResponseSchema = z.object({
   total: z.number().default(0),
 });
 export type JiraChangelogResponse = z.infer<typeof jiraChangelogResponseSchema>;
+
+// V2.10 §2 — comment shapes, fetched only for a small prioritized set of issue keys (those
+// returned by the mention-search JQL — see fetchIssueCommentsWith in ./http.ts), never bulk.
+// `body` is deliberately z.unknown(): Jira's v3 API returns Atlassian Document Format (a
+// nested object) by default, but some instances/older responses return a plain string —
+// never assumed to be one shape or the other (§29's "every field tolerant of real-instance
+// variance"). See ./mentions.ts for the code that actually reads it (ADF-or-string, never
+// throws on an unexpected shape).
+export const jiraCommentSchema = z.object({
+  id: z.string().optional(),
+  author: jiraUserSchema.nullable().optional(),
+  body: z.unknown().nullable().optional(),
+  created: z.string().optional(),
+});
+export type JiraComment = z.infer<typeof jiraCommentSchema>;
+
+// `comments` required (not `.default([])`), same "malformed must not look like empty"
+// reasoning as jiraSearchResponseSchema.issues above.
+export const jiraCommentPageResponseSchema = z.object({
+  comments: z.array(jiraCommentSchema),
+  startAt: z.number().default(0),
+  maxResults: z.number().default(0),
+  total: z.number().default(0),
+});
+export type JiraCommentPageResponse = z.infer<typeof jiraCommentPageResponseSchema>;

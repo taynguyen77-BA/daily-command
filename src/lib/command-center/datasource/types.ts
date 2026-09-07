@@ -3,7 +3,7 @@
 // the app. The store only ever talks to a DataSourceProvider, never to Jira or the import
 // pipeline directly.
 
-import type { CommandCenterData, DataSourceType, JiraErrorKind, JiraProjectScopeMode } from "../types";
+import type { CommandCenterData, DataSourceType, JiraErrorKind, JiraProjectScopeMode, MentionEvent } from "../types";
 
 export interface DataSourceSyncResult {
   ok: boolean;
@@ -24,9 +24,12 @@ export interface DataSourceSyncResult {
   scopeMode?: JiraProjectScopeMode;
   focusedProjectCount?: number;
   focusedProjects?: string[];
+  // V2.10 §2 — "who mentioned me in a comment?", additive/optional: only ever populated when
+  // the sync request carried a configured accountId (see DataSourceProvider.sync below).
+  mentionEvents?: MentionEvent[];
 }
 
 export interface DataSourceProvider {
   readonly type: DataSourceType;
-  sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[] }): Promise<DataSourceSyncResult>;
+  sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string }): Promise<DataSourceSyncResult>;
 }

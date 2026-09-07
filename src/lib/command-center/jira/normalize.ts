@@ -82,6 +82,9 @@ export function normalizeIssue(issue: JiraIssue, options: NormalizeOptions): { w
     status: mapStatus(f.status?.name, f.status?.statusCategory?.key, flagged),
     priority: mapPriority(f.priority?.name),
     owner: f.assignee?.displayName,
+    // V2.10 §1 — the stable Jira accountId behind `owner`; preferred over the display name
+    // for identity matching wherever a `PersonalIdentity.accountId` is configured.
+    ownerId: f.assignee?.accountId,
     dueDate: f.duedate ?? undefined,
     createdDate: truncateToDate(f.created, options.today),
     lastUpdated: truncateToDate(f.updated, options.today),

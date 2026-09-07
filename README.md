@@ -2,7 +2,7 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.2.1
+**Current version:** V2.10
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
@@ -43,6 +43,7 @@ Optional, only meaningful once the three above are set:
 | `JIRA_TIMEZONE_OFFSET_MINUTES` | Tightens the incremental-sync cursor to minute precision for your Jira instance's configured timezone (e.g. `420` for UTC+7 / Vietnam). | Falls back to a day-level cursor — still correct, just re-fetches a bit more per sync. |
 | `JIRA_PROJECT_KEYS` | Comma-separated list to scope sync to specific projects (e.g. `JPMC,UBS`). | Syncs all discoverable projects. |
 | `JIRA_PROJECT_CLIENT_MAP` | JSON object mapping a Jira project key to a display client name (e.g. `{"JPMC":"J.P. Morgan"}`), for "one client, many projects". | Project name is used as the client name. |
+| `CRON_SECRET` (V2.10) | Requires `Authorization: Bearer <value>` on every request to `/api/command-center/jira/sync`, for the scheduled sync in `vercel.json` / `.github/workflows/sync.yml`. | The sync route stays exactly as open as it always was — no auth check. Note: setting this also disables the in-app "Sync Now" button, which cannot safely hold a server secret; see that route's own comment. |
 
 A malformed value for any optional variable is ignored (never throws) and falls back to the safe default above.
 
@@ -53,6 +54,14 @@ A malformed value for any optional variable is ignored (never throws) and falls 
 | `ANTHROPIC_API_KEY` | Every AI-labeled output (risk explanations, communication drafts, artifact wording, weekly review narrative, etc.) runs through the deterministic **Mock AI** provider instead — same schemas, same trust labeling, clearly marked "Mock fallback" everywhere it appears. No external call is made, no data leaves the browser. |
 
 Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser only ever POSTs an already-built prompt string and receives back schema-validated JSON — it never talks to Anthropic directly and never sees the key.
+
+### Slack (optional — real-time "mentioned me" / "assigned to me" notifications, V2.10)
+
+| Variable | Behavior when missing |
+| --- | --- |
+| `SLACK_WEBHOOK_URL` | No Slack notifications are ever sent; everything else (mention/assignment tracking in the Attention Queue and Personal Focus, the app itself) is unaffected. |
+
+Read server-only inside `src/app/api/command-center/notify/route.ts`; the browser only ever POSTs already-built, non-secret signal payloads (issue key, summary, Jira link, mention/assignment detail) and never sees the webhook URL. Requires a `PersonalIdentity.accountId` configured in Data & Settings (see the Jira account ID field) — without one, mention/assignment tracking has nothing to match against and no notification is ever produced, regardless of whether this variable is set.
 
 ### Configuring in Vercel
 
@@ -71,6 +80,10 @@ Project Settings → Environment Variables → add the ones you need for the **P
 Live Jira and Live Claude validation should be the **first thing done after deployment**, once real credentials are configured in Vercel.
 
 ---
+
+# V2.10 — Real-Time Mention & Assignment Tracking
+
+See the assistant's final report for this pass in the project conversation history. Summary: identity matching now prefers a configured Jira `accountId` over display name (disambiguating two people who share one on a multi-org instance); the Attention Queue/Personal Focus gained two new, append-only categories — MENTION (a comment mentioning you) and ASSIGNMENT (a new direct assignment) — both 100% deterministic, zero AI calls; a diff-based Slack notifier fires only for genuinely new personal signals; and sync can now run on a schedule (Vercel Cron or a GitHub Actions fallback), gated by an optional `CRON_SECRET`. The six pre-existing Attention Queue/Personal Focus categories are untouched — same order, same output, same tests.
 
 # V2.2.1 — Production Completion & Deployment Readiness
 

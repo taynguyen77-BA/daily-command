@@ -8,10 +8,12 @@
 
 import {
   jiraChangelogResponseSchema,
+  jiraCommentPageResponseSchema,
   jiraProjectSearchResponseSchema,
   jiraSearchJqlResponseSchema,
   jiraSearchResponseSchema,
   type JiraChangelogHistory,
+  type JiraComment,
   type JiraConnectionConfig,
   type JiraIssue,
   type JiraProject,
@@ -263,8 +265,23 @@ async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnecti
  * silently restarting via the other endpoint, which could otherwise return a subtly
  * different result set mid-fetch.
  */
-export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, options: FetchIssuesOptions): Promise<JiraFetchResult<JiraIssue[]>> {
-  const jql = buildIssuesJql(options);
+/**
+ * V2.10 §2 — extracted from the body of what was fetchJiraIssuesWith, so a second caller
+ * (fetchMentionedIssuesWith below) can reuse the exact same cursor-pagination/error-
+ * classification/timeout logic against a different JQL string, rather than forking a
+ * parallel implementation. `classicFallbackOptions`, when provided, preserves
+ * fetchJiraIssuesWith's original "first page 404 -> retry via the classic endpoint" behavior
+ * unchanged; omitting it (as the mention search does) simply skips that fallback — the
+ * classic endpoint has no equivalent of the mention JQL's `comment ~ "accountid:..."` clause
+ * to fall back to, and Atlassian has sunset it on Cloud regardless (see fetchJiraIssuesClassic
+ * above).
+ */
+async function fetchIssuesByJqlCursor(
+  fetchImpl: FetchLike,
+  config: JiraConnectionConfig,
+  jql: string,
+  classicFallbackOptions?: FetchIssuesOptions
+): Promise<JiraFetchResult<JiraIssue[]>> {
   const issues: JiraIssue[] = [];
   let nextPageToken: string | undefined;
   let firstPage = true;
@@ -279,7 +296,7 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
         signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
       });
       if (!res.ok) {
-        if (firstPage && res.status === 404) return fetchJiraIssuesClassic(fetchImpl, config, options);
+        if (firstPage && res.status === 404 && classicFallbackOptions) return fetchJiraIssuesClassic(fetchImpl, config, classicFallbackOptions);
         return { ok: false, ...(await describeJiraError(res)) };
       }
       firstPage = false;
@@ -298,6 +315,63 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
       nextPageToken = parsed.data.nextPageToken;
     }
     return { ok: true, data: issues, recordsFetched: issues.length, method: "jql-cursor" };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
+  }
+}
+
+export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, options: FetchIssuesOptions): Promise<JiraFetchResult<JiraIssue[]>> {
+  return fetchIssuesByJqlCursor(fetchImpl, config, buildIssuesJql(options), options);
+}
+
+/**
+ * V2.10 §2 — "who mentioned me in a comment?" A second, SEPARATE search from the main
+ * assignee/watch sync above (fetchJiraIssuesWith) — comments are never requested in bulk
+ * (see ISSUE_FIELDS's own comment about why "flagged" is the only field excluded from the
+ * strict field list; pulling every comment on every issue would be the same mistake at much
+ * higher cost). This only asks Jira "which issues have a comment mentioning this account",
+ * scoped by the same incremental cursor already computed for the main sync (`sinceIso` —
+ * pass buildIncrementalSinceParam's result in directly; this function never recomputes it).
+ * The actual comment bodies/excerpts are fetched only for the small set of issue keys this
+ * returns — see fetchIssueCommentsWith below.
+ */
+export async function fetchMentionedIssuesWith(
+  fetchImpl: FetchLike,
+  config: JiraConnectionConfig,
+  accountId: string,
+  sinceIso?: string
+): Promise<JiraFetchResult<JiraIssue[]>> {
+  const safeAccountId = accountId.replace(/"/g, '\\"');
+  const clauses = [`comment ~ "accountid:${safeAccountId}"`];
+  if (sinceIso) clauses.push(`updated >= "${sinceIso}"`);
+  const jql = `${clauses.join(" AND ")} order by updated desc`;
+  return fetchIssuesByJqlCursor(fetchImpl, config, jql);
+}
+
+/**
+ * V2.10 §2 — single-page comment fetch for one issue, same "best-effort, called only for a
+ * small prioritized set of issue keys" discipline as fetchIssueChangelogWith below (this is
+ * only ever called for the issue keys fetchMentionedIssuesWith returned, never every synced
+ * issue). Deliberately not paginated deeper than the first page (100 entries, matching the
+ * changelog fetcher's own documented limit) — a comment thread with more than that is a rare
+ * case this best-effort signal doesn't need to fully cover.
+ */
+export async function fetchIssueCommentsWith(fetchImpl: FetchLike, config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraComment[]>> {
+  try {
+    const res = await fetchImpl(buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, { maxResults: "100" }), {
+      headers: { Authorization: authHeader(config), Accept: "application/json" },
+      signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+    }
+    const parsed = jiraCommentPageResponseSchema.safeParse(json);
+    if (!parsed.success) return { ok: false, error: "Jira's comment response did not match the expected shape.", errorKind: "malformed-response" };
+    return { ok: true, data: parsed.data.comments, recordsFetched: parsed.data.comments.length };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
   }

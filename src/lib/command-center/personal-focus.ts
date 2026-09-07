@@ -51,6 +51,8 @@ const ESTIMATE_HEURISTICS: Record<string, number> = {
   "attention:DECISION": 15,
   "attention:ACTION": 20,
   "attention:COMMUNICATION": 5,
+  "attention:MENTION": 5, // reading and responding to a comment is quick
+  "attention:ASSIGNMENT": 15, // reviewing a newly assigned item and planning the work
   "loop:no-action": 15,
   "loop:outcome-pending": 5,
 };
@@ -91,6 +93,14 @@ function resolveAttentionEntity(item: AttentionItem, data: CommandCenterData): R
     const items = data.workItems.filter((w) => w.fixVersion === ref.id);
     return { projectId: items[0]?.projectId, workItemIds: items.map((w) => w.id) };
   }
+  if (ref.type === "workItem") {
+    // V2.10 §2 — MENTION/ASSIGNMENT items point directly at the real WorkItem the
+    // comment/reassignment happened on, so they still get real project/due-date context
+    // through this same resolution path even though their ownership is decided elsewhere
+    // (see candidateFromAttentionItem's ownershipExplicit override below).
+    const workItem = data.workItems.find((w) => w.id === ref.id);
+    return { projectId: workItem?.projectId, workItemIds: workItem ? [workItem.id] : [], dueDate: workItem?.dueDate };
+  }
   return { workItemIds: [] };
 }
 
@@ -99,25 +109,54 @@ function resolveAttentionEntity(item: AttentionItem, data: CommandCenterData): R
  *  owner across the related action/work items is OWNER UNCLEAR — never guessed at, and
  *  never treated as explicit even if one of the disagreeing owners happens to match the
  *  configured identity (§13 "not allowed: name similarity guessing... because it looks
- *  important"). */
+ *  important").
+ *
+ *  V2.10 §1 — `ownerId` is resolved the same way, in parallel, from `WorkItem.ownerId`
+ *  (Action has no accountId equivalent, so an action's own `owner` never contributes an id).
+ *  Populated unconditionally; callers decide whether to trust the id-based or name-based
+ *  resolution (see isExplicitOwner below). */
 interface OwnerResolution {
   label?: string;
   ambiguous: boolean;
+  ownerId?: string;
+  ownerIdAmbiguous: boolean;
 }
 
 function resolveOwner(entity: ResolvedEntity, data: CommandCenterData): OwnerResolution {
   const owners = new Set<string>();
+  const ownerIds = new Set<string>();
   if (entity.actionId) {
     const action = data.actions.find((a) => a.id === entity.actionId);
     if (action?.owner) owners.add(action.owner);
   }
   for (const wid of entity.workItemIds) {
-    const owner = data.workItems.find((w) => w.id === wid)?.owner;
-    if (owner) owners.add(owner);
+    const workItem = data.workItems.find((w) => w.id === wid);
+    if (workItem?.owner) owners.add(workItem.owner);
+    if (workItem?.ownerId) ownerIds.add(workItem.ownerId);
   }
-  if (owners.size === 0) return { label: undefined, ambiguous: false };
-  if (owners.size === 1) return { label: Array.from(owners)[0], ambiguous: false };
-  return { label: undefined, ambiguous: true };
+  const ownerId = ownerIds.size === 1 ? Array.from(ownerIds)[0] : undefined;
+  const ownerIdAmbiguous = ownerIds.size > 1;
+  if (owners.size === 0) return { label: undefined, ambiguous: false, ownerId, ownerIdAmbiguous };
+  if (owners.size === 1) return { label: Array.from(owners)[0], ambiguous: false, ownerId, ownerIdAmbiguous };
+  return { label: undefined, ambiguous: true, ownerId, ownerIdAmbiguous };
+}
+
+/** V2.10 §1 — a lightweight identity view every candidate builder matches against. `ownerId`
+ *  is the configured PersonalIdentity's Jira accountId, when set. */
+interface IdentityRef {
+  displayName?: string;
+  ownerId?: string;
+}
+
+/** V2.10 §1 — prefers accountId matching (stable, unique, never edited) over displayName
+ *  matching (editable, non-unique across a multi-org Jira instance) whenever the configured
+ *  identity has an accountId. Falls back to the pre-V2.10 displayName comparison only when
+ *  it doesn't — zero behavior change for installations that never set one. */
+function isExplicitOwner(resolution: OwnerResolution, identity: IdentityRef): boolean {
+  if (identity.ownerId) {
+    return !resolution.ownerIdAmbiguous && !!resolution.ownerId && resolution.ownerId === identity.ownerId;
+  }
+  return !resolution.ambiguous && !!identity.displayName && !!resolution.label && resolution.label === identity.displayName;
 }
 
 /** V1.7 §20 — the nearest explicit due/review date among related records; undefined when
@@ -133,7 +172,11 @@ function resolveDueDate(entity: ResolvedEntity, data: CommandCenterData): string
 }
 
 function whyOnMyList(ownerLabel: string | undefined, ownershipExplicit: boolean, ownerAmbiguous: boolean, hasDecision: boolean): string {
-  if (ownershipExplicit) return `Explicitly owned by you (${ownerLabel}).`;
+  // V2.10 §2 — MENTION/ASSIGNMENT candidates arrive with ownershipExplicit already true but
+  // no resolved ownerLabel (there's no "owner" field to resolve — see resolveAttentionEntity's
+  // "workItem" case); the original six categories can never reach this branch, since their
+  // own ownershipExplicit computation requires a non-empty ownerLabel to begin with.
+  if (ownershipExplicit) return ownerLabel ? `Explicitly owned by you (${ownerLabel}).` : "Explicitly yours — you were mentioned or newly assigned.";
   // V1.7 §14 — decision/action owner-match phrasing, distinct from a plain work-item owner.
   if (ownerAmbiguous) return "OWNER UNCLEAR — related items have more than one explicit owner, so this is not confidently assigned to anyone.";
   if (ownerLabel) return `Explicitly owned by ${ownerLabel}, not you.`;
@@ -143,7 +186,7 @@ function whyOnMyList(ownerLabel: string | undefined, ownershipExplicit: boolean,
 
 function buildFactors(params: {
   severity: AttentionSeverity;
-  category: "DRIFT" | "RISK" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION" | "LOOP";
+  category: "DRIFT" | "RISK" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION" | "LOOP" | "MENTION" | "ASSIGNMENT";
   reviewUrgency?: "REVIEW" | "URGENT_REVIEW";
   ageDays?: number;
   dependencyHeat?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
@@ -151,11 +194,17 @@ function buildFactors(params: {
   ownerLabel?: string;
   ownerAmbiguous?: boolean;
   ownerName?: string;
+  // V2.10 §1 — precomputed by isExplicitOwner() so this function never re-derives the
+  // id-vs-displayName decision itself; it only renders the factor row.
+  ownershipExplicit?: boolean;
 }): PersonalFocusFactor[] {
   const severityContribution: Record<AttentionSeverity, number> = { CRITICAL: 30, HIGH: 20, MEDIUM: 10, LOW: 4, INFO: 0 };
   // Decisions and stalled loops carry as much delivery impact as drift/risk — a decision
   // review is exactly the kind of DO_NOW item the product's own north star leads with.
-  const deliveryImpact: Record<string, number> = { DRIFT: 15, RISK: 12, DECISION: 15, LOOP: 12, DEPENDENCY: 10, ACTION: 6, COMMUNICATION: 3 };
+  // V2.10 §2 — a mention/new-assignment is exactly the kind of unambiguous personal signal
+  // this scoring model already rewards most (comparable to DRIFT/DECISION), since ownership
+  // is never in question for either (see ownershipExplicit's hardcoded true, above).
+  const deliveryImpact: Record<string, number> = { DRIFT: 15, RISK: 12, DECISION: 15, LOOP: 12, DEPENDENCY: 10, ACTION: 6, COMMUNICATION: 3, MENTION: 12, ASSIGNMENT: 15 };
 
   const factors: PersonalFocusFactor[] = [
     { name: "Severity / urgency", contribution: severityContribution[params.severity], max: 30, available: true, detail: `Severity: ${params.severity}` },
@@ -193,15 +242,19 @@ function buildFactors(params: {
     factors.push({ name: "Action-failure signal", contribution: 0, max: 10, available: false, detail: "Not an action-effectiveness item" });
   }
 
-  if (params.ownerAmbiguous) {
+  if (params.ownershipExplicit) {
+    // V2.10 §2 — a MENTION/ASSIGNMENT candidate arrives with ownershipExplicit already true
+    // and no resolved ownerLabel (there's no "owner" field involved — see
+    // resolveAttentionEntity's "workItem" case); credit the full 10 points regardless.
+    factors.push({ name: "Explicit ownership", contribution: 10, max: 10, available: true, detail: params.ownerLabel ? `Owned by you (${params.ownerLabel})` : "Explicitly yours" });
+  } else if (params.ownerAmbiguous) {
     factors.push({ name: "Explicit ownership", contribution: 0, max: 10, available: true, detail: "OWNER UNCLEAR — related items disagree on owner" });
   } else if (!params.ownerName) {
     factors.push({ name: "Explicit ownership", contribution: 0, max: 10, available: false, detail: "Your identity is not set in Data & Settings" });
   } else if (!params.ownerLabel) {
     factors.push({ name: "Explicit ownership", contribution: 0, max: 10, available: false, detail: "No owner recorded on the underlying item" });
   } else {
-    const explicit = params.ownerLabel === params.ownerName;
-    factors.push({ name: "Explicit ownership", contribution: explicit ? 10 : 0, max: 10, available: true, detail: explicit ? `Owned by you (${params.ownerLabel})` : `Owned by ${params.ownerLabel}` });
+    factors.push({ name: "Explicit ownership", contribution: 0, max: 10, available: true, detail: `Owned by ${params.ownerLabel}` });
   }
 
   return factors;
@@ -212,10 +265,18 @@ function estimateFor(sourceType: PersonalFocusSourceType, category: string, loop
   return ESTIMATE_HEURISTICS[`attention:${category}`] ?? 10;
 }
 
-function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData, ownerName: string | undefined, today: string): PersonalFocusCandidate {
+function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData, identity: IdentityRef, today: string): PersonalFocusCandidate {
   const entity = resolveAttentionEntity(item, data);
-  const { label: ownerLabel, ambiguous: ownerAmbiguous } = resolveOwner(entity, data);
-  const ownershipExplicit = !ownerAmbiguous && !!ownerName && !!ownerLabel && ownerLabel === ownerName;
+  const resolution = resolveOwner(entity, data);
+  const { label: ownerLabel } = resolution;
+  // V2.10 §2 — MENTION/ASSIGNMENT items already carry a hardcoded, wired-directly
+  // `ownershipExplicit: true` from attention-queue.ts (a mention/new-assignment IS an
+  // explicit personal signal by construction — see that file's Task 2 comment) and never go
+  // through the generic owner-resolution path the other six categories use.
+  const ownershipExplicit = item.ownershipExplicit ?? isExplicitOwner(resolution, identity);
+  // V2.10 §1 — once an accountId is configured, the id-based resolution is authoritative,
+  // including for the "OWNER UNCLEAR" ambiguity signal shown in the factor breakdown.
+  const ownerAmbiguous = item.ownershipExplicit !== undefined ? false : identity.ownerId ? resolution.ownerIdAmbiguous : resolution.ambiguous;
   const ageDays = Math.max(0, daysBetween(item.firstSeenDate, today));
 
   const factors = buildFactors({
@@ -230,7 +291,8 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
     isIneffectiveAction: item.category === "ACTION" ? true : undefined,
     ownerLabel,
     ownerAmbiguous,
-    ownerName,
+    ownerName: identity.displayName,
+    ownershipExplicit,
   });
   const score = Math.round(factors.reduce((s, f) => s + f.contribution, 0));
 
@@ -276,7 +338,7 @@ function severityToHeat(severity: AttentionSeverity): "LOW" | "MEDIUM" | "HIGH" 
  *  already represented by a DECISION attention item (decisionRadar → attentionQueue), to
  *  avoid showing the same problem twice (§12). Radar-only synthetic loops (`radar-*` ids)
  *  are always already covered by a DECISION attention item, so they're skipped here. */
-function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, ownerName: string | undefined, attentionDecisionIds: Set<string>, today: string): PersonalFocusCandidate | null {
+function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity: IdentityRef, attentionDecisionIds: Set<string>, today: string): PersonalFocusCandidate | null {
   if (loop.id.startsWith("radar-")) return null;
   if (attentionDecisionIds.has(loop.id)) return null;
   if (loop.health !== "STALLED" && loop.health !== "AT_RISK") return null;
@@ -291,12 +353,25 @@ function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, ownerNam
   // an action assigned to someone other than the blocked item's usual owner); treat that
   // disagreement the same way resolveOwner() does for attention-sourced candidates.
   const loopOwners = new Set([primaryAction?.owner, workItem?.owner].filter((o): o is string => !!o));
-  const ownerAmbiguous = loopOwners.size > 1;
-  const ownerLabel = ownerAmbiguous ? undefined : Array.from(loopOwners)[0];
-  const ownershipExplicit = !ownerAmbiguous && !!ownerName && !!ownerLabel && ownerLabel === ownerName;
+  const nameAmbiguous = loopOwners.size > 1;
+  const ownerLabel = nameAmbiguous ? undefined : Array.from(loopOwners)[0];
+  // V2.10 §1 — only the linked work item can carry an accountId; a manually-created Action
+  // has no accountId equivalent, matching the WorkItem-only scope of Task 1.
+  const loopOwnerIdAmbiguous = false; // at most one work item is ever linked here
+  const resolution: OwnerResolution = { label: ownerLabel, ambiguous: nameAmbiguous, ownerId: workItem?.ownerId, ownerIdAmbiguous: loopOwnerIdAmbiguous };
+  const ownershipExplicit = isExplicitOwner(resolution, identity);
+  const ownerAmbiguous = identity.ownerId ? loopOwnerIdAmbiguous : nameAmbiguous;
   const severity: AttentionSeverity = loop.health === "STALLED" ? "HIGH" : "MEDIUM";
 
-  const factors = buildFactors({ severity, category: "LOOP", reviewUrgency: loop.health === "STALLED" ? "URGENT_REVIEW" : "REVIEW", ownerLabel, ownerAmbiguous, ownerName });
+  const factors = buildFactors({
+    severity,
+    category: "LOOP",
+    reviewUrgency: loop.health === "STALLED" ? "URGENT_REVIEW" : "REVIEW",
+    ownerLabel,
+    ownerAmbiguous,
+    ownerName: identity.displayName,
+    ownershipExplicit,
+  });
   const score = Math.round(factors.reduce((s, f) => s + f.contribution, 0));
   void today;
 
@@ -409,13 +484,18 @@ export function deriveDontForget(result: Pick<PersonalFocusResult, "candidates" 
   return result.candidates.filter((c) => !top3Ids.has(c.id) && (c.category === "DO_NOW" || c.category === "DO_TODAY")).slice(0, limit);
 }
 
-export function computePersonalFocus(data: CommandCenterData, proactive: ProactiveIntelligence, ownerName: string | undefined, today: string): PersonalFocusResult {
+/** V2.10 §1 — `ownerId` is an additive, optional trailing parameter (the configured
+ *  identity's Jira accountId, if any) so every pre-existing call site — none of which pass
+ *  a 5th argument — keeps working unchanged; omitting it reproduces pre-V2.10 behavior
+ *  exactly (displayName-only matching, per isExplicitOwner above). */
+export function computePersonalFocus(data: CommandCenterData, proactive: ProactiveIntelligence, ownerName: string | undefined, today: string, ownerId?: string): PersonalFocusResult {
+  const identity: IdentityRef = { displayName: ownerName, ownerId };
   const eligibleAttention = proactive.attentionQueue.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
   const attentionDecisionIds = new Set(eligibleAttention.filter((i) => i.category === "DECISION" && i.sourceRef?.type === "decision").map((i) => i.sourceRef!.id));
 
-  const fromAttention = eligibleAttention.map((item) => candidateFromAttentionItem(item, data, ownerName, today));
+  const fromAttention = eligibleAttention.map((item) => candidateFromAttentionItem(item, data, identity, today));
   const fromLoops = proactive.deliveryLoops
-    .map((loop) => candidateFromLoop(loop, data, ownerName, attentionDecisionIds, today))
+    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today))
     .filter((c): c is PersonalFocusCandidate => c !== null);
 
   const candidates = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);

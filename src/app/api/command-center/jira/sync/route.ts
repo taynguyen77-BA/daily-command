@@ -5,11 +5,23 @@
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { fetchJiraIssueChangelog, fetchJiraIssues, fetchJiraProjects, getConfiguredProjectKeys, getJiraConfig, getJiraTimezoneOffsetMinutes, getProjectClientMap } from "@/lib/server/jira-client";
+import {
+  fetchIssueComments,
+  fetchJiraIssueChangelog,
+  fetchJiraIssues,
+  fetchJiraProjects,
+  fetchMentionedIssues,
+  getConfiguredProjectKeys,
+  getJiraConfig,
+  getJiraTimezoneOffsetMinutes,
+  getProjectClientMap,
+} from "@/lib/server/jira-client";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
+import { buildMentionEvents } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
 import { buildIncrementalSinceParam, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
+import type { MentionEvent } from "@/lib/command-center/types";
 
 export const runtime = "nodejs";
 
@@ -18,9 +30,34 @@ const syncRequestSchema = z.object({
   // V2.3 §7 — Focus Project Scope, enforced BEFORE issue ingestion (never fetch-then-filter).
   scopeMode: z.enum(["ALL", "FOCUSED"]).optional(),
   projectKeys: z.array(z.string()).optional(),
+  // V2.10 §2 — the configured PersonalIdentity's Jira accountId, sent by the client only
+  // when one is set (see store.ts syncJira). Optional: absent means "mention tracking is not
+  // configured for this installation", never an error — same contract as every other
+  // optional Jira capability in this app.
+  accountId: z.string().optional(),
 });
 
+/**
+ * V2.10 §4 — automated cron requests (see vercel.json / .github/workflows/sync.yml) carry
+ * `Authorization: Bearer <CRON_SECRET>`. When CRON_SECRET is configured, a request without a
+ * matching header is rejected; when it isn't configured, this route stays exactly as open as
+ * it was before this change — same "safe when unconfigured" contract as every other env var
+ * here. Note: the in-app "Sync Now" button (Data & Settings) calls this same route from the
+ * browser with no such header — configuring CRON_SECRET is an explicit operator trade-off
+ * that hardens the automated path at the cost of that manual button (the browser cannot
+ * safely hold a server secret) until it's called with the header some other way.
+ */
+function isAuthorizedCronRequest(req: Request): boolean {
+  const cronSecret = process.env.CRON_SECRET;
+  if (!cronSecret) return true;
+  return req.headers.get("authorization") === `Bearer ${cronSecret}`;
+}
+
 export async function POST(req: Request) {
+  if (!isAuthorizedCronRequest(req)) {
+    return NextResponse.json({ ok: false, error: "Missing or invalid Authorization header.", errorKind: "auth-failure" }, { status: 401 });
+  }
+
   const config = getJiraConfig();
   if (!config) {
     return NextResponse.json({ ok: false, error: "Jira is not configured on the server.", errorKind: "not-configured" }, { status: 503 });
@@ -111,6 +148,36 @@ export async function POST(req: Request) {
   const enrichedWorkItems = scopeChangeCounts.size === 0 ? workItems : workItems.map((w) => (scopeChangeCounts.has(w.key) ? { ...w, scopeChangeCount: scopeChangeCounts.get(w.key)! } : w));
   const scopeChangesDetected = Array.from(scopeChangeCounts.values()).reduce((s, n) => s + n, 0);
 
+  // V2.10 §2 — "who mentioned me in a comment?" A second, separate search — never bulk
+  // comment fetching (see jira/http.ts's own comment on why). Best-effort: a failure here
+  // never fails the sync, same discipline as the changelog enrichment above; the client
+  // simply keeps whatever mentionEvents it already had from the previous sync.
+  let mentionEvents: MentionEvent[] | undefined;
+  const accountId = parsedRequest.data.accountId;
+  if (accountId) {
+    try {
+      const mentionedResult = await fetchMentionedIssues(config, accountId, jqlSinceIso);
+      if (mentionedResult.ok) {
+        const events: MentionEvent[] = [];
+        await Promise.all(
+          mentionedResult.data.map(async (issue) => {
+            try {
+              const commentsResult = await fetchIssueComments(config, issue.key);
+              if (commentsResult.ok) {
+                events.push(...buildMentionEvents(issue.key, commentsResult.data, accountId, { baseUrl: config.baseUrl, today }));
+              }
+            } catch {
+              // best-effort — a single issue's comment fetch failure never fails the sync
+            }
+          })
+        );
+        mentionEvents = events;
+      }
+    } catch {
+      // best-effort — mention tracking never fails the sync
+    }
+  }
+
   return NextResponse.json({
     ok: true,
     data: { clients, projects, workItems: enrichedWorkItems, dependencies },
@@ -119,6 +186,7 @@ export async function POST(req: Request) {
     durationMs: Date.now() - syncStartedAt,
     scopeChangesDetected,
     projectsDiscovered: jiraProjects.length,
+    mentionEvents,
     warnings,
     // V1.8 §17 — pages is derived from the same page size the connector actually used
     // (jira/http.ts), never a separately-tracked/duplicated counter.
@@ -130,4 +198,32 @@ export async function POST(req: Request) {
     focusedProjectCount: scopeMode === "FOCUSED" ? projectKeys?.length ?? 0 : undefined,
     focusedProjects: scopeMode === "FOCUSED" ? projectKeys : undefined,
   });
+}
+
+/**
+ * V2.10 §4 — Vercel Cron Jobs (see vercel.json) always issue a GET request, never POST; this
+ * re-dispatches to the exact same POST handler above (an unscoped, full sync — a cron
+ * invocation has no browser-persisted `lastSyncCompletedAt`/accountId/focus-scope to send, so
+ * it can only ever request everything this server is configured to see) rather than
+ * duplicating any sync logic.
+ *
+ * Important, honest limitation (flagged, not silently glossed over): this app has no
+ * server-side persistence (see types.ts's own "Local-only V1: no auth, no multi-tenant, no
+ * backend. All state lives in the browser") — attentionState, snapshotHistory, mentionEvents,
+ * and the configured PersonalIdentity.accountId used for Task 3's Slack notifications all
+ * live only in a browser's localStorage. A cron-triggered GET here still authenticates,
+ * fetches, and returns fresh Jira data (so it genuinely exercises the connection and can
+ * surface a credential/connectivity failure on a schedule), but nothing durable consumes that
+ * response — there is no accountId to search mentions for for and nowhere server-side to
+ * merge/store the result or fire a Slack notification from. Making the cron drive Task 3
+ * end-to-end would require adding real server-side persistence, which is a materially larger
+ * change than "wire a cron job" and out of scope here — see the final report for this pass.
+ */
+export async function GET(req: Request) {
+  const forwarded = new Request(req.url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", authorization: req.headers.get("authorization") ?? "" },
+    body: "{}",
+  });
+  return POST(forwarded);
 }

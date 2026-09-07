@@ -497,6 +497,7 @@ export default function DataSettingsPage() {
   const [conformanceLoading, setConformanceLoading] = useState(false);
   const [aiTraceTick, setAiTraceTick] = useState(0);
   const [emailDraft, setEmailDraft] = useState(state.personalIdentity?.email ?? "");
+  const [accountIdDraft, setAccountIdDraft] = useState(state.personalIdentity?.accountId ?? "");
   const [pendingFirstSync, setPendingFirstSync] = useState(false);
   const [pendingFullSync, setPendingFullSync] = useState(false);
   const [reopening, setReopening] = useState<{ record: ArtifactRecord; draft: ArtifactDraft; staleness: "fresh" | "stale" | "unavailable"; nonce: number } | null>(null);
@@ -670,17 +671,27 @@ export default function DataSettingsPage() {
         <div className="flex max-w-md flex-col gap-2 sm:flex-row">
           <input
             defaultValue={state.personalIdentity?.displayName ?? state.ownerName ?? ""}
-            onBlur={(e) => store.setPersonalIdentity(e.target.value ? { displayName: e.target.value, email: emailDraft || undefined } : undefined)}
+            onBlur={(e) => store.setPersonalIdentity(e.target.value ? { displayName: e.target.value, email: emailDraft || undefined, accountId: accountIdDraft || undefined } : undefined)}
             placeholder="Display name, exactly as it appears in owner fields"
             className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
           />
           <input
             value={emailDraft}
             onChange={(e) => setEmailDraft(e.target.value)}
-            onBlur={() => state.personalIdentity && store.setPersonalIdentity({ displayName: state.personalIdentity.displayName, email: emailDraft || undefined })}
+            onBlur={() => state.personalIdentity && store.setPersonalIdentity({ displayName: state.personalIdentity.displayName, email: emailDraft || undefined, accountId: accountIdDraft || undefined })}
             placeholder="Email (optional)"
             className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
           />
+        </div>
+        <div className="mt-2 flex max-w-md flex-col gap-1">
+          <input
+            value={accountIdDraft}
+            onChange={(e) => setAccountIdDraft(e.target.value)}
+            onBlur={() => state.personalIdentity && store.setPersonalIdentity({ displayName: state.personalIdentity.displayName, email: emailDraft || undefined, accountId: accountIdDraft || undefined })}
+            placeholder="Jira account ID (optional, recommended)"
+            className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
+          />
+          <p className="text-xs text-text3">More reliable than display name — find it in your Jira profile URL.</p>
         </div>
       </Panel>
 

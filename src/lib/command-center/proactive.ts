@@ -4,6 +4,7 @@
 // No AI calls happen here.
 
 import { computeActionEffectiveness, ineffectiveActions } from "./action-effectiveness";
+import { detectNewAssignments } from "./assignment-detection";
 import { buildAttentionQueue } from "./attention-queue";
 import { computeClientAttentionMap } from "./client-attention-map";
 import { computeDecisionEffectiveness } from "./decision-effectiveness";
@@ -19,7 +20,7 @@ import { computeAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
 import { computeRiskEscalations } from "./risk-escalation";
 import { computeStakeholderAttention, rankCommunicationPriority } from "./stakeholder-radar";
-import type { AttentionItem, AttentionItemState, CommandCenterData, DailySnapshot, DecisionEffectivenessResult, EvidenceSourceType } from "./types";
+import type { AttentionItem, AttentionItemState, CommandCenterData, DailySnapshot, DecisionEffectivenessResult, EvidenceSourceType, MentionEvent } from "./types";
 import type { DerivedData } from "./selectors";
 
 export interface ProactiveIntelligence {
@@ -56,7 +57,15 @@ export function computeProactiveIntelligence(
   attentionState: Record<string, AttentionItemState>,
   sourceType: EvidenceSourceType,
   today: string,
-  workRelevanceIndex?: WorkRelevanceIndex
+  workRelevanceIndex?: WorkRelevanceIndex,
+  // V2.10 §2 — both additive/optional trailing parameters: every pre-existing call site,
+  // which never passes either, behaves exactly as before (no MENTION/ASSIGNMENT items ever
+  // produced). `mentionEvents` is fetched during Jira sync and persisted in the store — it
+  // isn't something this function can recompute from `data` alone; `identityOwnerId` is the
+  // configured PersonalIdentity's accountId, used only to detect a NEW assignment (§2 task 2)
+  // against `previousSnapshot`.
+  mentionEvents?: MentionEvent[],
+  identityOwnerId?: string
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
 
@@ -80,6 +89,8 @@ export function computeProactiveIntelligence(
   const communicationPriority = rankCommunicationPriority(data.communications, data, riskEscalations, dependencyRadar);
   const clientAttentionMap = computeClientAttentionMap(data, derived, dependencyRadar, previousSnapshot, today);
 
+  const newAssignments = detectNewAssignments(data, previousSnapshot, identityOwnerId);
+
   const { items: attentionQueue, nextAttentionState } = buildAttentionQueue(
     {
       drift,
@@ -91,6 +102,9 @@ export function computeProactiveIntelligence(
       ineffectiveActions: ineffective,
       stakeholderAttention,
       communicationPriority,
+      mentionEvents,
+      newAssignments,
+      workItems: data.workItems,
     },
     attentionState,
     today

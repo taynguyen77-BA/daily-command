@@ -171,6 +171,13 @@ import {
   listJiraItemsInPersonalFocus,
 } from "../src/lib/command-center/execution-path";
 import type { JiraStatusPolicy, WorkRelevance } from "../src/lib/command-center/types";
+// V2.10 — Real-time mention/assignment tracking
+import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt } from "../src/lib/command-center/jira/mentions";
+import { detectNewAssignments } from "../src/lib/command-center/assignment-detection";
+import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "../src/lib/command-center/notify";
+import { fetchMentionedIssuesWith, fetchIssueCommentsWith } from "../src/lib/command-center/jira/http";
+import type { JiraComment } from "../src/lib/command-center/jira/types";
+import type { MentionEvent } from "../src/lib/command-center/types";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -1393,6 +1400,143 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   ok("Noise control", noiseResult.items.length === 0, "a LOW-heat dependency never becomes an attention item — §38 severity threshold");
 }
 
+// ===== V2.10 §2 — Mention/Assignment ingestion =====
+{
+  const stableDriftForMentions = computeDeliveryDrift([], yesterdayMetrics);
+  const mentionInputsBase = {
+    drift: stableDriftForMentions, releaseDrift: [], riskEscalations: [], openRisks: [], dependencyRadar: [],
+    decisionRadar: [], ineffectiveActions: [], stakeholderAttention: [], communicationPriority: [],
+  };
+  const mentionWorkItem = makeItem({ id: "jira-MENT-1", key: "MENT-1", projectId: "proj-mention", clientId: "client-mention" });
+
+  // --- commentMentionsAccount / buildMentionEvents: pure ADF-walking logic ---
+  const adfMentioning = (accountId: string) => ({
+    type: "doc",
+    content: [{ type: "paragraph", content: [{ type: "mention", attrs: { id: accountId, text: "@Me" } }, { type: "text", text: " please check this" }] }],
+  });
+  ok("V2.10 Mentions", commentMentionsAccount(adfMentioning("acc-me"), "acc-me") === true, "a comment whose ADF body contains a mention node for this account is detected as mentioning it");
+  ok("V2.10 Mentions", commentMentionsAccount(adfMentioning("acc-someone-else"), "acc-me") === false, "a comment mentioning a DIFFERENT account is never detected as mentioning this one");
+  ok("V2.10 Mentions", commentMentionsAccount("plain text with [~accountid:acc-me] in it", "acc-me") === true, "a plain-string body (some instances/API versions) is checked via the classic wiki-markup mention syntax");
+  ok("V2.10 Mentions", extractCommentExcerpt("x".repeat(300)).length <= 200, "an excerpt is always capped at ~200 characters — evidence, never a full reproduction");
+
+  const commentsForIssue: JiraComment[] = [
+    { id: "c1", author: { displayName: "Alice", accountId: "acc-alice" }, body: adfMentioning("acc-me"), created: "2026-06-14T10:00:00.000Z" },
+    { id: "c2", author: { displayName: "Bob", accountId: "acc-bob" }, body: adfMentioning("acc-someone-else"), created: "2026-06-14T11:00:00.000Z" },
+  ];
+  const eventsForMe = buildMentionEvents("MENT-1", commentsForIssue, "acc-me", { today: TODAY });
+  ok("V2.10 Mentions", eventsForMe.length === 1, "a comment mentioning a different account never produces a MentionEvent for the configured identity — only the real match is returned");
+  ok("V2.10 Mentions", eventsForMe[0].commentAuthor === "Alice", "the returned MentionEvent is the real matching comment's author, not the non-matching one");
+
+  // --- attention-queue dedup: two mentions on the SAME issue collapse to one item ---
+  const twoMentionsSameIssue: MentionEvent[] = [
+    { issueKey: "MENT-1", commentAuthor: "Alice", excerpt: "first mention", mentionedAt: "2026-06-14T10:00:00.000Z" },
+    { issueKey: "MENT-1", commentAuthor: "Carol", excerpt: "second mention", mentionedAt: "2026-06-14T12:00:00.000Z" },
+  ];
+  const mentionQueue = buildAttentionQueue({ ...mentionInputsBase, mentionEvents: twoMentionsSameIssue, workItems: [mentionWorkItem] }, {}, TODAY);
+  const mentionItems = mentionQueue.items.filter((i) => i.category === "MENTION");
+  ok("V2.10 Mentions", mentionItems.length === 1, "a comment mentioning the configured account twice on the same issue (via two comments) produces exactly one MENTION attention item — the existing ${category}:${slug} dedup scheme");
+  ok("V2.10 Mentions", mentionItems[0].id === `MENTION:${slug("MENT-1")}`, "the MENTION item's id follows the same deterministic ${category}:${slug} identity scheme as every other category");
+  ok("V2.10 Mentions", mentionItems[0].ownershipExplicit === true, "a MENTION item is always explicitly owned — wired directly, never routed through generic owner resolution");
+  ok("V2.10 Mentions", mentionItems[0].evidence.length === 2, "both underlying comments are preserved as evidence, even though they collapse to one attention item");
+
+  // --- an issue both newly assigned AND newly mentioned in the same sync must not double-count ---
+  const bothQueue = buildAttentionQueue(
+    {
+      ...mentionInputsBase,
+      mentionEvents: [{ issueKey: "MENT-1", commentAuthor: "Alice", excerpt: "check this", mentionedAt: "2026-06-14T10:00:00.000Z" }],
+      newAssignments: [{ workItemId: "jira-MENT-1", issueKey: "MENT-1", title: mentionWorkItem.title, projectId: mentionWorkItem.projectId }],
+      workItems: [mentionWorkItem],
+    },
+    {},
+    TODAY
+  );
+  const bothMention = bothQueue.items.filter((i) => i.category === "MENTION");
+  const bothAssignment = bothQueue.items.filter((i) => i.category === "ASSIGNMENT");
+  ok("V2.10 Assignment", bothMention.length === 1 && bothAssignment.length === 1, "an issue that is both newly assigned and newly mentioned in the same sync produces exactly one MENTION and one ASSIGNMENT item — distinct signals, neither merged nor dropped");
+
+  // --- assignment-detection: snapshot-over-snapshot ownerId diff ---
+  const prevSnapshotNoOwner = toSnapshot({ ...emptyData(), workItems: [{ ...mentionWorkItem, ownerId: undefined }] }, "2026-06-14");
+  const nowAssignedToMe = { ...emptyData(), workItems: [{ ...mentionWorkItem, ownerId: "acc-me" }] };
+  ok("V2.10 Assignment", detectNewAssignments(nowAssignedToMe, prevSnapshotNoOwner, "acc-me").length === 1, "a work item whose ownerId newly matches the configured accountId since the last snapshot is a new assignment");
+  ok("V2.10 Assignment", detectNewAssignments(nowAssignedToMe, prevSnapshotNoOwner, undefined).length === 0, "with no accountId configured, new-assignment detection never fires — nothing to compare against");
+  const prevSnapshotAlreadyMine = toSnapshot({ ...emptyData(), workItems: [{ ...mentionWorkItem, ownerId: "acc-me" }] }, "2026-06-14");
+  ok("V2.10 Assignment", detectNewAssignments(nowAssignedToMe, prevSnapshotAlreadyMine, "acc-me").length === 0, "a work item already assigned to the configured account as of the last snapshot is NOT a new assignment");
+  ok("V2.10 Assignment", detectNewAssignments(nowAssignedToMe, null, "acc-me").length === 0, "with no previous snapshot at all (first-ever sync), new-assignment detection never guesses — nothing was 'before'");
+}
+
+// ===== V2.10 §3 — computeNewPersonalSignals (real-time Slack delivery gate) =====
+{
+  const baseMentionItem: AttentionItem = {
+    id: "MENTION:ment-1", category: "MENTION", severity: "HIGH", what: "Mentioned in a comment on MENT-1",
+    why: "Alice mentioned you in a comment.", impact: "x", nowWhat: "Read the comment.", evidence: ['Alice: "hi"'],
+    lifecycle: "NEW", firstSeenDate: TODAY, lastSeenDate: TODAY, ownershipExplicit: true,
+  };
+  const alreadyAckMentionItem: AttentionItem = { ...baseMentionItem, id: "MENTION:ment-2", lifecycle: "ACKNOWLEDGED" };
+  const priorStateForAck: Record<string, AttentionItemState> = { "MENTION:ment-2": { lifecycle: "ACKNOWLEDGED", firstSeenDate: "2026-06-01", lastSeenDate: "2026-06-10" } };
+
+  const signals = computeNewPersonalSignals(priorStateForAck, [baseMentionItem, alreadyAckMentionItem]);
+  ok("V2.10 Notify", signals.length === 1 && signals[0].id === baseMentionItem.id, "exactly one signal is returned: the genuinely new MENTION, never the already-ACKNOWLEDGED one from a prior sync");
+
+  // A team-wide category (DRIFT) must never reach Slack, even if it somehow carried
+  // ownershipExplicit: true (attention-queue.ts never actually sets this for DRIFT — this
+  // proves the category gate itself, not just the flag, enforces the boundary).
+  const forgedDriftItem = { ...baseMentionItem, id: "DRIFT:overall", category: "DRIFT" as const };
+  ok("V2.10 Notify", computeNewPersonalSignals({}, [forgedDriftItem]).length === 0, "a DRIFT item is never returned as a personal signal, even with ownershipExplicit forced to true — the six team-wide categories are never eligible, by category alone");
+
+  ok("V2.10 Notify", computeNewPersonalSignals({}, []).length === 0, "an empty attention queue produces zero signals");
+  ok("V2.10 Notify", computeNewPersonalSignals(priorStateForAck, [alreadyAckMentionItem]).length === 0, "two consecutive syncs with no new personal signal send zero messages — nothing to notify about");
+
+  const mentionWorkItemForPayload = makeItem({ id: "jira-MENT-1", key: "MENT-1", sourceUrl: "https://example.atlassian.net/browse/MENT-1" });
+  const payloads = buildSlackNotifyPayloads([{ ...baseMentionItem, sourceRef: { type: "workItem", id: "jira-MENT-1" } }], { ...emptyData(), workItems: [mentionWorkItemForPayload] });
+  ok("V2.10 Notify", payloads.length === 1 && payloads[0].issueKey === "MENT-1" && payloads[0].url === "https://example.atlassian.net/browse/MENT-1", "buildSlackNotifyPayloads resolves the real issue key and Jira link from the linked WorkItem");
+}
+
+// ===== V2.10 §2 — fetchMentionedIssuesWith / fetchIssueCommentsWith =====
+{
+  const jqlConfig: JiraConnectionConfig = { baseUrl: "https://example.atlassian.net", email: "a@b.com", apiToken: "tok" };
+  const mentionedFetch: FetchLike = async (url) => ({
+    ok: true,
+    status: 200,
+    json: async () => {
+      const u = new URL(url);
+      ok("V2.10 http", u.pathname.endsWith("/search/jql"), "fetchMentionedIssuesWith hits the same /search/jql endpoint as the main sync, not a separate one");
+      return { issues: [{ key: "MENT-1", fields: {} }], isLast: true };
+    },
+  });
+  const mentionedResult = await fetchMentionedIssuesWith(mentionedFetch, jqlConfig, "acc-me", "2026-06-01");
+  ok("V2.10 http", mentionedResult.ok && mentionedResult.data.length === 1 && mentionedResult.data[0].key === "MENT-1", "fetchMentionedIssuesWith returns the issues Jira reports as matching the mention JQL");
+
+  const commentsFetch: FetchLike = async (url) => {
+    ok("V2.10 http", url.includes("/comment"), "fetchIssueCommentsWith hits the issue's /comment endpoint");
+    return { ok: true, status: 200, json: async () => ({ comments: [{ id: "c1", author: { displayName: "Alice" }, body: "hi" }] }) };
+  };
+  const commentsResult = await fetchIssueCommentsWith(commentsFetch, jqlConfig, "MENT-1");
+  ok("V2.10 http", commentsResult.ok && commentsResult.data.length === 1, "fetchIssueCommentsWith returns the comments Jira reports for one issue");
+}
+
+// ===== V2.10 §4 — automated sync cadence (static source checks, matching the existing
+// V2.2.1/V2.3 pattern for route-level logic: the sync route imports server-only credential
+// code, so it's checked by reading its source rather than importing it into this test
+// process — see jira-client.ts's `import "server-only"`, which genuinely throws under plain
+// Node outside Next's bundler). =====
+{
+  const repoRoot = path.resolve(process.cwd());
+  const syncRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
+  ok("V2.10 Cron", /process\.env\.CRON_SECRET/.test(syncRouteSrc), "the sync route reads CRON_SECRET");
+  ok("V2.10 Cron", /if \(!cronSecret\) return true;/.test(syncRouteSrc), "with no CRON_SECRET configured, every request is authorized — the route stays exactly as open as before this change");
+  ok("V2.10 Cron", /Bearer \$\{cronSecret\}/.test(syncRouteSrc), "once CRON_SECRET is configured, only a matching 'Authorization: Bearer <secret>' header is accepted");
+  ok("V2.10 Cron", /export async function GET/.test(syncRouteSrc), "the route exports a GET handler — Vercel Cron Jobs always issue a GET, never a POST");
+
+  const vercelJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
+  ok("V2.10 Cron", Array.isArray(vercelJson.crons) && vercelJson.crons.length === 1, "vercel.json declares exactly one cron job");
+  ok("V2.10 Cron", vercelJson.crons[0].path === "/api/command-center/jira/sync", "the cron job targets the real sync endpoint");
+  ok("V2.10 Cron", vercelJson.crons[0].schedule === "*/15 * * * *", "the cron job runs every 15 minutes");
+
+  const workflowSrc = fs.readFileSync(path.join(repoRoot, ".github/workflows/sync.yml"), "utf8");
+  ok("V2.10 Cron", /CRON_SECRET/.test(workflowSrc) && /secrets\.CRON_SECRET/.test(workflowSrc), "the GitHub Actions fallback reads CRON_SECRET from a repo secret, never a hardcoded value");
+  ok("V2.10 Cron", /Authorization: Bearer \$CRON_SECRET/.test(workflowSrc), "the GitHub Actions fallback calls the sync endpoint with the exact same bearer-token contract the route itself enforces");
+}
+
 // ===== First 30 Minutes (§19) =====
 {
   const emptyFirst30 = buildFirst30Minutes([], emptyData(), TODAY);
@@ -2000,6 +2144,41 @@ function fakeProactive(attentionQueue: AttentionItem[], deliveryLoops: ReturnTyp
   const lowItem: AttentionItem = { id: "COMMUNICATION:low-1", category: "COMMUNICATION", severity: "LOW", what: "FYI", why: "informational", impact: "none", nowWhat: "No action needed.", evidence: [], lifecycle: "ACTIVE", firstSeenDate: TODAY, lastSeenDate: TODAY };
   const lowResult = computePersonalFocus(emptyData(), fakeProactive([lowItem]), undefined, TODAY);
   ok("Personal Focus Engine", lowResult.candidates[0].category === "WATCH" || lowResult.candidates[0].category === "DEFER", "a LOW-severity, unowned item never reaches DO_NOW or BLOCKED");
+}
+
+// ===== V2.10 §1 — Identity: accountId disambiguation over displayName =====
+{
+  const proj = "id-proj-1";
+  const client = "id-client-1";
+  // Two different real people who happen to share a display name on this multi-org Jira
+  // instance — the exact correctness gap Task 1 exists to close. Modeled as DECISION items
+  // (as the existing Personal Focus Engine block above does) so an explicit-ownership match
+  // is enough, on its own, to reach DO_NOW.
+  const workItemMine = makeItem({ id: "id-wi-mine", key: "IDDISAM-1", projectId: proj, clientId: client, owner: "Alice", ownerId: "acc-alice-real" });
+  const workItemOther = makeItem({ id: "id-wi-other", key: "IDDISAM-2", projectId: proj, clientId: client, owner: "Alice", ownerId: "acc-alice-impostor" });
+  const decisionMine: Decision = { id: "id-dec-mine", projectId: proj, title: "Decision mine", status: "DECIDED", description: "", relatedWorkItemIds: [workItemMine.id] };
+  const decisionOther: Decision = { id: "id-dec-other", projectId: proj, title: "Decision other", status: "DECIDED", description: "", relatedWorkItemIds: [workItemOther.id] };
+  const attnMine: AttentionItem = { id: "DECISION:id-dec-mine", category: "DECISION", severity: "HIGH", what: "Decision mine", why: "x", impact: "x", nowWhat: "x", evidence: [], lifecycle: "ACTIVE", firstSeenDate: TODAY, lastSeenDate: TODAY, sourceRef: { type: "decision", id: decisionMine.id } };
+  const attnOther: AttentionItem = { id: "DECISION:id-dec-other", category: "DECISION", severity: "HIGH", what: "Decision other", why: "x", impact: "x", nowWhat: "x", evidence: [], lifecycle: "ACTIVE", firstSeenDate: TODAY, lastSeenDate: TODAY, sourceRef: { type: "decision", id: decisionOther.id } };
+
+  const idData: CommandCenterData = { ...emptyData(), workItems: [workItemMine, workItemOther], decisions: [decisionMine, decisionOther] };
+  const idProactive = fakeProactive([attnMine, attnOther]);
+
+  // With accountId configured, only the item whose ownerId matches is explicitly mine —
+  // the "Alice" impostor's item is never credited, even though the display name matches.
+  const withAccountId = computePersonalFocus(idData, idProactive, "Alice", TODAY, "acc-alice-real");
+  const mineCandidate = withAccountId.candidates.find((c) => c.sourceId === attnMine.id)!;
+  const otherCandidate = withAccountId.candidates.find((c) => c.sourceId === attnOther.id)!;
+  ok("V2.10 Identity", mineCandidate.ownershipExplicit === true, "the item whose ownerId matches the configured accountId is explicitly owned");
+  ok("V2.10 Identity", otherCandidate.ownershipExplicit === false, "an item owned by a different accountId is NOT explicitly owned, even with an identical display name");
+  ok("V2.10 Identity", withAccountId.byCategory.DO_NOW.length === 1 && withAccountId.byCategory.DO_NOW[0].sourceId === attnMine.id, "accountId-based matching correctly gates DO_NOW to only the real match");
+
+  // With no accountId configured, this is exactly the pre-V2.10 ambiguity — both display-name
+  // matches are indistinguishable and both are (incorrectly, but existing-behavior) explicit.
+  const withoutAccountId = computePersonalFocus(idData, idProactive, "Alice", TODAY);
+  const mineNoId = withoutAccountId.candidates.find((c) => c.sourceId === attnMine.id)!;
+  const otherNoId = withoutAccountId.candidates.find((c) => c.sourceId === attnOther.id)!;
+  ok("V2.10 Identity — backward compatibility", mineNoId.ownershipExplicit === true && otherNoId.ownershipExplicit === true, "with no accountId configured, displayName-only matching behaves exactly as it did pre-V2.10 (both 'Alice' items match)");
 }
 
 // ===== Personal Plan reconciliation, carry-forward, daily plan suggestion =====
@@ -4131,8 +4310,11 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   const timeoutCallSites = (httpSource.match(/signal: AbortSignal\.timeout\(JIRA_FETCH_TIMEOUT_MS\)/g) ?? []).length;
   ok(
     "V2.2.1 Jira timeout",
-    timeoutCallSites === 5,
-    `all 5 real Jira fetch call sites (projects, jql issue search, classic issue search fallback, changelog, capability probe) attach the timeout signal (found ${timeoutCallSites})`
+    // V2.10 §2 adds one legitimate new real fetch call site (fetchIssueCommentsWith), which
+    // also attaches the timeout — this count is a deliberately-updated magic number, not a
+    // relaxed guard: every real fetch call site, old or new, must still attach one.
+    timeoutCallSites === 6,
+    `all 6 real Jira fetch call sites (projects, jql issue search, classic issue search fallback, changelog, capability probe, issue comments) attach the timeout signal (found ${timeoutCallSites})`
   );
 }
 

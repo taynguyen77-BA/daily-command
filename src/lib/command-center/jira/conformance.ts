@@ -26,7 +26,7 @@ export const JIRA_FIELD_SUPPORT: JiraFieldSupport[] = [
   { field: "Fix version", level: "SUPPORTED", detail: "First fix version used as the release grouping; additional fix versions on the same issue are not modeled." },
   { field: "Due date", level: "SUPPORTED", detail: "Passed through verbatim; never fabricated when absent." },
   { field: "Created / Updated timestamps", level: "SUPPORTED", detail: "Passed through, truncated to date for the domain model's date-only fields." },
-  { field: "Assignee (owner)", level: "SUPPORTED", detail: "assignee.displayName mapped to WorkItem.owner; accountId is not currently stored anywhere in the domain model." },
+  { field: "Assignee (owner)", level: "SUPPORTED", detail: "assignee.displayName mapped to WorkItem.owner; assignee.accountId mapped to WorkItem.ownerId (V2.10) for reliable identity matching." },
   { field: "Blocked-by issue links", level: "SUPPORTED", detail: "Inward 'blocks' links become Dependency records. Outward links (this issue blocks another) are not modeled — only what blocks THIS item." },
   { field: "Business impact", level: "UNSUPPORTED", detail: "Jira has no equivalent field. Never inferred from priority (§17) — always undefined for Jira-sourced items." },
   { field: "Reporter", level: "UNSUPPORTED", detail: "Not fetched (not in the requested field list) and has no home in the domain model — no feature currently consumes it." },

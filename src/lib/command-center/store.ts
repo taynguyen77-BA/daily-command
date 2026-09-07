@@ -44,6 +44,7 @@ import type {
   JiraStatusPolicy,
   JiraSyncState,
   MemoryEvent,
+  MentionEvent,
   PersonalFocusCandidate,
   PersonalIdentity,
   PersonalPlanItem,
@@ -113,6 +114,12 @@ export interface StoreState {
   artifacts: ArtifactRecord[];
   // V2.2 §22-23 — local, deterministic usage counters. Never credentials/payloads/prompts.
   usageCounters: Record<string, number>;
+  // V2.10 §2 — "who mentioned me in a comment?", one entry per issue (see attention-queue.ts,
+  // which dedupes multiple mentions on the same issue into one MENTION attention item).
+  // Populated only when a Jira sync ran with a configured accountId (see syncJira below);
+  // otherwise stays empty, same "safe when unconfigured" contract as every other optional
+  // Jira capability.
+  mentionEvents: MentionEvent[];
 }
 
 function initialJiraSync(): JiraSyncState {
@@ -139,6 +146,7 @@ function initialState(): StoreState {
     personalPlan: [],
     artifacts: [],
     usageCounters: {},
+    mentionEvents: [],
   };
 }
 
@@ -225,6 +233,7 @@ export function parseStoredState(raw: string): StoreState {
       personalPlan: Array.isArray(parsed.personalPlan) ? parsed.personalPlan : [],
       artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts.filter(isArtifactRecordShape) : [],
       usageCounters: asUsageCounters(parsed.usageCounters),
+      mentionEvents: Array.isArray(parsed.mentionEvents) ? parsed.mentionEvents : [],
     };
   } catch {
     return initialState();
@@ -477,7 +486,16 @@ export class CommandCenterStore {
     const sinceIso =
       !options?.full && this.state.dataSource === "jira" && this.state.jiraSync.lastSyncCompletedAt ? this.state.jiraSync.lastSyncCompletedAt : undefined;
 
-    const result = await new JiraDataSource().sync({ sinceIso, scopeMode: scope.mode, projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined });
+    // V2.10 §2 — mention tracking is opt-in: only sent when the user has configured an
+    // accountId in Data & Settings (see setPersonalIdentity). Absent means the server route
+    // simply skips the mention search entirely — no behavior change for installations that
+    // never set one.
+    const result = await new JiraDataSource().sync({
+      sinceIso,
+      scopeMode: scope.mode,
+      projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
+      accountId: this.state.personalIdentity?.accountId,
+    });
 
     if (!result.ok || !result.data) {
       this.set({
@@ -551,6 +569,22 @@ export class CommandCenterStore {
 
     const newMemoryEvents = prevSnapshot ? this.computeMemoryEvents(merged, this.state.snapshotHistory, getTodayIso()) : [];
 
+    // V2.10 §2 — mentionEvents are cumulative across syncs (like workItems/dependencies
+    // above), keyed by issueKey: each incremental sync's mention search only covers issues
+    // updated since the last sync, so a mention seen on an earlier sync must persist here
+    // until the attention item itself is acknowledged/resolved by the user — it is never
+    // silently dropped just because a later sync's narrower JQL window didn't re-fetch it.
+    // Absent from `result` entirely (no accountId configured, or the best-effort fetch
+    // failed) leaves the existing list untouched.
+    const mergedMentionEvents =
+      result.mentionEvents === undefined
+        ? this.state.mentionEvents
+        : (() => {
+            const byIssueKey = new Map(this.state.mentionEvents.map((m) => [m.issueKey, m]));
+            for (const m of result.mentionEvents!) byIssueKey.set(m.issueKey, m);
+            return Array.from(byIssueKey.values());
+          })();
+
     this.set({
       ...this.state,
       data: merged,
@@ -559,6 +593,7 @@ export class CommandCenterStore {
       isDemo: false,
       snapshotHistory: prevSnapshot ? [...this.state.snapshotHistory, prevSnapshot].slice(-MAX_SNAPSHOT_HISTORY) : this.state.snapshotHistory,
       memoryEvents: newMemoryEvents.length > 0 ? [...this.state.memoryEvents, ...newMemoryEvents].slice(-MAX_MEMORY_EVENTS) : this.state.memoryEvents,
+      mentionEvents: mergedMentionEvents,
       jiraSync: {
         lastSyncStartedAt: startedAt,
         lastSyncCompletedAt: result.syncedAt ?? new Date().toISOString(),
@@ -830,15 +865,22 @@ export class CommandCenterStore {
 
   /** V1.7 §11-12 — "Who are you?" identity setup. `id` is generated once and kept stable
    *  across edits to displayName/email (re-entering your name doesn't create a new
-   *  identity). No authentication, no accounts — purely local. */
-  setPersonalIdentity(input: { displayName: string; email?: string } | undefined) {
+   *  identity). No authentication, no accounts — purely local.
+   *  V2.10 §1 — `accountId` (the real Jira accountId) is optional and, when set, is preferred
+   *  over `displayName` everywhere identity is matched (see personal-focus.ts resolveOwner). */
+  setPersonalIdentity(input: { displayName: string; email?: string; accountId?: string } | undefined) {
     const trimmedName = input?.displayName?.trim();
     if (!trimmedName) {
       this.set({ ...this.state, ownerName: undefined, personalIdentity: undefined });
       return;
     }
     const id = this.state.personalIdentity?.id ?? `identity-${Date.now()}`;
-    const identity: PersonalIdentity = { id, displayName: trimmedName, email: input?.email?.trim() || undefined };
+    const identity: PersonalIdentity = {
+      id,
+      displayName: trimmedName,
+      email: input?.email?.trim() || undefined,
+      accountId: input?.accountId?.trim() || undefined,
+    };
     this.set({ ...this.state, ownerName: trimmedName, personalIdentity: identity });
   }
 

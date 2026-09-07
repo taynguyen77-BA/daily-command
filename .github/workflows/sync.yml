@@ -1,0 +1,33 @@
+name: Jira sync (scheduled)
+
+# V2.10 §4 — Vercel Hobby limits cron to once/day; this is the alternative for any other
+# plan/host, calling the exact same protected endpoint on a tighter schedule. Requires two
+# repo secrets to actually do anything: SYNC_URL (the deployed app's base URL) and
+# CRON_SECRET (must match the CRON_SECRET env var configured on the deployment — see
+# README.md). Neither secret being set means this workflow simply fails its curl step
+# harmlessly on every run; it never touches deployment config or credentials itself.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the Jira sync endpoint
+        env:
+          SYNC_URL: ${{ secrets.SYNC_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$SYNC_URL" ] || [ -z "$CRON_SECRET" ]; then
+            echo "SYNC_URL and/or CRON_SECRET repo secrets are not configured — skipping (no-op)."
+            exit 0
+          fi
+          curl --fail --silent --show-error \
+            --max-time 30 \
+            -X POST "$SYNC_URL/api/command-center/jira/sync" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            -d '{}'

@@ -111,6 +111,9 @@ const CATEGORY_LABELS: Record<AttentionCategory, string> = {
   DECISION: "Decision",
   ACTION: "Action",
   COMMUNICATION: "Communication",
+  // V2.10 §2 — appended, never inserted into the original six.
+  MENTION: "Mentioned",
+  ASSIGNMENT: "Assigned",
 };
 
 export function CategoryBadge({ category }: { category: AttentionCategory }) {

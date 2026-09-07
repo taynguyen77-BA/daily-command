@@ -32,17 +32,22 @@ import type {
   DecisionRadarItem,
   DeliveryDrift,
   DependencyRadarItem,
+  MentionEvent,
   ReleaseDrift,
   Risk,
   RiskEscalation,
   StakeholderAttentionItem,
+  WorkItem,
 } from "./types";
+import type { NewAssignmentEvent } from "./assignment-detection";
 
 export function slug(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 60);
 }
 
-const CATEGORY_ORDER: Record<AttentionCategory, number> = { DRIFT: 0, RISK: 1, DEPENDENCY: 2, DECISION: 3, ACTION: 4, COMMUNICATION: 5 };
+// V2.10 §2 — MENTION/ASSIGNMENT are appended after COMMUNICATION, never inserted; the six
+// pre-existing categories keep their exact original order values.
+const CATEGORY_ORDER: Record<AttentionCategory, number> = { DRIFT: 0, RISK: 1, DEPENDENCY: 2, DECISION: 3, ACTION: 4, COMMUNICATION: 5, MENTION: 6, ASSIGNMENT: 7 };
 const SEVERITY_ORDER: Record<AttentionSeverity, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
 
 interface RawItem {
@@ -56,6 +61,7 @@ interface RawItem {
   evidence: string[];
   sourceRef?: AttentionSourceRef;
   relatedDecisionId?: string;
+  ownershipExplicit?: boolean;
 }
 
 export interface AttentionQueueInputs {
@@ -68,6 +74,14 @@ export interface AttentionQueueInputs {
   ineffectiveActions: { result: ActionEffectivenessResult; action: Action }[];
   stakeholderAttention: StakeholderAttentionItem[];
   communicationPriority: CommunicationPriorityResult[];
+  // V2.10 §2 — both optional/additive: every pre-existing caller/test that never passes
+  // these two behaves exactly as before (empty arrays, no MENTION/ASSIGNMENT items ever
+  // produced). `workItems` is needed only to resolve a real WorkItem for the sourceRef these
+  // two categories point at (see buildRawItems below) — never used by any of the six
+  // pre-existing categories.
+  mentionEvents?: MentionEvent[];
+  newAssignments?: NewAssignmentEvent[];
+  workItems?: WorkItem[];
 }
 
 /** V1.5 §25 — if a RISK/DEPENDENCY item's underlying work items are also related to a
@@ -201,6 +215,59 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
       impact: `${s.relatedIds.length} related item(s) affected.`,
       nowWhat: s.ownerKey === "unassigned" ? "Assign an owner." : "Consider rebalancing ownership.",
       evidence: [s.reason],
+    });
+  }
+
+  // V2.10 §2 — MENTION: one attention item per ISSUE, not per comment (an issue mentioning
+  // the configured account twice must still dedupe to one item, via the same
+  // `${category}:${slug}` identity scheme every other category already relies on).
+  const workItemByKey = new Map((inputs.workItems ?? []).map((w) => [w.key, w]));
+  const mentionsByIssue = new Map<string, MentionEvent[]>();
+  for (const m of inputs.mentionEvents ?? []) {
+    const list = mentionsByIssue.get(m.issueKey) ?? [];
+    list.push(m);
+    mentionsByIssue.set(m.issueKey, list);
+  }
+  for (const [issueKey, mentions] of Array.from(mentionsByIssue.entries())) {
+    const workItem = workItemByKey.get(issueKey);
+    // Most recent mention first — an issue with several mentions still leads with the
+    // freshest one, the rest kept as supporting evidence.
+    const sorted = [...mentions].sort((a, b) => (a.mentionedAt < b.mentionedAt ? 1 : -1));
+    const latest = sorted[0];
+    out.push({
+      id: `MENTION:${slug(issueKey)}`,
+      category: "MENTION",
+      severity: "HIGH",
+      what: `Mentioned in a comment on ${issueKey}`,
+      why: latest.commentAuthor ? `${latest.commentAuthor} mentioned you in a comment.` : "You were mentioned in a comment.",
+      impact: workItem?.title ?? issueKey,
+      nowWhat: "Read the comment and respond if needed.",
+      evidence: sorted.map((m) => (m.commentAuthor ? `${m.commentAuthor}: "${m.excerpt}"` : `"${m.excerpt}"`)),
+      sourceRef: workItem ? { type: "workItem", id: workItem.id } : undefined,
+      // §7 — a mention IS an explicit personal signal by construction (mentionEvents only
+      // ever cover the configured identity's own accountId — see jira/mentions.ts). Wired
+      // directly rather than through the generic owner-resolution path the other six
+      // categories use (personal-focus.ts resolveOwner), which has no notion of "mentioned in
+      // a comment" to resolve in the first place.
+      ownershipExplicit: true,
+    });
+  }
+
+  // V2.10 §2 — ASSIGNMENT: a genuinely NEW direct assignment to the configured identity,
+  // detected by assignment-detection.ts as a snapshot-over-snapshot ownerId diff. Same
+  // explicit-by-construction reasoning as MENTION above.
+  for (const a of inputs.newAssignments ?? []) {
+    out.push({
+      id: `ASSIGNMENT:${slug(a.workItemId)}`,
+      category: "ASSIGNMENT",
+      severity: "HIGH",
+      what: `Newly assigned: ${a.title}`,
+      why: `${a.issueKey} was assigned to you since the last sync.`,
+      impact: a.title,
+      nowWhat: "Review this item and plan the work.",
+      evidence: [`${a.issueKey} — assignee changed to you`],
+      sourceRef: { type: "workItem", id: a.workItemId },
+      ownershipExplicit: true,
     });
   }
 

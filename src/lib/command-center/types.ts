@@ -194,6 +194,10 @@ export interface WorkItem {
   status: WorkItemStatus;
   priority: "P1" | "P2" | "P3" | "P4";
   owner?: string;
+  // V2.10 §1 — the real Jira accountId behind `owner` (only ever set for sourceType "jira";
+  // never fabricated for demo/local-import data). Preferred over `owner` (a display name,
+  // editable and non-unique across a multi-org Jira instance) for identity matching.
+  ownerId?: string;
   dueDate?: string; // ISO date
   createdDate: string;
   lastUpdated: string; // ISO date
@@ -669,7 +673,9 @@ export interface CommunicationPriorityResult {
   when: string;
 }
 
-export type AttentionCategory = "RISK" | "DRIFT" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION";
+// V2.10 §2 — MENTION and ASSIGNMENT are appended, never inserted: the original six
+// categories keep their exact identity and CATEGORY_ORDER position in attention-queue.ts.
+export type AttentionCategory = "RISK" | "DRIFT" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION" | "MENTION" | "ASSIGNMENT";
 export type AttentionSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
 /** V1.4 §39, extended V1.5 §22 — attention lifecycle is deliberately separate from Jira
  *  issue status; it represents "does the user still need to pay attention?", not the
@@ -683,7 +689,9 @@ export type AttentionLifecycle = "NEW" | "ACTIVE" | "ACKNOWLEDGED" | "SNOOZED" |
  *  stable identifier (risk title, dependency id, decision id, action id, or fix version —
  *  never the volatile attention-item id itself). */
 export interface AttentionSourceRef {
-  type: "risk" | "dependency" | "decision" | "action" | "release" | "communication";
+  // V2.10 §2 — "workItem" is appended for MENTION/ASSIGNMENT items, which point at the real
+  // Jira WorkItem the comment/reassignment happened on, rather than at a Risk/Decision/etc.
+  type: "risk" | "dependency" | "decision" | "action" | "release" | "communication" | "workItem";
   id: string;
 }
 
@@ -705,6 +713,12 @@ export interface AttentionItem {
   // V1.5 additions — both optional/additive.
   sourceRef?: AttentionSourceRef;
   relatedDecisionId?: string; // §25 — "this is fundamentally a decision, not just a risk"
+  // V2.10 §2 — set ONLY by attention-queue.ts for MENTION/ASSIGNMENT items, always to `true`
+  // (a mention/new-assignment IS an explicit personal signal by construction — see
+  // jira/mentions.ts and assignment-detection.ts, which only ever operate on the configured
+  // identity's own accountId). Left undefined for all six pre-existing categories, whose
+  // ownership is still resolved the original way, entirely in personal-focus.ts.
+  ownershipExplicit?: boolean;
 }
 
 /** Persisted per attention item, keyed by AttentionItem.id — see store.ts StoreState.attentionState. */
@@ -1106,13 +1120,31 @@ export interface DailyGuidanceResult {
 // new kind of fact.
 
 /** V1.7 §11 — a lightweight local identity, never an auth/account system. `id` is a stable
- *  locally-generated identifier (not a Jira accountId — nothing in the domain model stores
- *  one); ownership matching still compares against `displayName` exactly, same as V1.6's
- *  ownerName, just structured for future extension (§13). */
+ *  locally-generated identifier (not a Jira accountId); ownership matching compares against
+ *  `displayName` exactly, same as V1.6's ownerName, just structured for future extension (§13).
+ *  V2.10 §1 — `accountId`, when configured, is the real Jira `accountId` (stable, unique,
+ *  never edited by a user, unlike a display name) and is preferred over `displayName` for
+ *  ownership matching everywhere identity is resolved; `displayName` remains the fallback for
+ *  installations that never set it, so pre-V2.10 behavior is unchanged when `accountId` is
+ *  absent. */
 export interface PersonalIdentity {
   id: string;
   displayName: string;
   email?: string;
+  accountId?: string;
+}
+
+/** V2.10 §2 — one real comment mention of the configured identity's Jira accountId, found by
+ *  jira/mentions.ts. `excerpt` is evidence, capped at ~200 characters — never a full
+ *  reproduction of the comment. Never fabricated: only ever produced from a real comment
+ *  Jira returned that structurally mentions the configured account (see
+ *  jira/mentions.ts's commentMentionsAccount — the JQL match alone is never trusted). */
+export interface MentionEvent {
+  issueKey: string;
+  commentAuthor?: string;
+  excerpt: string;
+  commentUrl?: string;
+  mentionedAt: string;
 }
 
 /** V1.7 §7 — SUPPORTED/PARTIALLY_SUPPORTED/UNSUPPORTED are properties of this app's Jira

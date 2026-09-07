@@ -12,7 +12,8 @@ import type { AttentionCategory, AttentionLifecycle, AttentionSeverity } from "@
 
 type LifecycleFilter = AttentionLifecycle | "ALL" | "ACTIVE_DEFAULT";
 
-const CATEGORIES: (AttentionCategory | "ALL")[] = ["ALL", "DRIFT", "RISK", "DEPENDENCY", "DECISION", "ACTION", "COMMUNICATION"];
+// V2.10 §5 — MENTION/ASSIGNMENT appended, never inserted among the original six.
+const CATEGORIES: (AttentionCategory | "ALL")[] = ["ALL", "DRIFT", "RISK", "DEPENDENCY", "DECISION", "ACTION", "COMMUNICATION", "MENTION", "ASSIGNMENT"];
 const SEVERITIES: (AttentionSeverity | "ALL")[] = ["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
 const LIFECYCLES: LifecycleFilter[] = ["ACTIVE_DEFAULT", "NEW", "ACTIVE", "ACKNOWLEDGED", "SNOOZED", "RESOLVED", "REOPENED", "ALL"];
 
@@ -39,7 +40,13 @@ export default function AttentionPage() {
       <SectionHeading title="Attention Queue" subtitle="Every proactive signal, deduplicated and priority-ordered — see the main dashboard for the condensed view." />
 
       <Panel className="flex flex-wrap gap-4 p-4">
-        <Filter label="Category" value={category} options={CATEGORIES} onChange={(v) => setCategory(v as AttentionCategory | "ALL")} />
+        <Filter
+          label="Category"
+          value={category}
+          options={CATEGORIES}
+          onChange={(v) => setCategory(v as AttentionCategory | "ALL")}
+          labels={{ MENTION: "Mentioned me", ASSIGNMENT: "Assigned to me" }}
+        />
         <Filter label="Severity" value={severity} options={SEVERITIES} onChange={(v) => setSeverity(v as AttentionSeverity | "ALL")} />
         <Filter label="Lifecycle" value={lifecycle} options={LIFECYCLES} onChange={setLifecycle} labels={{ ACTIVE_DEFAULT: "Active (default)" }} />
       </Panel>
