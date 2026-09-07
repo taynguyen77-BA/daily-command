@@ -10,8 +10,6 @@
 import { makeEvidence } from "./evidence";
 import type { Action, Decision, DeliveryLoop, Evidence, Risk } from "./types";
 
-export type ImpactEntityKind = "risk" | "decision" | "action" | "loop";
-
 export interface ImpactProjection {
   currentCondition: string;
   unresolvedSignal: string;
@@ -104,21 +102,4 @@ export function projectLoopImpact(loop: DeliveryLoop): ImpactProjection {
     loop.id,
     0.65
   );
-}
-
-export function projectImpact(kind: "risk", entity: Risk): ImpactProjection;
-export function projectImpact(kind: "decision", entity: Decision): ImpactProjection;
-export function projectImpact(kind: "action", entity: Action): ImpactProjection;
-export function projectImpact(kind: "loop", entity: DeliveryLoop): ImpactProjection;
-export function projectImpact(kind: ImpactEntityKind, entity: Risk | Decision | Action | DeliveryLoop): ImpactProjection {
-  switch (kind) {
-    case "risk":
-      return projectRiskImpact(entity as Risk);
-    case "decision":
-      return projectDecisionImpact(entity as Decision);
-    case "action":
-      return projectActionImpact(entity as Action);
-    case "loop":
-      return projectLoopImpact(entity as DeliveryLoop);
-  }
 }

@@ -4,7 +4,6 @@
 // here talks to an AI provider. Keeps every AI explanation traceable back to source facts.
 
 import type {
-  ChangeEvent,
   CommandCenterData,
   Evidence,
   EvidenceSourceType,
@@ -42,11 +41,6 @@ export function evidenceForScore(
 /** Evidence already carried on a Risk (the strings the risk engine attached). */
 export function evidenceForRisk(risk: Risk, sourceType: EvidenceSourceType): Evidence[] {
   return risk.evidence.map((e) => makeEvidence(e, sourceType, risk.sourceWorkItemIds[0]));
-}
-
-/** Evidence for a single detected change (before/after is itself the fact). */
-export function evidenceForChange(change: ChangeEvent, sourceType: EvidenceSourceType): Evidence[] {
-  return [makeEvidence(`${change.field}: "${change.before}" → "${change.after}"`, sourceType, change.entityId)];
 }
 
 /** Plain facts (as strings) about a work item — used to ground AI prompts and traces. */
