@@ -7,6 +7,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import type { PersonalFocusCandidate, PersonalFocusResult } from "@/lib/command-center/types";
+import { isMyActionItem } from "@/lib/command-center/personal-relation";
 import { useCommandCenter } from "./use-command-center";
 import { PersonalFocusCard } from "./PersonalFocusCard";
 import { FocusSession } from "./FocusSession";
@@ -17,13 +18,18 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
   const { state, today, store } = useCommandCenter();
   const [session, setSession] = useState<{ candidate: PersonalFocusCandidate; planItemId: string } | null>(null);
   const [showWhyOrder, setShowWhyOrder] = useState(false);
+  // V2.14 §4 — display-only: narrows what's rendered below, never re-derives top3/the
+  // 30-minute plan (both stay exactly the engine's own selection, just filtered afterward).
+  const myActionItemsOnly = state.myActionItemsOnly.myDay;
 
   function startFocus(candidate: PersonalFocusCandidate) {
     const planItemId = ensurePlanItemId(store, state.personalPlan, candidate, today, personalFocus.candidates.indexOf(candidate));
     setSession({ candidate, planItemId });
   }
 
-  const top3 = personalFocus.top3;
+  const top3 = myActionItemsOnly ? personalFocus.top3.filter((c) => isMyActionItem(c.relation)) : personalFocus.top3;
+  const thirtyMinutePlan = myActionItemsOnly ? personalFocus.thirtyMinutePlan.filter((c) => isMyActionItem(c.relation)) : personalFocus.thirtyMinutePlan;
+  const thirtyMinutePlanTotalMinutes = myActionItemsOnly ? thirtyMinutePlan.reduce((s, c) => s + c.estimatedMinutes, 0) : personalFocus.thirtyMinutePlanTotalMinutes;
 
   return (
     <section>
@@ -92,12 +98,12 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
 
       <div className="mt-3">
         <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-text3">If you only have 30 minutes</p>
-        {personalFocus.thirtyMinutePlan.length === 0 ? (
+        {thirtyMinutePlan.length === 0 ? (
           <Panel className="p-4 text-sm text-text3">No personal focus items fit the next 30 minutes.</Panel>
         ) : (
           <Panel className="p-4">
             <ol className="space-y-1 text-sm text-text2">
-              {personalFocus.thirtyMinutePlan.map((c, i) => (
+              {thirtyMinutePlan.map((c, i) => (
                 <li key={c.id} className="flex items-center justify-between gap-2">
                   <span>
                     {i + 1}. {c.title} — {c.estimatedMinutes}m
@@ -108,7 +114,7 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
                 </li>
               ))}
             </ol>
-            <p className="mt-2 text-xs text-text3">Total: {personalFocus.thirtyMinutePlanTotalMinutes} min</p>
+            <p className="mt-2 text-xs text-text3">Total: {thirtyMinutePlanTotalMinutes} min</p>
           </Panel>
         )}
       </div>

@@ -36,7 +36,21 @@ export default function FocusPage() {
 
   return (
     <div className="space-y-8 pb-16">
-      <SectionHeading title="My Day" subtitle="What should I personally focus on today — connected to project intelligence, not a second task system." />
+      <SectionHeading
+        title="My Day"
+        subtitle="What should I personally focus on today — connected to project intelligence, not a second task system."
+        action={
+          <label className="flex items-center gap-1.5 text-xs text-text3">
+            <input
+              type="checkbox"
+              checked={state.myActionItemsOnly.myDay}
+              onChange={(e) => store.setMyActionItemsOnly("myDay", e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            My action items only
+          </label>
+        }
+      />
 
       {!state.ownerName && (
         <Panel className="border-accent/30 p-4 text-sm text-text2">

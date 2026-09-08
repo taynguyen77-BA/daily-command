@@ -3,12 +3,12 @@
 import { useEffect, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { evidenceForScore, factsForWorkItem } from "@/lib/command-center/evidence";
-import type { CommandCenterData, PriorityScoreResult, ReasoningTrace, WorkItem } from "@/lib/command-center/types";
+import type { CommandCenterData, PersonalRelation, PriorityScoreResult, ReasoningTrace, WorkItem } from "@/lib/command-center/types";
 import { clientName } from "@/lib/command-center/selectors";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { PersonalFocusResult } from "@/lib/command-center/types";
-import { ConfidenceTag, ReasoningTraceBlock, SeverityBadge, TrustLabel } from "./ui";
+import { ConfidenceTag, ReasoningTraceBlock, RelationBadge, SeverityBadge, TrustLabel } from "./ui";
 import { WhyNotATaskDrawer } from "./WhyNotATaskDrawer";
 import { ExecutionPathTrace } from "./ExecutionPathTrace";
 import { TicketLink } from "./TicketLink";
@@ -30,6 +30,7 @@ export function PriorityCard({
   today,
   proactive,
   personalFocus,
+  relation,
 }: {
   item: WorkItem;
   result: PriorityScoreResult;
@@ -45,6 +46,9 @@ export function PriorityCard({
   today?: string;
   proactive?: ProactiveIntelligence | null;
   personalFocus?: PersonalFocusResult | null;
+  // V2.14 §3 — optional/additive, same no-op-when-absent contract as the rest of this prop
+  // set: undefined renders no badge, never a fabricated relation.
+  relation?: PersonalRelation;
 }) {
   const [trace, setTrace] = useState<ReasoningTrace | null>(null);
   const [open, setOpen] = useState(false);
@@ -65,6 +69,7 @@ export function PriorityCard({
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-2 flex items-center gap-2">
         <SeverityBadge level={result.classification} />
+        <RelationBadge relation={relation} />
         <TrustLabel kind="calculated" />
         <TicketLink ticketKey={item.key} url={item.sourceUrl} className="text-xs text-text3" />
         <span className="text-xs text-text3">·</span>

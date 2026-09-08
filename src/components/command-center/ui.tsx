@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type HTMLAttributes, type ReactNode } from "react";
+import React, { useState, type HTMLAttributes, type ReactNode } from "react";
 import type {
   ActionOutcomeStatus,
   AttentionCategory,
@@ -12,6 +12,7 @@ import type {
   Evidence,
   FocusCategory,
   LoopHealth,
+  PersonalRelation,
   ReasoningTrace,
   Severity,
   RiskLevel,
@@ -214,6 +215,50 @@ const FOCUS_CATEGORY_LABELS: Record<FocusCategory, string> = {
 
 export function FocusCategoryBadge({ category }: { category: FocusCategory }) {
   return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${FOCUS_CATEGORY_STYLES[category]}`}>{FOCUS_CATEGORY_LABELS[category]}</span>;
+}
+
+// ===== V2.14 §2 — "Is this mine to act on?" relation badge =====
+// One pill per PersonalRelation value except UNKNOWN (renders nothing — an absent badge, not
+// a placeholder one). Distinct by label AND weight/color, not color alone, matching the
+// label+color discipline every other badge above already follows: ASSIGNED/
+// ASSIGNED_AND_MENTIONED get the strongest visual weight ("yours, act on it"), MENTIONED is
+// distinct but secondary ("someone's waiting on your reply"), FOLLOWING is quiet/muted
+// ("visibility only, not a task").
+const RELATION_LABELS: Partial<Record<PersonalRelation, string>> = {
+  ASSIGNED: "Assigned to you",
+  ASSIGNED_AND_MENTIONED: "Assigned & mentioned",
+  MENTIONED: "Mentioned you",
+  FOLLOWING: "Following",
+};
+
+const RELATION_STYLES: Partial<Record<PersonalRelation, string>> = {
+  ASSIGNED: "bg-accent/20 text-accent2 border-accent/40 font-semibold",
+  ASSIGNED_AND_MENTIONED: "bg-accent/20 text-accent2 border-accent/40 font-semibold",
+  MENTIONED: "bg-accent/10 text-accent2 border-accent/25 font-medium",
+  FOLLOWING: "bg-surface2 text-text3 border-border font-normal",
+};
+
+export function RelationBadge({ relation }: { relation: PersonalRelation | undefined }) {
+  if (!relation || relation === "UNKNOWN") return null;
+  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs tracking-wide ${RELATION_STYLES[relation]}`}>{RELATION_LABELS[relation]}</span>;
+}
+
+/** Shared filter-select control, same shape Attention Queue's category/severity/lifecycle
+ *  filters already used locally — hoisted here so Priorities can reuse it for the V2.14 §3
+ *  relation filter and the two pages stay visually consistent. */
+export function Filter<T extends string>({ label, value, options, onChange, labels }: { label: string; value: T; options: T[]; onChange: (v: T) => void; labels?: Partial<Record<T, string>> }) {
+  return (
+    <label className="flex items-center gap-2 text-xs text-text3">
+      {label}
+      <select value={value} onChange={(e) => onChange(e.target.value as T)} className="rounded-md border border-border bg-surface2 px-2 py-1 text-sm text-text">
+        {options.map((o) => (
+          <option key={o} value={o}>
+            {labels?.[o] ?? o}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
 }
 
 export function Panel({ children, className = "", ...rest }: { children: ReactNode; className?: string } & HTMLAttributes<HTMLDivElement>) {

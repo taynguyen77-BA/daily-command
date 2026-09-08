@@ -685,6 +685,12 @@ export interface CommunicationPriorityResult {
 // categories keep their exact identity and CATEGORY_ORDER position in attention-queue.ts.
 export type AttentionCategory = "RISK" | "DRIFT" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION" | "MENTION" | "ASSIGNMENT";
 export type AttentionSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
+// V2.14 §1 — "Is this mine to act on?" A second, orthogonal classification from
+// AttentionCategory/FocusCategory (see personal-relation.ts's top comment): those answer
+// "what kind of signal, how urgent for the engine's own ranking"; this answers a
+// display/filter question the user reads directly, "what is this ticket's relationship to
+// me". UNKNOWN means no identity is configured at all — never guessed.
+export type PersonalRelation = "ASSIGNED" | "MENTIONED" | "ASSIGNED_AND_MENTIONED" | "FOLLOWING" | "UNKNOWN";
 /** V1.4 §39, extended V1.5 §22 — attention lifecycle is deliberately separate from Jira
  *  issue status; it represents "does the user still need to pay attention?", not the
  *  underlying record's own status field. RE_ESCALATED (V1.5) fires only when a real new
@@ -734,6 +740,11 @@ export interface AttentionItem {
   // no sourceUrl (Demo/Local Import) — same "never invent a link" discipline as TicketLink.
   ticketKey?: string;
   ticketUrl?: string;
+  // V2.14 §1 — resolved the same way as ticketKey/ticketUrl above (proactive.ts, from the
+  // same single-related-WorkItem resolution): undefined whenever no single work item is
+  // resolvable, same "never fabricate a fact about a ticket that isn't clearly THE ticket"
+  // discipline as ticketKey.
+  relation?: PersonalRelation;
 }
 
 /** Persisted per attention item, keyed by AttentionItem.id — see store.ts StoreState.attentionState. */
@@ -985,6 +996,10 @@ export interface PersonalFocusCandidate {
   // primary related WorkItem (when there's exactly one) already resolved in personal-focus.ts.
   ticketKey?: string;
   ticketUrl?: string;
+  // V2.14 §1 — always computed (never omitted, unlike AttentionItem.relation above): every
+  // candidate resolves to at least a relation-less stub when no work item is related, and
+  // classifyPersonalRelation itself always returns a real value (down to UNKNOWN/FOLLOWING).
+  relation: PersonalRelation;
 }
 
 /** §29 — a workload observation, never an emotional/psychological inference. */

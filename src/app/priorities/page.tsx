@@ -1,14 +1,15 @@
 "use client";
 
-import { Suspense, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
-import { EmptyState, SectionHeading } from "@/components/command-center/ui";
+import { EmptyState, Filter, SectionHeading } from "@/components/command-center/ui";
 import { PriorityCard } from "@/components/command-center/PriorityCard";
 import { TakeActionPanel } from "@/components/command-center/TakeActionPanel";
 import { itemForScore } from "@/lib/command-center/selectors";
 import { isOverdue } from "@/lib/command-center/scoring";
-import type { PriorityScoreResult, Severity, WorkItem } from "@/lib/command-center/types";
+import { classifyPersonalRelation, isMyActionItem, type PersonalRelationIdentity } from "@/lib/command-center/personal-relation";
+import type { PersonalRelation, PriorityScoreResult, Severity, WorkItem } from "@/lib/command-center/types";
 
 const FILTERS: { key: string; label: string }[] = [
   { key: "ALL", label: "All" },
@@ -18,11 +19,31 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "OVERDUE", label: "Overdue" },
 ];
 
+// V2.14 §3 — same relation filter shape/UX as Attention Queue's, for consistency.
+type RelationFilter = "ALL" | "ASSIGNED" | "MENTIONED" | "FOLLOWING";
+const RELATIONS: RelationFilter[] = ["ALL", "ASSIGNED", "MENTIONED", "FOLLOWING"];
+
+function matchesRelationFilter(relation: PersonalRelation, filter: RelationFilter): boolean {
+  if (filter === "ALL") return true;
+  if (filter === "ASSIGNED") return relation === "ASSIGNED" || relation === "ASSIGNED_AND_MENTIONED";
+  if (filter === "MENTIONED") return relation === "MENTIONED" || relation === "ASSIGNED_AND_MENTIONED";
+  return relation === "FOLLOWING";
+}
+
 function PrioritiesInner() {
   const { state, today, derived, filteredData, store, workRelevanceIndex, proactive, personalFocus } = useCommandCenter();
   const searchParams = useSearchParams();
   const [filter, setFilter] = useState<string>(searchParams.get("filter") ?? "ALL");
+  const [relationFilter, setRelationFilter] = useState<RelationFilter>("ALL");
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
+  const myActionItemsOnly = state.myActionItemsOnly.priorities;
+
+  // V2.14 §3 — built once per render, not re-scanned per item (per Task 1).
+  const relationIdentity: PersonalRelationIdentity = useMemo(
+    () => ({ displayName: state.ownerName, accountId: state.personalIdentity?.accountId }),
+    [state.ownerName, state.personalIdentity?.accountId]
+  );
+  const mentionedIssueKeys = useMemo(() => new Set(state.mentionEvents.map((m) => m.issueKey)), [state.mentionEvents]);
 
   if (!state.loaded) {
     return (
@@ -37,17 +58,23 @@ function PrioritiesInner() {
   const filtered = derived.scores.filter((result) => {
     const item = itemForScore(filteredData, result);
     if (!item) return false;
-    if (filter === "ALL") return true;
-    if (filter === "OVERDUE") return isOverdue(item, today);
-    if (filter === "ON_TRACK") return result.classification === "MEDIUM" || result.classification === "LOW";
-    return result.classification === (filter as Severity);
+    if (filter !== "ALL") {
+      if (filter === "OVERDUE" && !isOverdue(item, today)) return false;
+      if (filter === "ON_TRACK" && result.classification !== "MEDIUM" && result.classification !== "LOW") return false;
+      if (filter !== "OVERDUE" && filter !== "ON_TRACK" && result.classification !== (filter as Severity)) return false;
+    }
+    const relation = classifyPersonalRelation(item, relationIdentity, mentionedIssueKeys, item.key);
+    if (!matchesRelationFilter(relation, relationFilter)) return false;
+    // V2.14 §4 — one more AND condition, narrows only.
+    if (myActionItemsOnly && !isMyActionItem(relation)) return false;
+    return true;
   });
 
   return (
     <div className="space-y-4 pb-16">
       <SectionHeading title="Priorities" subtitle="Every open work item, scored by the deterministic priority model." />
 
-      <div className="flex flex-wrap gap-1">
+      <div className="flex flex-wrap items-center gap-1">
         {FILTERS.map((f) => (
           <button
             key={f.key}
@@ -59,6 +86,19 @@ function PrioritiesInner() {
             {f.label}
           </button>
         ))}
+        <div className="ml-2">
+          <Filter
+            label="Relation"
+            value={relationFilter}
+            options={RELATIONS}
+            onChange={setRelationFilter}
+            labels={{ ALL: "All", ASSIGNED: "Assigned to you", MENTIONED: "Mentioned you", FOLLOWING: "Following" }}
+          />
+        </div>
+        <label className="ml-auto flex items-center gap-1.5 text-xs text-text3">
+          <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("priorities", e.target.checked)} className="h-3.5 w-3.5" />
+          My action items only
+        </label>
       </div>
 
       {filtered.length === 0 ? (
@@ -80,6 +120,7 @@ function PrioritiesInner() {
                 today={today}
                 proactive={proactive}
                 personalFocus={personalFocus}
+                relation={classifyPersonalRelation(item, relationIdentity, mentionedIssueKeys, item.key)}
               />
             );
           })}

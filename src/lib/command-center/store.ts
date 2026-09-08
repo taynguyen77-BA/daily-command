@@ -139,6 +139,22 @@ export interface StoreState {
   // question is answerable from any other persisted field (see jira/work-relevance-history.ts)
   // — this is additive-only history, never backfilled, never mutated by anything else.
   workItemCalibrationHistory: WorkItemCalibrationHistory;
+  // V2.14 §4 — "My action items only" toggle (relation is ASSIGNED/ASSIGNED_AND_MENTIONED/
+  // MENTIONED), independently settable per page and persisted like `showAdvancedSettings`
+  // above. Defaults to false (Everything) on every page for a first-time user — never a
+  // surprising silent-hide default; see setMyActionItemsOnly() below.
+  myActionItemsOnly: MyActionItemsOnlyByPage;
+}
+
+// V2.14 §4 — one boolean per page this toggle appears on.
+export interface MyActionItemsOnlyByPage {
+  attention: boolean;
+  myDay: boolean;
+  priorities: boolean;
+}
+
+function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
+  return { attention: false, myDay: false, priorities: false };
 }
 
 function initialJiraSync(): JiraSyncState {
@@ -168,6 +184,7 @@ function initialState(): StoreState {
     mentionEvents: [],
     showAdvancedSettings: false,
     workItemCalibrationHistory: {},
+    myActionItemsOnly: initialMyActionItemsOnly(),
   };
 }
 
@@ -248,6 +265,13 @@ function asWorkItemCalibrationHistory(v: unknown): WorkItemCalibrationHistory {
   return out;
 }
 
+// V2.14 §4 — same discipline as every other parsed field here: a malformed/missing entry
+// falls back to its safe default (false — "Everything") rather than being trusted as-is.
+function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
+  const obj = asPlainObject<Partial<MyActionItemsOnlyByPage>>(v, {});
+  return { attention: obj.attention === true, myDay: obj.myDay === true, priorities: obj.priorities === true };
+}
+
 export function parseStoredState(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
@@ -286,6 +310,7 @@ export function parseStoredState(raw: string): StoreState {
       mentionEvents: Array.isArray(parsed.mentionEvents) ? parsed.mentionEvents : [],
       showAdvancedSettings: parsed.showAdvancedSettings === true,
       workItemCalibrationHistory: asWorkItemCalibrationHistory(parsed.workItemCalibrationHistory),
+      myActionItemsOnly: asMyActionItemsOnly(parsed.myActionItemsOnly),
     };
   } catch {
     return initialState();
@@ -476,6 +501,13 @@ export class CommandCenterStore {
    *  a UI display preference (never deletes or gates any underlying computation). */
   setShowAdvancedSettings(value: boolean) {
     this.set({ ...this.state, showAdvancedSettings: value });
+  }
+
+  /** V2.14 §4 — the ONLY place the "My action items only" toggle is ever set. Purely a UI
+   *  display preference (never gates any underlying computation), independently persisted
+   *  per page — same pattern as setShowAdvancedSettings() above. */
+  setMyActionItemsOnly(page: keyof MyActionItemsOnlyByPage, value: boolean) {
+    this.set({ ...this.state, myActionItemsOnly: { ...this.state.myActionItemsOnly, [page]: value } });
   }
 
   /** V2.3 §3-4, §32 — the ONLY place Focus Project Scope is ever set. Always explicit and

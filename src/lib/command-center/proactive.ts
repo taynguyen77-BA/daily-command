@@ -7,6 +7,7 @@ import { computeActionEffectiveness, ineffectiveActions } from "./action-effecti
 import { detectNewAssignments } from "./assignment-detection";
 import { buildAttentionQueue } from "./attention-queue";
 import { resolveAttentionEntity } from "./personal-focus";
+import { classifyPersonalRelation, type PersonalRelationIdentity } from "./personal-relation";
 import { computeClientAttentionMap } from "./client-attention-map";
 import { computeDecisionEffectiveness } from "./decision-effectiveness";
 import { computeDecisionRadar } from "./decision-radar";
@@ -66,7 +67,12 @@ export function computeProactiveIntelligence(
   // configured PersonalIdentity's accountId, used only to detect a NEW assignment (§2 task 2)
   // against `previousSnapshot`.
   mentionEvents?: MentionEvent[],
-  identityOwnerId?: string
+  identityOwnerId?: string,
+  // V2.14 §1 — additive/optional trailing parameter, same no-op-when-omitted contract as
+  // every other one above: the configured PersonalIdentity's displayName, needed alongside
+  // `identityOwnerId` so AttentionItem.relation can fall back to displayName matching exactly
+  // like every other identity comparison in this app (see personal-relation.ts).
+  identityDisplayName?: string
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
 
@@ -127,6 +133,10 @@ export function computeProactiveIntelligence(
   // items (e.g. overall delivery drift) is never gated at all, same as personal-focus.ts.
   // This same pass also resolves a real ticket link when the item points at exactly one work
   // item — no fabricated link (Demo/Local Import has no sourceUrl), no second implementation.
+  // V2.14 §1 — built once per render, not re-scanned per item (per Task 1).
+  const relationIdentity: PersonalRelationIdentity = { accountId: identityOwnerId, displayName: identityDisplayName };
+  const mentionedIssueKeys = new Set((mentionEvents ?? []).map((m) => m.issueKey));
+
   const gatedAttentionQueue: AttentionItem[] = [];
   for (const item of attentionQueue) {
     const entity = resolveAttentionEntity(item, data, derived.risks);
@@ -141,6 +151,11 @@ export function computeProactiveIntelligence(
       if (workItem) {
         item.ticketKey = workItem.key;
         item.ticketUrl = workItem.sourceUrl;
+        // V2.14 §1 — same "only when exactly one work item is related" discipline as
+        // ticketKey/ticketUrl just above; classified from the real WorkItem's own
+        // ownerId/owner, independent of this item's ownershipExplicit (see AttentionItem's
+        // own field comment).
+        item.relation = classifyPersonalRelation(workItem, relationIdentity, mentionedIssueKeys, workItem.key);
       }
     }
     gatedAttentionQueue.push(item);

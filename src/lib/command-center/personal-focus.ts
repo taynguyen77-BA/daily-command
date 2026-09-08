@@ -29,6 +29,7 @@ import type {
   DeliveryLoop,
   FocusCategory,
   FocusOverload,
+  MentionEvent,
   PersonalFocusCandidate,
   PersonalFocusFactor,
   PersonalFocusResult,
@@ -42,6 +43,7 @@ import { daysBetween } from "./scoring";
 import { projectName as lookupProjectName } from "./selectors";
 import { detectDeadlineConflict } from "./deadline-conflict";
 import { isPersonalWorkEligible, resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { classifyPersonalRelation, matchesIdentity, type PersonalRelationIdentity } from "./personal-relation";
 
 const CATEGORY_ORDER: Record<FocusCategory, number> = { DO_NOW: 0, DO_TODAY: 1, WATCH: 2, BLOCKED: 3, DEFER: 4, DONE: 5 };
 
@@ -161,7 +163,7 @@ function resolveOwner(entity: ResolvedEntity, data: CommandCenterData): OwnerRes
 
 /** V2.10 §1 — a lightweight identity view every candidate builder matches against. `ownerId`
  *  is the configured PersonalIdentity's Jira accountId, when set. */
-interface IdentityRef {
+export interface IdentityRef {
   displayName?: string;
   ownerId?: string;
 }
@@ -169,12 +171,15 @@ interface IdentityRef {
 /** V2.10 §1 — prefers accountId matching (stable, unique, never edited) over displayName
  *  matching (editable, non-unique across a multi-org Jira instance) whenever the configured
  *  identity has an accountId. Falls back to the pre-V2.10 displayName comparison only when
- *  it doesn't — zero behavior change for installations that never set one. */
+ *  it doesn't — zero behavior change for installations that never set one.
+ *  V2.14 §1 — the actual field comparison is `matchesIdentity` (personal-relation.ts), shared
+ *  with `classifyPersonalRelation` rather than re-derived here; this function still owns the
+ *  ambiguity gate (`ownerIdAmbiguous`/`ambiguous`), which is specific to resolving ownership
+ *  across possibly-several related records and has no equivalent in the single-WorkItem
+ *  PersonalRelation classification. */
 function isExplicitOwner(resolution: OwnerResolution, identity: IdentityRef): boolean {
-  if (identity.ownerId) {
-    return !resolution.ownerIdAmbiguous && !!resolution.ownerId && resolution.ownerId === identity.ownerId;
-  }
-  return !resolution.ambiguous && !!identity.displayName && !!resolution.label && resolution.label === identity.displayName;
+  const ambiguous = identity.ownerId ? resolution.ownerIdAmbiguous : resolution.ambiguous;
+  return !ambiguous && matchesIdentity(resolution.ownerId, resolution.label, { accountId: identity.ownerId, displayName: identity.displayName });
 }
 
 /** V1.7 §20 — the nearest explicit due/review date among related records; undefined when
@@ -289,7 +294,9 @@ function candidateFromAttentionItem(
   identity: IdentityRef,
   today: string,
   workRelevanceIndex: WorkRelevanceIndex | undefined,
-  allRisks?: Risk[]
+  allRisks: Risk[] | undefined,
+  relationIdentity: PersonalRelationIdentity,
+  mentionedIssueKeys: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
   const entity = resolveAttentionEntity(item, data, allRisks ?? data.risks);
   // V2.13 §1 — MENTION/ASSIGNMENT are gated too (option 3b): the Work Relevance Policy
@@ -338,6 +345,13 @@ function candidateFromAttentionItem(
   // V2.13 §4 (bug fix) — only exposed when exactly one work item is related; a decision or
   // risk touching several tickets never picks one arbitrarily and presents it as THE ticket.
   const singleWorkItem = entity.workItemIds.length === 1 ? workItem : undefined;
+  // V2.14 §1 — intentionally independent of ownershipExplicit above (see this file's top
+  // comment): classified directly from the primary related WorkItem's own ownerId/owner,
+  // never from the ambiguity-aware resolution/hardcoded MENTION-ASSIGNMENT override used for
+  // ownershipExplicit. Falls back to a relation-less stub (no ownerId/owner) when no work item
+  // is related at all — classifyPersonalRelation still resolves that to a real, non-guessed
+  // value (FOLLOWING when identity is configured, UNKNOWN when it isn't).
+  const relation = classifyPersonalRelation(workItem ?? { id: item.id, ownerId: undefined, owner: undefined }, relationIdentity, mentionedIssueKeys, workItem?.key);
 
   return {
     id: `focus:attention:${item.id}`,
@@ -364,6 +378,7 @@ function candidateFromAttentionItem(
     attentionItemId: item.id,
     ticketKey: singleWorkItem?.key,
     ticketUrl: singleWorkItem?.sourceUrl,
+    relation,
   };
 }
 
@@ -412,7 +427,16 @@ function severityToHeat(severity: AttentionSeverity): "LOW" | "MEDIUM" | "HIGH" 
  *  already represented by a DECISION attention item (decisionRadar → attentionQueue), to
  *  avoid showing the same problem twice (§12). Radar-only synthetic loops (`radar-*` ids)
  *  are always already covered by a DECISION attention item, so they're skipped here. */
-function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity: IdentityRef, attentionDecisionIds: Set<string>, today: string, workRelevanceIndex: WorkRelevanceIndex | undefined): PersonalFocusCandidate | null {
+function candidateFromLoop(
+  loop: DeliveryLoop,
+  data: CommandCenterData,
+  identity: IdentityRef,
+  attentionDecisionIds: Set<string>,
+  today: string,
+  workRelevanceIndex: WorkRelevanceIndex | undefined,
+  relationIdentity: PersonalRelationIdentity,
+  mentionedIssueKeys: ReadonlySet<string>
+): PersonalFocusCandidate | null {
   if (loop.id.startsWith("radar-")) return null;
   if (attentionDecisionIds.has(loop.id)) return null;
   if (loop.health !== "STALLED" && loop.health !== "AT_RISK") return null;
@@ -453,6 +477,9 @@ function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity
   });
   const score = Math.round(factors.reduce((s, f) => s + f.contribution, 0));
   void today;
+  // V2.14 §1 — same independent classification as candidateFromAttentionItem above, from the
+  // loop's own resolved workItem (if any), never from ownershipExplicit.
+  const relation = classifyPersonalRelation(workItem ?? { id: loop.id, ownerId: undefined, owner: undefined }, relationIdentity, mentionedIssueKeys, workItem?.key);
 
   return {
     id: `focus:loop:${loop.id}`,
@@ -477,6 +504,7 @@ function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity
     decisionId: decision?.id,
     ticketKey: workItem?.key,
     ticketUrl: workItem?.sourceUrl,
+    relation,
   };
 }
 
@@ -578,7 +606,11 @@ export function deriveDontForget(result: Pick<PersonalFocusResult, "candidates" 
  *  manually logged — the overwhelming majority of risks in practice — which silently broke
  *  both the ticket link (§4) and the Work Relevance gate (§1) for that whole category.
  *  Pass `derived.risks` (selectors.ts's "manual + auto-detected, deduped" list); omitting it
- *  reproduces the pre-fix (manual-risks-only) behavior exactly. */
+ *  reproduces the pre-fix (manual-risks-only) behavior exactly.
+ *  V2.14 §1 — `mentionEvents` is likewise additive/optional, threaded through only to build
+ *  `mentionedIssueKeys` for PersonalRelation classification; omitting it just means no
+ *  candidate can ever classify as MENTIONED/ASSIGNED_AND_MENTIONED (identical to how
+ *  computeProactiveIntelligence already treats a missing `mentionEvents` as a no-op). */
 export function computePersonalFocus(
   data: CommandCenterData,
   proactive: ProactiveIntelligence,
@@ -586,17 +618,21 @@ export function computePersonalFocus(
   today: string,
   ownerId?: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  allRisks?: Risk[]
+  allRisks?: Risk[],
+  mentionEvents?: MentionEvent[]
 ): PersonalFocusResult {
   const identity: IdentityRef = { displayName: ownerName, ownerId };
+  // V2.14 §1 — built once per render (never re-scanned per candidate), per Task 1.
+  const relationIdentity: PersonalRelationIdentity = { displayName: ownerName, accountId: ownerId };
+  const mentionedIssueKeys = new Set((mentionEvents ?? []).map((m) => m.issueKey));
   const eligibleAttention = proactive.attentionQueue.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
   const attentionDecisionIds = new Set(eligibleAttention.filter((i) => i.category === "DECISION" && i.sourceRef?.type === "decision").map((i) => i.sourceRef!.id));
 
   const fromAttention = eligibleAttention
-    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks))
+    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks, relationIdentity, mentionedIssueKeys))
     .filter((c): c is PersonalFocusCandidate => c !== null);
   const fromLoops = proactive.deliveryLoops
-    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex))
+    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex, relationIdentity, mentionedIssueKeys))
     .filter((c): c is PersonalFocusCandidate => c !== null);
 
   const candidates = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);

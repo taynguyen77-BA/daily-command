@@ -100,11 +100,12 @@ export function useCommandCenter() {
             today,
             workRelevanceIndex,
             state.mentionEvents,
-            state.personalIdentity?.accountId
+            state.personalIdentity?.accountId,
+            state.ownerName
           )
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, state.mentionEvents, state.personalIdentity?.accountId]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, state.mentionEvents, state.personalIdentity?.accountId, state.ownerName]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -148,9 +149,9 @@ export function useCommandCenter() {
   // V1.6 — deterministic Personal Focus Engine, composed the same way `proactive` is
   // composed above. No AI calls; recomputed fresh every render from live project state.
   const personalFocus = useMemo(
-    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks) : null),
+    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, state.mentionEvents) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks]
+    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, state.mentionEvents]
   );
 
   // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
@@ -186,9 +187,10 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         today,
         workRelevanceIndex,
         state.mentionEvents,
-        state.personalIdentity?.accountId
+        state.personalIdentity?.accountId,
+        state.ownerName
       )
     : null;
-  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks) : null;
+  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, state.mentionEvents) : null;
   return { filteredData, derived, proactive, personalFocus, workRelevanceIndex };
 }

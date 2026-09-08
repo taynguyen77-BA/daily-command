@@ -192,6 +192,10 @@ import { runServerSideNotifyCheck } from "../src/lib/command-center/cron-notify"
 import { createInMemoryNotifyStore, isNotifyStoreConfigured } from "../src/lib/command-center/notify-state";
 import type { SlackFetchLike } from "../src/lib/server/slack-notify";
 
+// V2.14 — "Is this mine to act on?" relation badge
+import { classifyPersonalRelation, isMyActionItem, matchesIdentity } from "../src/lib/command-center/personal-relation";
+import { RelationBadge } from "../src/components/command-center/ui";
+
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
@@ -6931,6 +6935,160 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   const withoutUrl = renderToStaticMarkup(React.createElement(TicketLink, { ticketKey: "JPMC-124" }));
   ok("V2.13 TicketLink", !/<a[\s>]/.test(withoutUrl), "with no url, TicketLink renders no <a> tag at all — plain text, never a broken/empty link");
   ok("V2.13 TicketLink", withoutUrl.includes("JPMC-124"), "the plain ticket key text is still rendered");
+}
+
+// ===== V2.14 §1 — classifyPersonalRelation: all five outcomes, with/without accountId
+// configured (fallback path), and the no-identity-at-all -> UNKNOWN case. =====
+{
+  const item = makeItem({ id: "cr-wi-1", key: "CR-1", owner: "Alice", ownerId: "acc-alice" });
+  const mentioned = new Set(["CR-1"]);
+  const notMentioned = new Set<string>();
+
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, {}, notMentioned, item.key) === "UNKNOWN", "no accountId/displayName configured at all -> UNKNOWN, never guessed (§1)");
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, {}, mentioned, item.key) === "UNKNOWN", "UNKNOWN holds even when the issue IS in mentionedIssueKeys — no identity means no relation can be claimed");
+
+  // accountId-configured path.
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, { accountId: "acc-alice" }, notMentioned, item.key) === "ASSIGNED", "ownerId matches the configured accountId, not mentioned -> ASSIGNED");
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, { accountId: "acc-alice" }, mentioned, item.key) === "ASSIGNED_AND_MENTIONED", "ownerId matches AND the issue is mentioned -> ASSIGNED_AND_MENTIONED");
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, { accountId: "acc-bob" }, mentioned, item.key) === "MENTIONED", "ownerId does not match, but the issue is mentioned -> MENTIONED");
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, { accountId: "acc-bob" }, notMentioned, item.key) === "FOLLOWING", "neither assigned nor mentioned, but identity IS configured -> FOLLOWING, not UNKNOWN");
+  ok("V2.14 classifyPersonalRelation", classifyPersonalRelation(item, { accountId: "acc-bob" }, mentioned, undefined) === "FOLLOWING", "an undefined issueKey never matches mentionedIssueKeys, even when the set is non-empty");
+
+  // displayName-fallback path (no accountId configured).
+  ok("V2.14 classifyPersonalRelation — displayName fallback", classifyPersonalRelation(item, { displayName: "Alice" }, notMentioned, item.key) === "ASSIGNED", "no accountId configured -> falls back to WorkItem.owner === identity.displayName");
+  ok("V2.14 classifyPersonalRelation — displayName fallback", classifyPersonalRelation(item, { displayName: "Bob" }, mentioned, item.key) === "MENTIONED", "displayName fallback: no name match, but mentioned -> MENTIONED");
+  ok("V2.14 classifyPersonalRelation — displayName fallback", classifyPersonalRelation(item, { displayName: "Alice" }, mentioned, item.key) === "ASSIGNED_AND_MENTIONED", "displayName fallback: name match AND mentioned -> ASSIGNED_AND_MENTIONED");
+
+  // accountId takes priority over displayName — a shared display name is never enough once
+  // accountId is configured (same discipline as V2.10 §1's isExplicitOwner).
+  const impostor = makeItem({ id: "cr-wi-2", key: "CR-2", owner: "Alice", ownerId: "acc-impostor" });
+  ok(
+    "V2.14 classifyPersonalRelation — accountId priority",
+    classifyPersonalRelation(impostor, { accountId: "acc-alice", displayName: "Alice" }, notMentioned, impostor.key) === "FOLLOWING",
+    "accountId configured -> a matching displayName alone is never enough (no name-similarity guessing)"
+  );
+
+  // No related WorkItem at all (personal-focus.ts's relation-less stub) — still resolves a
+  // real value, never a crash, and mention-only signals still work with no owner info.
+  const noOwnerStub = { id: "stub", ownerId: undefined, owner: undefined };
+  ok("V2.14 classifyPersonalRelation — no related work item", classifyPersonalRelation(noOwnerStub, { accountId: "acc-alice" }, mentioned, "CR-1") === "MENTIONED", "no ownerId/owner at all, but the issue key is mentioned -> MENTIONED");
+  ok("V2.14 classifyPersonalRelation — no related work item", classifyPersonalRelation(noOwnerStub, { accountId: "acc-alice" }, notMentioned, "CR-1") === "FOLLOWING", "no ownerId/owner at all and not mentioned -> FOLLOWING");
+
+  // matchesIdentity — the shared comparison isExplicitOwner (personal-focus.ts) also calls.
+  ok("V2.14 matchesIdentity", matchesIdentity("acc-1", "Alice", { accountId: "acc-1" }) === true, "ownerId match wins when accountId is configured");
+  ok("V2.14 matchesIdentity", matchesIdentity("acc-2", "Alice", { accountId: "acc-1" }) === false, "a different ownerId never matches, regardless of displayName");
+  ok("V2.14 matchesIdentity", matchesIdentity(undefined, "Alice", { displayName: "Alice" }) === true, "displayName match when no accountId is configured");
+  ok("V2.14 matchesIdentity", matchesIdentity(undefined, undefined, {}) === false, "nothing to compare -> false, never a guessed match");
+}
+
+// ===== V2.14 §4 — isMyActionItem: ASSIGNED/ASSIGNED_AND_MENTIONED/MENTIONED only. =====
+{
+  ok("V2.14 isMyActionItem", isMyActionItem("ASSIGNED") === true, "ASSIGNED counts as a my-action item");
+  ok("V2.14 isMyActionItem", isMyActionItem("ASSIGNED_AND_MENTIONED") === true, "ASSIGNED_AND_MENTIONED counts");
+  ok("V2.14 isMyActionItem", isMyActionItem("MENTIONED") === true, "MENTIONED counts — someone is waiting on a reply");
+  ok("V2.14 isMyActionItem", isMyActionItem("FOLLOWING") === false, "FOLLOWING is excluded — visibility only, not a task");
+  ok("V2.14 isMyActionItem", isMyActionItem("UNKNOWN") === false, "UNKNOWN is excluded");
+  ok("V2.14 isMyActionItem", isMyActionItem(undefined) === false, "undefined (no resolvable relation) is excluded");
+}
+
+// ===== V2.14 §2 — RelationBadge: one pill per value except UNKNOWN (renders nothing), and
+// every rendered value is distinguishable by its own label text, not color alone. =====
+{
+  const html = (relation: Parameters<typeof RelationBadge>[0]["relation"]) => renderToStaticMarkup(React.createElement(RelationBadge, { relation }));
+  const assigned = html("ASSIGNED");
+  const both = html("ASSIGNED_AND_MENTIONED");
+  const mentionedBadge = html("MENTIONED");
+  const following = html("FOLLOWING");
+  const unknown = html("UNKNOWN");
+  const undef = html(undefined);
+
+  ok("V2.14 RelationBadge", assigned.includes("Assigned to you"), "ASSIGNED renders its label");
+  ok("V2.14 RelationBadge", both.includes("Assigned") && both.includes("mentioned"), "ASSIGNED_AND_MENTIONED renders a label naming both");
+  ok("V2.14 RelationBadge", mentionedBadge.includes("Mentioned you"), "MENTIONED renders its label");
+  ok("V2.14 RelationBadge", following.includes("Following"), "FOLLOWING renders its label");
+  ok("V2.14 RelationBadge", unknown === "", "UNKNOWN renders nothing — an absent badge, not a placeholder one");
+  ok("V2.14 RelationBadge", undef === "", "an undefined relation (e.g. no single resolvable ticket) also renders nothing");
+
+  const labels = [assigned, both, mentionedBadge, following].map((h) => h.replace(/<[^>]+>/g, ""));
+  ok("V2.14 RelationBadge", new Set(labels).size === labels.length, "every non-UNKNOWN relation has a visually distinct label — not color alone, matching this app's other badges");
+}
+
+// ===== V2.14 §4 — myActionItemsOnly toggle: default, independent per-page setter, and
+// persistence — same pattern as the V2.11 §3B showAdvancedSettings toggle above. =====
+{
+  commandCenterStore.resetAll();
+  const initial = commandCenterStore.getSnapshot().myActionItemsOnly;
+  ok("V2.14 myActionItemsOnly toggle", initial.attention === false && initial.myDay === false && initial.priorities === false, "defaults to Everything (off) on every page for a first-time user — never a surprising silent-hide default");
+
+  commandCenterStore.setMyActionItemsOnly("attention", true);
+  const afterOneSet = commandCenterStore.getSnapshot().myActionItemsOnly;
+  ok("V2.14 myActionItemsOnly toggle", afterOneSet.attention === true && afterOneSet.myDay === false && afterOneSet.priorities === false, "setting one page's toggle is independently settable — it never flips another page's");
+
+  const roundTrip = parseStoredState(JSON.stringify(commandCenterStore.getSnapshot()));
+  ok("V2.14 myActionItemsOnly toggle", roundTrip.myActionItemsOnly.attention === true && roundTrip.myActionItemsOnly.priorities === false, "round-trips through JSON serialization/parseStoredState unchanged — persists across a reload");
+
+  const fallback = parseStoredState("not valid json");
+  ok("V2.14 myActionItemsOnly toggle", fallback.myActionItemsOnly.attention === false && fallback.myActionItemsOnly.myDay === false && fallback.myActionItemsOnly.priorities === false, "malformed stored state falls back to the safe default (Everything) on every page, never a crash");
+
+  commandCenterStore.resetAll();
+}
+
+// ===== V2.14 §1/§3 — PersonalRelation wired end-to-end through computeProactiveIntelligence
+// (AttentionItem.relation) and computePersonalFocus (PersonalFocusCandidate.relation),
+// genuinely independent of ownershipExplicit/AttentionCategory — no DO_NOW/DO_TODAY placement
+// or category order changes as a side effect of this pass. =====
+{
+  // dueDate: TODAY triggers risk-detection.ts's R1 (deadline) rule — a real auto-detected
+  // RISK AttentionItem for each item, so this exercises the actual sourceRef -> WorkItem
+  // resolution path (same one ticketKey/ticketUrl already use), not a hand-built fixture.
+  const relAssigned = jiraItem({ id: "rel-wi-assigned", key: "REL-1", owner: "Alice", ownerId: "acc-alice", dueDate: TODAY });
+  const relMentionedOnly = jiraItem({ id: "rel-wi-mentioned", key: "REL-2", owner: "Bob", ownerId: "acc-bob", dueDate: TODAY });
+  const relFollowing = jiraItem({ id: "rel-wi-following", key: "REL-3", owner: "Bob", ownerId: "acc-bob", dueDate: TODAY });
+  const relData: CommandCenterData = { ...emptyData(), workItems: [relAssigned, relMentionedOnly, relFollowing] };
+  const relDerived = deriveData(relData, null, TODAY);
+  const relMentionEvents: MentionEvent[] = [{ issueKey: "REL-2", excerpt: "please take a look", mentionedAt: TODAY }];
+
+  const relProactive = computeProactiveIntelligence(relData, relDerived, [], null, {}, "jira", TODAY, undefined, relMentionEvents, "acc-alice", "Alice");
+  const attnFor = (key: string) => relProactive.attentionQueue.find((i) => i.ticketKey === key);
+
+  ok("V2.14 AttentionItem.relation", attnFor("REL-1")?.relation === "ASSIGNED", "an AttentionItem whose single related WorkItem.ownerId matches the configured accountId classifies ASSIGNED");
+  ok("V2.14 AttentionItem.relation", attnFor("REL-2")?.relation === "MENTIONED", "an AttentionItem on a mentioned-but-not-owned ticket classifies MENTIONED");
+  ok("V2.14 AttentionItem.relation", attnFor("REL-3")?.relation === "FOLLOWING", "an AttentionItem neither owned nor mentioned, with identity configured, classifies FOLLOWING (never UNKNOWN)");
+
+  // Omitting identityDisplayName/mentionEvents/identityOwnerId is a no-op — no relation is
+  // ever fabricated (matches every other additive/optional trailing parameter in this app).
+  const relProactiveNoIdentity = computeProactiveIntelligence(relData, relDerived, [], null, {}, "jira", TODAY);
+  ok(
+    "V2.14 AttentionItem.relation",
+    relProactiveNoIdentity.attentionQueue.every((i) => i.relation === undefined || i.relation === "UNKNOWN"),
+    "with no identity configured at all, no AttentionItem is ever assigned a guessed relation"
+  );
+
+  const relFocus = computePersonalFocus(relData, relProactive, "Alice", TODAY, "acc-alice", undefined, relDerived.risks, relMentionEvents);
+  const candFor = (key: string) => relFocus.candidates.find((c) => c.ticketKey === key);
+  ok("V2.14 PersonalFocusCandidate.relation", candFor("REL-1")?.relation === "ASSIGNED", "the same WorkItem resolves to ASSIGNED as a PersonalFocusCandidate too");
+  ok("V2.14 PersonalFocusCandidate.relation", candFor("REL-2")?.relation === "MENTIONED", "MENTIONED carries through to PersonalFocusCandidate");
+  ok("V2.14 PersonalFocusCandidate.relation", candFor("REL-3")?.relation === "FOLLOWING", "FOLLOWING carries through to PersonalFocusCandidate");
+
+  // Independence from ownershipExplicit/category (§1's explicit non-goal): a WATCH/low-score
+  // candidate can still be ASSIGNED, and relation never changes score/category/DO_NOW
+  // placement — asserting the untouched fields stayed exactly what they'd be without §1.
+  const bareFocus = computePersonalFocus(relData, relProactive, "Alice", TODAY, "acc-alice", undefined, relDerived.risks);
+  const bareCand = bareFocus.candidates.find((c) => c.ticketKey === "REL-1");
+  const withRelCand = candFor("REL-1");
+  ok(
+    "V2.14 independence from scoring",
+    !!bareCand && !!withRelCand && bareCand.score === withRelCand.score && bareCand.category === withRelCand.category && bareCand.ownershipExplicit === withRelCand.ownershipExplicit,
+    "adding PersonalRelation classification (via the mentionEvents parameter) never changes score, category, or ownershipExplicit — a read-only, additive pass"
+  );
+
+  // isMyActionItem composes correctly as an extra AND filter over the real candidate set.
+  const myActionCandidates = relFocus.candidates.filter((c) => isMyActionItem(c.relation));
+  ok(
+    "V2.14 isMyActionItem integration",
+    myActionCandidates.some((c) => c.ticketKey === "REL-1") && myActionCandidates.some((c) => c.ticketKey === "REL-2") && !myActionCandidates.some((c) => c.ticketKey === "REL-3"),
+    "'My action items only' keeps ASSIGNED/MENTIONED candidates and excludes the FOLLOWING one"
+  );
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

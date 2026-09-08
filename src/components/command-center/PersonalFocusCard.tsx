@@ -8,7 +8,7 @@ import { useMemo, useState } from "react";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
 import type { PersonalFocusCandidate } from "@/lib/command-center/types";
-import { FocusCategoryBadge, Panel, TrustLabel } from "./ui";
+import { FocusCategoryBadge, Panel, RelationBadge, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 import { TicketLink } from "./TicketLink";
 
@@ -47,6 +47,7 @@ export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: Pers
     <Panel className="p-4">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <FocusCategoryBadge category={candidate.category} />
+        <RelationBadge relation={candidate.relation} />
         {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
         {candidate.ticketKey && <TicketLink ticketKey={candidate.ticketKey} url={candidate.ticketUrl} className="text-xs text-text3" />}
       </div>

@@ -9,7 +9,8 @@ import { reconcilePersonalPlan, detectNewCriticalArrivals, buildCarryForward, bu
 import type { FocusCategory, PersonalFocusCandidate, PersonalFocusResult, PersonalPlanItem, PlanItemOrigin } from "@/lib/command-center/types";
 import { useCommandCenter } from "./use-command-center";
 import { FocusSession } from "./FocusSession";
-import { FocusCategoryBadge, Panel, SectionHeading, TrustLabel } from "./ui";
+import { isMyActionItem } from "@/lib/command-center/personal-relation";
+import { FocusCategoryBadge, Panel, RelationBadge, SectionHeading, TrustLabel } from "./ui";
 
 const SECTIONS: { category: FocusCategory; title: string }[] = [
   { category: "DO_NOW", title: "Do Now" },
@@ -79,6 +80,7 @@ function PlanRow({
         <div>
           <div className="mb-1 flex flex-wrap items-center gap-2">
             <FocusCategoryBadge category={candidate.category} />
+            <RelationBadge relation={candidate.relation} />
             {item.pinned && <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent2">Pinned</span>}
             {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
             <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{item.status}</span>
@@ -132,6 +134,11 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
   const [session, setSession] = useState<{ candidate: PersonalFocusCandidate; planItemId: string } | null>(null);
   const [reviewingUpdate, setReviewingUpdate] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
+  // V2.14 §4 — a display-only filter applied where rows/sections are actually rendered
+  // below, never fed into reconcilePersonalPlan/detectNewCriticalArrivals/buildCarryForward:
+  // those need the TRUE full candidate set to correctly decide "is this plan item still
+  // valid" — filtering their input would make a hidden-but-still-valid item look resolved.
+  const myActionItemsOnly = state.myActionItemsOnly.myDay;
 
   const todayItems = useMemo(() => state.personalPlan.filter((p) => p.plannedDate === today).sort((a, b) => a.position - b.position), [state.personalPlan, today]);
   const activeToday = todayItems.filter((p) => p.status === "planned" || p.status === "in-progress" || p.status === "blocked");
@@ -180,7 +187,10 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
   }
 
   const hasPlanToday = todayItems.length > 0;
-  const suggested = useMemo(() => buildSuggestedDailyPlan(personalFocus.candidates), [personalFocus.candidates]);
+  const suggestedAll = useMemo(() => buildSuggestedDailyPlan(personalFocus.candidates), [personalFocus.candidates]);
+  // V2.14 §4 — narrows the already-computed suggestion, never re-selects a different one;
+  // "Accept Plan" below accepts exactly what's shown, so the two never disagree.
+  const suggested = myActionItemsOnly ? suggestedAll.filter((c) => isMyActionItem(c.relation)) : suggestedAll;
   const deadlineConflict = personalFocus.deadlineConflict;
 
   return (
@@ -344,7 +354,10 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
         const items = activeToday.filter((item) => {
           const candidate = candidateForItem(item);
           const effectiveCategory = item.status === "blocked" ? "BLOCKED" : candidate?.category;
-          return effectiveCategory === category;
+          if (effectiveCategory !== category) return false;
+          // V2.14 §4 — hides the row, never touches candidateForItem/reconciliation above.
+          if (myActionItemsOnly && !isMyActionItem(candidate?.relation)) return false;
+          return true;
         });
         if (items.length === 0) return null;
         return (

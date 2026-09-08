@@ -7,7 +7,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import type { AttentionItem } from "@/lib/command-center/types";
-import { AttentionSeverityBadge, CategoryBadge, LifecycleBadge, Panel, SectionHeading } from "./ui";
+import { AttentionSeverityBadge, CategoryBadge, LifecycleBadge, Panel, RelationBadge, SectionHeading } from "./ui";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { DecisionAssistant } from "./DecisionAssistant";
 import { AskClaudeAbout } from "./AskClaudeAbout";
@@ -35,6 +35,7 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
     <Panel className="p-4">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <CategoryBadge category={item.category} />
+        <RelationBadge relation={item.relation} />
         <AttentionSeverityBadge severity={item.severity} />
         <LifecycleBadge lifecycle={item.lifecycle} />
         {item.lifecycle === "REOPENED" && <span className="text-xs text-red">Reopened — previously resolved</span>}
