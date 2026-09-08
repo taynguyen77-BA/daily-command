@@ -545,6 +545,7 @@ const JIRA_ERROR_HELP: Record<string, string> = {
   "not-configured": "Set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN in the server environment.",
   "invalid-url": "JIRA_BASE_URL is not a valid URL.",
   "auth-failure": "Jira rejected the configured email/API token.",
+  "cron-unauthorized": "CRON_SECRET is configured on this deployment, which disables the Sync Now button (the browser can't hold that secret). Unset CRON_SECRET to restore manual sync, or rely on the scheduled cron/GitHub Action instead.",
   "permission-failure": "The configured Jira account lacks permission for this request.",
   "rate-limited": "Jira's rate limit was hit — try again shortly.",
   "network-error": "Could not reach the configured Jira base URL.",

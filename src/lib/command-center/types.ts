@@ -409,6 +409,12 @@ export type JiraErrorKind =
   | "rate-limited"
   | "network-error"
   | "malformed-response"
+  // V2.10 §4 — distinct from "auth-failure": this route was never reached by Jira at all.
+  // It's this app's own CRON_SECRET gate rejecting the request (see sync/route.ts), most
+  // commonly the in-app "Sync Now" button when CRON_SECRET is configured on the deployment
+  // — the browser can't safely hold that secret, so it never sends the header. Kept separate
+  // so the UI never blames Jira credentials for something Jira never saw.
+  | "cron-unauthorized"
   | "unknown";
 
 /** V1.3 §35 — lightweight sync observability, not a heavy platform.

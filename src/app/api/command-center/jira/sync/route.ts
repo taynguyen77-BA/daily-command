@@ -58,7 +58,14 @@ function isAuthorizedCronRequest(req: Request): boolean {
 
 export async function POST(req: Request) {
   if (!isAuthorizedCronRequest(req)) {
-    return NextResponse.json({ ok: false, error: "Missing or invalid Authorization header.", errorKind: "auth-failure" }, { status: 401 });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "This server requires a CRON_SECRET header that the browser cannot send. Sync Now is disabled while CRON_SECRET is configured — call this route via the scheduled cron or GitHub Action instead, or unset CRON_SECRET to restore the button.",
+        errorKind: "cron-unauthorized",
+      },
+      { status: 401 }
+    );
   }
 
   const config = getJiraConfig();
