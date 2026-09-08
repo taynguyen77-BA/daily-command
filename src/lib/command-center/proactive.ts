@@ -6,6 +6,7 @@
 import { computeActionEffectiveness, ineffectiveActions } from "./action-effectiveness";
 import { detectNewAssignments } from "./assignment-detection";
 import { buildAttentionQueue } from "./attention-queue";
+import { resolveAttentionEntity } from "./personal-focus";
 import { computeClientAttentionMap } from "./client-attention-map";
 import { computeDecisionEffectiveness } from "./decision-effectiveness";
 import { computeDecisionRadar } from "./decision-radar";
@@ -13,14 +14,14 @@ import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
 import { computeDeliveryDrift, computeTrajectory } from "./delivery-drift";
 import { buildFirst30Minutes } from "./first-30-minutes";
-import type { WorkRelevanceIndex } from "./jira/work-relevance";
+import { resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { buildDailySnapshot } from "./memory";
 import { computeOutcomeScorecard } from "./outcome-scorecard";
 import { computeAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
 import { computeRiskEscalations } from "./risk-escalation";
 import { computeStakeholderAttention, rankCommunicationPriority } from "./stakeholder-radar";
-import type { AttentionItem, AttentionItemState, CommandCenterData, DailySnapshot, DecisionEffectivenessResult, EvidenceSourceType, MentionEvent } from "./types";
+import type { AttentionItem, AttentionItemState, CommandCenterData, DailySnapshot, DecisionEffectivenessResult, EvidenceSourceType, MentionEvent, WorkItem } from "./types";
 import type { DerivedData } from "./selectors";
 
 export interface ProactiveIntelligence {
@@ -110,7 +111,42 @@ export function computeProactiveIntelligence(
     today
   );
 
-  const first30Minutes = buildFirst30Minutes(attentionQueue, data, today, workRelevanceIndex);
+  // V2.13 (bug fix) — the Attention Queue never consulted the Work Relevance Policy at all,
+  // so a risk/dependency/decision/action tied to a ticket the user has explicitly classified
+  // COMPLETED (finished work) or EXCLUDED (explicitly not relevant — e.g. "Won't Fix",
+  // "Cancelled") kept surfacing here forever, as if it still needed action — the exact
+  // "irrelevant items still show up" bug. Reuses resolveAttentionEntity (the same sourceRef ->
+  // WorkItem logic personal-focus.ts's own gate relies on) rather than a second
+  // implementation. Deliberately narrower than personal-focus.ts's gate: ACTIONABLE, OBSERVE
+  // ("visible as context"), WAITING (waiting on someone else — exactly what Dependency Radar
+  // and stakeholder-radar signals are already about) and UNKNOWN (a status nobody has
+  // classified yet — Attention Queue must not go quiet just because the user hasn't gotten to
+  // every status in Data & Settings; see V2.7's Unknown Visibility) are all still "live" for
+  // this broader delivery-intelligence surface, unlike the personal-work-only My Day gate.
+  // Only a genuinely finished-or-excluded ticket is dropped; an item with zero related work
+  // items (e.g. overall delivery drift) is never gated at all, same as personal-focus.ts.
+  // This same pass also resolves a real ticket link when the item points at exactly one work
+  // item — no fabricated link (Demo/Local Import has no sourceUrl), no second implementation.
+  const gatedAttentionQueue: AttentionItem[] = [];
+  for (const item of attentionQueue) {
+    const entity = resolveAttentionEntity(item, data, derived.risks);
+    if (workRelevanceIndex && entity.workItemIds.length > 0) {
+      const relatedItems = entity.workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
+      const relevances = relatedItems.map((w) => resolveWorkRelevance(w, workRelevanceIndex));
+      const stillLive = relevances.some((r) => r !== "COMPLETED" && r !== "EXCLUDED");
+      if (relatedItems.length > 0 && !stillLive) continue;
+    }
+    if (entity.workItemIds.length === 1) {
+      const workItem = data.workItems.find((w) => w.id === entity.workItemIds[0]);
+      if (workItem) {
+        item.ticketKey = workItem.key;
+        item.ticketUrl = workItem.sourceUrl;
+      }
+    }
+    gatedAttentionQueue.push(item);
+  }
+
+  const first30Minutes = buildFirst30Minutes(gatedAttentionQueue, data, today, workRelevanceIndex);
   // V2.1 §4 — fixes a confirmed bug: this used to pass the full-history `actionEffectiveness`
   // array (every completed action ever) into a parameter literally named "actionsToday",
   // which is why the Outcome Scorecard's counts and Close Day's ACTIONS section could
@@ -135,7 +171,7 @@ export function computeProactiveIntelligence(
     deliveryLoops,
     stakeholderAttention,
     communicationPriority,
-    attentionQueue,
+    attentionQueue: gatedAttentionQueue,
     nextAttentionState,
     clientAttentionMap,
     first30Minutes,

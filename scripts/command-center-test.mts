@@ -187,6 +187,11 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { TicketLink } from "../src/components/command-center/TicketLink";
 
+// V2.13 §2 — server-side (cron-driven) notify check
+import { runServerSideNotifyCheck } from "../src/lib/command-center/cron-notify";
+import { createInMemoryNotifyStore, isNotifyStoreConfigured } from "../src/lib/command-center/notify-state";
+import type { SlackFetchLike } from "../src/lib/server/slack-notify";
+
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
@@ -5641,6 +5646,291 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   const loopFocus = computePersonalFocus(loopData, fakeProactive([], [loop]), "Alice", TODAY, undefined, wrGateIdx);
   const loopCandidate = loopFocus.candidates.find((c) => c.sourceId === loop.id);
   ok("V2.13 My Day gate", loopCandidate !== undefined && loopCandidate.category === "WATCH", "a loop-sourced candidate whose linked work item is OBSERVE is demoted to WATCH too, not just attention-sourced candidates");
+}
+
+// ----- V2.13 (bug fix) — the Attention Queue itself (not just My Day) now consults the Work
+// Relevance Policy: a signal tied to a ticket already COMPLETED or EXCLUDED never lingers
+// forever as if it still needed action. Deliberately narrower than My Day's gate — WAITING
+// and UNKNOWN tickets stay visible here (this is delivery intelligence, not "is this my
+// personal work"), and the same pass resolves a real ticket link when exactly one work item
+// is related. -----
+{
+  const aqIdx = buildWorkRelevanceIndex(
+    globalPolicy({ Done: "COMPLETED", "Won't Fix": "EXCLUDED", "Waiting for Client": "WAITING", "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE" })
+  );
+
+  const completedTicket = jiraItem({ id: "wi-aq-completed", key: "JPMC-700", jiraStatusName: "Done" });
+  const excludedTicket = jiraItem({ id: "wi-aq-excluded", key: "JPMC-701", jiraStatusName: "Won't Fix" });
+  const waitingTicket = jiraItem({ id: "wi-aq-waiting", key: "JPMC-702", jiraStatusName: "Waiting for Client" });
+  const observeTicket = jiraItem({ id: "wi-aq-observe", key: "JPMC-703", jiraStatusName: "Ready for UAT/Business Test" });
+  const actionableTicket = jiraItem({ id: "wi-aq-actionable", key: "JPMC-704", jiraStatusName: "To Do" });
+  const unknownTicket = jiraItem({ id: "wi-aq-unknown", key: "JPMC-705", jiraStatusName: "Some Custom Status Nobody Classified" });
+  const aqTickets = [completedTicket, excludedTicket, waitingTicket, observeTicket, actionableTicket, unknownTicket];
+
+  const aqData: CommandCenterData = { ...emptyData(), workItems: aqTickets };
+  const aqDerived = deriveData(aqData, null, TODAY);
+  const aqMentionEvents: MentionEvent[] = aqTickets.map((w) => ({ issueKey: w.key, excerpt: "please check this", mentionedAt: TODAY }));
+
+  const aqProactive = computeProactiveIntelligence(aqData, aqDerived, [], null, {}, "jira", TODAY, aqIdx, aqMentionEvents);
+  const byMentionKey = (key: string) => aqProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}`);
+
+  ok("V2.13 Attention Queue gate", byMentionKey(completedTicket.key) === undefined, "a MENTION on an already-COMPLETED ticket is dropped from the Attention Queue entirely, not left lingering forever");
+  ok("V2.13 Attention Queue gate", byMentionKey(excludedTicket.key) === undefined, "a MENTION on an EXCLUDED ticket is dropped too");
+  ok("V2.13 Attention Queue gate", byMentionKey(waitingTicket.key) !== undefined, "a MENTION on a WAITING ticket stays visible — waiting-on-someone-else is exactly the kind of thing this broader delivery-intelligence surface (unlike My Day) must keep showing");
+  ok("V2.13 Attention Queue gate", byMentionKey(observeTicket.key) !== undefined, "a MENTION on an OBSERVE ticket stays visible — OBSERVE means 'visible as context', never dropped");
+  ok("V2.13 Attention Queue gate", byMentionKey(unknownTicket.key) !== undefined, "a MENTION on an UNKNOWN (never classified) status stays visible — the Attention Queue must not go quiet just because the user hasn't calibrated every status yet");
+
+  const actionableMention = byMentionKey(actionableTicket.key);
+  ok("V2.13 Attention Queue gate", actionableMention !== undefined, "a MENTION on an ACTIONABLE ticket is unaffected by the gate");
+  ok("V2.13 Attention Queue gate (ticket link)", actionableMention?.ticketKey === actionableTicket.key, "the same pass resolves the real ticket key from the one related work item — reusing resolveAttentionEntity, not a second sourceRef -> WorkItem implementation");
+  ok("V2.13 Attention Queue gate (ticket link)", actionableMention?.ticketUrl === undefined, "no sourceUrl configured on the fixture means no fabricated link — matches TicketLink's own 'never invent a link' discipline");
+
+  // Omitting the Work Relevance index entirely is a no-op — matches pre-V2.13 behavior.
+  const aqUngated = computeProactiveIntelligence(aqData, aqDerived, [], null, {}, "jira", TODAY, undefined, aqMentionEvents);
+  const ungatedByKey = (key: string) => aqUngated.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}`);
+  ok("V2.13 Attention Queue gate", ungatedByKey(completedTicket.key) !== undefined, "omitting the Work Relevance index is a no-op — a COMPLETED ticket's mention is unaffected, matching pre-V2.13 behavior");
+}
+
+// ----- V2.13 (bug fix) — resolveAttentionEntity's RISK lookup previously checked only
+// `data.risks` (manual risks), so an AUTO-DETECTED risk (risk-detection.ts's deterministic
+// engine — the overwhelming majority of real risks) could never resolve its underlying work
+// item at all: no ticket link (§4), and no Work Relevance gating (§1) either, for the entire
+// RISK category. Confirmed against a real auto-detected risk (not a hand-built AttentionItem
+// fixture), proving the fix works end-to-end through computeProactiveIntelligence AND
+// computePersonalFocus, not just resolveAttentionEntity in isolation. -----
+{
+  const autoRiskIdx = buildWorkRelevanceIndex(globalPolicy({ "Deployed to Prod": "COMPLETED", "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE" }));
+  const arCompletedItem = jiraItem({ id: "wi-ar-completed", key: "JPMC-950", jiraStatusName: "Deployed to Prod", dueDate: TODAY, clientId: "c-1" });
+  const arObserveItem = jiraItem({ id: "wi-ar-observe", key: "JPMC-951", jiraStatusName: "Ready for UAT/Business Test", dueDate: TODAY, clientId: "c-1", owner: "Alice" });
+  const arActionableItem = jiraItem({ id: "wi-ar-actionable", key: "JPMC-952", jiraStatusName: "To Do", dueDate: TODAY, clientId: "c-1" });
+  const arData: CommandCenterData = { ...emptyData(), clients: [{ id: "c-1", name: "Test Client" }], workItems: [arCompletedItem, arObserveItem, arActionableItem] };
+  const arDerived = deriveData(arData, null, TODAY);
+  const autoRiskTitles = arDerived.risks.map((r) => r.title);
+  ok(
+    "V2.13 Auto-detected risk fix",
+    autoRiskTitles.some((t) => t.includes("JPMC-950")) && autoRiskTitles.some((t) => t.includes("JPMC-951")) && autoRiskTitles.some((t) => t.includes("JPMC-952")),
+    "the fixture genuinely produces real, auto-detected (not hand-built) risks for all three tickets via risk-detection.ts's own R1 deadline rule — this test exercises the real bug, not a synthetic stand-in"
+  );
+  ok("V2.13 Auto-detected risk fix", arData.risks.length === 0, "none of these risks are manually logged — data.risks (the pre-fix lookup source) is empty, so a pre-fix run would have resolved zero work items for every one of them");
+
+  const arProactive = computeProactiveIntelligence(arData, arDerived, [], null, {}, "jira", TODAY, autoRiskIdx);
+  const riskItemFor = (key: string) => arProactive.attentionQueue.find((i) => i.category === "RISK" && i.what.includes(key));
+
+  ok("V2.13 Auto-detected risk fix", riskItemFor("JPMC-950") === undefined, "an auto-detected risk on a COMPLETED-status ticket is now correctly EXCLUDED from the Attention Queue — the gate can finally see its underlying work item");
+  const observeRisk = riskItemFor("JPMC-951");
+  ok("V2.13 Auto-detected risk fix", observeRisk !== undefined, "an auto-detected risk on an OBSERVE-status ticket stays visible (OBSERVE is still 'live' for the Attention Queue's broader gate)");
+  const actionableRisk = riskItemFor("JPMC-952");
+  ok(
+    "V2.13 Auto-detected risk fix (ticket link)",
+    actionableRisk?.ticketKey === "JPMC-952",
+    "an auto-detected risk's Attention Queue item now correctly carries the real ticket key — resolveAttentionEntity can finally see the auto-detected risk's sourceWorkItemIds"
+  );
+
+  // Same fix, verified through Personal Focus (My Day) too — the risk-detection.ts author of
+  // this exact bug affected both surfaces identically, since both call resolveAttentionEntity.
+  const arFocus = computePersonalFocus(arData, arProactive, "Alice", TODAY, undefined, autoRiskIdx, arDerived.risks);
+  const observeCandidate = arFocus.candidates.find((c) => c.sourceId === observeRisk?.id);
+  ok(
+    "V2.13 Auto-detected risk fix (My Day)",
+    observeCandidate !== undefined && observeCandidate.category === "WATCH",
+    "an auto-detected risk on an OBSERVE-status ticket is correctly demoted to WATCH in My Day too, once the real derived.risks list (not just manually-logged risks) is threaded through"
+  );
+  const arFocusUnfixed = computePersonalFocus(arData, arProactive, "Alice", TODAY, undefined, autoRiskIdx);
+  const observeCandidateUnfixed = arFocusUnfixed.candidates.find((c) => c.sourceId === observeRisk?.id);
+  ok(
+    "V2.13 Auto-detected risk fix (My Day)",
+    observeCandidateUnfixed !== undefined && observeCandidateUnfixed.category !== "WATCH",
+    "omitting allRisks reproduces the pre-fix bug exactly (proving this is a genuine fix, not a tautology) — without derived.risks, the gate cannot see the auto-detected risk's work item at all, so OBSERVE is never enforced"
+  );
+}
+
+// ----- V2.13 §2 — cron-notify.ts: the server-side (cron-driven) notify check. Fully
+// dependency-injected (fetchImpl + an injected NotifyStateStore, exactly like jira/http.ts's
+// own fetch*With functions) so this is exercised directly against the in-memory fake, never a
+// mocked module boundary — see the dev prompt's own "the test suite must stay fully offline"
+// requirement. -----
+{
+  const cnConfig: JiraConnectionConfig = { baseUrl: "https://example.atlassian.net", email: "a@b.com", apiToken: "tok" };
+  const cnAccountId = "acc-server";
+
+  type RawIssue = { key: string; fields?: Record<string, unknown> };
+  function cronJiraFetch(opts: { assigned: RawIssue[]; mentioned: RawIssue[]; comments: Record<string, JiraComment[]> }): FetchLike {
+    return async (url, init) => {
+      const u = new URL(url);
+      if (u.pathname.endsWith("/search/jql")) {
+        const body = init?.body ? (JSON.parse(init.body) as { jql?: string }) : {};
+        const jql = String(body.jql ?? "");
+        if (jql.startsWith("assignee")) return { ok: true, status: 200, json: async () => ({ issues: opts.assigned, isLast: true }) };
+        if (jql.startsWith("comment")) return { ok: true, status: 200, json: async () => ({ issues: opts.mentioned, isLast: true }) };
+        return { ok: false, status: 400, json: async () => ({}) };
+      }
+      const m = u.pathname.match(/issue\/([^/]+)\/comment/);
+      if (m) {
+        const key = decodeURIComponent(m[1]);
+        return { ok: true, status: 200, json: async () => ({ comments: opts.comments[key] ?? [] }) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    };
+  }
+
+  let cnSlackCaptured: string[] = [];
+  const cnFakeSlackFetch: SlackFetchLike = async (_url, init) => {
+    cnSlackCaptured.push(init.body);
+    return { ok: true, status: 200, text: async () => "" };
+  };
+
+  function withWebhook<T>(run: () => Promise<T>): Promise<T> {
+    const original = process.env.SLACK_WEBHOOK_URL;
+    process.env.SLACK_WEBHOOK_URL = "https://hooks.slack.example/services/mock";
+    return run().finally(() => {
+      if (original === undefined) delete process.env.SLACK_WEBHOOK_URL;
+      else process.env.SLACK_WEBHOOK_URL = original;
+    });
+  }
+
+  // --- Cold start: first-ever run for an install, real assigned/mentioned tickets exist -----
+  {
+    const store = createInMemoryNotifyStore(null);
+    const fetchImpl = cronJiraFetch({
+      assigned: [{ key: "JPMC-900", fields: { assignee: { accountId: cnAccountId }, summary: "Assigned already" } }],
+      mentioned: [],
+      comments: {},
+    });
+    cnSlackCaptured = [];
+    const result = await withWebhook(() => runServerSideNotifyCheck(fetchImpl, cnConfig, cnAccountId, store, cnFakeSlackFetch));
+
+    ok(
+      "V2.13 Server Notify",
+      result.skippedColdStart === true && result.notified === 0,
+      "the first-ever run for an install establishes a baseline and sends ZERO notifications, even though real assigned tickets already exist — matching V2.10.1's client-side cold-start guarantee, now also true for the unattended path"
+    );
+    const saved = await store.get();
+    ok("V2.13 Server Notify", saved !== null && saved.assignedIssueKeys.includes("JPMC-900"), "the cold-start baseline records the real currently-assigned issue key");
+    ok("V2.13 Server Notify", cnSlackCaptured.length === 0, "no Slack call was made at all during cold start");
+  }
+
+  // --- A genuinely new assignment after a baseline is established is notified; an
+  // already-known one is not -----
+  {
+    const store = createInMemoryNotifyStore({ assignedIssueKeys: ["JPMC-800"], notifiedCommentIds: [], lastCheckedAtIso: "2026-06-01T00:00:00.000Z" });
+    const fetchImpl = cronJiraFetch({
+      assigned: [
+        { key: "JPMC-800", fields: { assignee: { accountId: cnAccountId }, summary: "Already known" } },
+        { key: "JPMC-801", fields: { assignee: { accountId: cnAccountId }, summary: "Brand new assignment" } },
+      ],
+      mentioned: [],
+      comments: {},
+    });
+    cnSlackCaptured = [];
+    const result = await withWebhook(() => runServerSideNotifyCheck(fetchImpl, cnConfig, cnAccountId, store, cnFakeSlackFetch));
+
+    ok("V2.13 Server Notify", result.skippedColdStart === false && result.notified === 1, "exactly one genuinely new assignment (JPMC-801) is notified — JPMC-800 was already in the persisted baseline");
+    ok(
+      "V2.13 Server Notify",
+      cnSlackCaptured.some((b) => b.includes("JPMC-801")) && !cnSlackCaptured.some((b) => b.includes("JPMC-800")),
+      "the Slack call is for the new ticket only, never re-notifying the already-known one"
+    );
+    const saved = await store.get();
+    ok("V2.13 Server Notify", saved?.assignedIssueKeys.slice().sort().join(",") === "JPMC-800,JPMC-801", "the persisted baseline advances to the real current assigned set after a successful run");
+  }
+
+  // --- Mention comment-id dedup: an already-notified comment is never re-notified; a
+  // genuinely new comment on the same issue is -----
+  {
+    const store = createInMemoryNotifyStore({ assignedIssueKeys: [], notifiedCommentIds: ["c-old"], lastCheckedAtIso: "2026-06-01T00:00:00.000Z" });
+    const fetchImpl = cronJiraFetch({
+      assigned: [],
+      mentioned: [{ key: "JPMC-700", fields: {} }],
+      comments: {
+        "JPMC-700": [
+          { id: "c-old", author: { displayName: "Alice" }, body: `[~accountid:${cnAccountId}] please look`, created: "2026-06-01" },
+          { id: "c-new", author: { displayName: "Bob" }, body: `[~accountid:${cnAccountId}] following up`, created: "2026-06-05" },
+        ],
+      },
+    });
+    cnSlackCaptured = [];
+    const result = await withWebhook(() => runServerSideNotifyCheck(fetchImpl, cnConfig, cnAccountId, store, cnFakeSlackFetch));
+
+    ok("V2.13 Server Notify", result.notified === 1, "exactly one genuinely new mentioning comment (c-new) is notified — c-old was already in the persisted baseline");
+    ok("V2.13 Server Notify", cnSlackCaptured.some((b) => b.includes("Bob")), "the notified signal is for the new comment's author, never the already-known comment");
+    const saved = await store.get();
+    ok("V2.13 Server Notify", saved?.notifiedCommentIds.slice().sort().join(",") === "c-new,c-old", "the persisted comment-id baseline includes both the previously-known and the newly-seen mentioning comment");
+  }
+
+  // --- A cron run's own connectivity failure must never corrupt persisted state, and a
+  // later successful run must still diff correctly against the untouched prior baseline -----
+  {
+    const store = createInMemoryNotifyStore({ assignedIssueKeys: ["JPMC-1"], notifiedCommentIds: ["c-1"], lastCheckedAtIso: "2026-06-01T00:00:00.000Z" });
+    const failingFetch: FetchLike = async () => ({ ok: false, status: 500, json: async () => ({ errorMessages: ["down"] }) });
+    const failed = await runServerSideNotifyCheck(failingFetch, cnConfig, cnAccountId, store, cnFakeSlackFetch);
+
+    ok("V2.13 Server Notify", !!failed.error, "a Jira fetch failure is reported as an honest error, never silently swallowed");
+    const untouched = await store.get();
+    ok(
+      "V2.13 Server Notify",
+      untouched?.assignedIssueKeys.join(",") === "JPMC-1" && untouched?.notifiedCommentIds.join(",") === "c-1",
+      "store.set was never called on a connectivity failure — the prior baseline is byte-for-byte untouched"
+    );
+
+    const recoveredFetch = cronJiraFetch({
+      assigned: [
+        { key: "JPMC-1", fields: { assignee: { accountId: cnAccountId } } },
+        { key: "JPMC-2", fields: { assignee: { accountId: cnAccountId } } },
+      ],
+      mentioned: [],
+      comments: {},
+    });
+    cnSlackCaptured = [];
+    const recovered = await withWebhook(() => runServerSideNotifyCheck(recoveredFetch, cnConfig, cnAccountId, store, cnFakeSlackFetch));
+    ok("V2.13 Server Notify", recovered.notified === 1, "the next successful run correctly detects JPMC-2 as new — the untouched baseline from before the failure was the correct comparison point, proving the failure never corrupted it");
+  }
+}
+
+// ----- V2.13 §3 — GET /api/command-center/notify reports serverSideNotifyActive: true iff
+// both PERSONAL_JIRA_ACCOUNT_ID and Vercel KV are configured, reusing notify-state.ts's own
+// isNotifyStoreConfigured() rather than a duplicated check. -----
+{
+  const originalAccountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
+  const originalKvUrl = process.env.KV_REST_API_URL;
+  const originalKvToken = process.env.KV_REST_API_TOKEN;
+
+  delete process.env.PERSONAL_JIRA_ACCOUNT_ID;
+  delete process.env.KV_REST_API_URL;
+  delete process.env.KV_REST_API_TOKEN;
+  ok("V2.13 Server Notify status", isNotifyStoreConfigured() === false, "isNotifyStoreConfigured() is false with no KV env vars set");
+  const statusNeither = (await (await notifyStatusGET()).json()) as { serverSideNotifyActive?: boolean };
+  ok("V2.13 Server Notify status", statusNeither.serverSideNotifyActive === false, "with neither PERSONAL_JIRA_ACCOUNT_ID nor KV configured, serverSideNotifyActive is false");
+
+  process.env.PERSONAL_JIRA_ACCOUNT_ID = "acc-x";
+  const statusAccountOnly = (await (await notifyStatusGET()).json()) as { serverSideNotifyActive?: boolean };
+  ok("V2.13 Server Notify status", statusAccountOnly.serverSideNotifyActive === false, "PERSONAL_JIRA_ACCOUNT_ID alone (no KV) is not enough — both are required");
+
+  process.env.KV_REST_API_URL = "https://kv.example.test";
+  process.env.KV_REST_API_TOKEN = "kv-tok";
+  ok("V2.13 Server Notify status", isNotifyStoreConfigured() === true, "isNotifyStoreConfigured() is true once both KV env vars are set");
+  const statusBoth = (await (await notifyStatusGET()).json()) as { serverSideNotifyActive?: boolean };
+  ok("V2.13 Server Notify status", statusBoth.serverSideNotifyActive === true, "with both PERSONAL_JIRA_ACCOUNT_ID and KV configured, serverSideNotifyActive is true");
+
+  if (originalAccountId === undefined) delete process.env.PERSONAL_JIRA_ACCOUNT_ID;
+  else process.env.PERSONAL_JIRA_ACCOUNT_ID = originalAccountId;
+  if (originalKvUrl === undefined) delete process.env.KV_REST_API_URL;
+  else process.env.KV_REST_API_URL = originalKvUrl;
+  if (originalKvToken === undefined) delete process.env.KV_REST_API_TOKEN;
+  else process.env.KV_REST_API_TOKEN = originalKvToken;
+}
+
+// ----- V2.13 §2 — jira/sync/route.ts GET handler wiring (static source checks, matching the
+// existing V2.10 Cron pattern: the route imports server-only credential code, so it's checked
+// by reading its source rather than importing it into this test process). -----
+{
+  const repoRoot = path.resolve(process.cwd());
+  const syncRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
+  ok("V2.13 Sync route wiring", /process\.env\.PERSONAL_JIRA_ACCOUNT_ID/.test(syncRouteSrc), "the sync route's GET handler reads PERSONAL_JIRA_ACCOUNT_ID");
+  ok("V2.13 Sync route wiring", /runServerSideNotifyCheck/.test(syncRouteSrc), "the GET handler calls the real runServerSideNotifyCheck, never a second implementation");
+  ok("V2.13 Sync route wiring", /createNotifyStore/.test(syncRouteSrc), "the GET handler wires the real KV-backed store, not the in-memory test fake");
+  ok("V2.13 Sync route wiring", /isNotifyStoreConfigured/.test(syncRouteSrc), "the GET handler gates on the shared isNotifyStoreConfigured() check, not a duplicated env-var check");
+  ok("V2.13 Sync route wiring", /if \(!accountId \|\| !config \|\| !isNotifyStoreConfigured\(\)\) return response;/.test(syncRouteSrc), "with either PERSONAL_JIRA_ACCOUNT_ID or KV absent, the sync response is returned completely unchanged — a full no-op");
+  ok("V2.13 Sync route wiring", /export async function GET/.test(syncRouteSrc), "the notify check is wired into the GET handler (the one cron actually calls), not POST (the browser's manual Sync Now button)");
 }
 
 // ----- Attention: non-actionable status never creates attention merely by existing, but

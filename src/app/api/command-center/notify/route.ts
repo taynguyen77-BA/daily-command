@@ -16,8 +16,15 @@
 // true }` for the Data & Settings "Send test notification" button — it reuses the exact same
 // postToSlack() call as real signals (see below) so a passing test genuinely proves the real
 // path works, never a second parallel implementation.
+//
+// V2.13 §3 — GET also reports `serverSideNotifyActive`: true iff a cron-driven server-side
+// notify check (cron-notify.ts, wired into jira/sync/route.ts's GET handler) is actually
+// active for this install. The client (use-command-center.ts) uses this to defer entirely to
+// the server path and never double-send the same Slack message.
 
 import { NextResponse } from "next/server";
+import { renderSlackText, postToSlack, slackSignalSchema } from "@/lib/server/slack-notify";
+import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -28,44 +35,22 @@ export const runtime = "nodejs";
 // jira/status/route.ts).
 export const dynamic = "force-dynamic";
 
-const SLACK_FETCH_TIMEOUT_MS = 10_000;
 const TEST_NOTIFICATION_TEXT = "✅ Daily Command test notification — if you can see this, your Slack destination is correctly configured.";
 
-const signalSchema = z.object({
-  issueKey: z.string(),
-  summary: z.string(),
-  url: z.string().optional(),
-  kind: z.enum(["MENTION", "ASSIGNMENT"]),
-  detail: z.string(),
-});
-const notifyRequestSchema = z.union([z.object({ test: z.literal(true) }), z.object({ signals: z.array(signalSchema) })]);
+const notifyRequestSchema = z.union([z.object({ test: z.literal(true) }), z.object({ signals: z.array(slackSignalSchema) })]);
 
-function renderSlackText(signal: z.infer<typeof signalSchema>): string {
-  const link = signal.url ? ` (${signal.url})` : "";
-  if (signal.kind === "ASSIGNMENT") return `📌 ${signal.issueKey} — ${signal.summary} — assigned to you.${link}`;
-  return `💬 ${signal.issueKey} — ${signal.summary} — mentioned you: ${signal.detail}${link}`;
-}
-
-/** The one real webhook-call code path — used by both a real signal delivery and the "Send
- *  test notification" button, so a passing test genuinely proves this path works. */
-async function postToSlack(webhookUrl: string, text: string): Promise<boolean> {
-  try {
-    const res = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: AbortSignal.timeout(SLACK_FETCH_TIMEOUT_MS),
-    });
-    return res.ok;
-  } catch {
-    return false; // best-effort — never throws
-  }
+/** V2.13 §3 — true iff both PERSONAL_JIRA_ACCOUNT_ID and the KV env vars are present
+ *  server-side, exactly the same two conditions jira/sync/route.ts checks before calling
+ *  runServerSideNotifyCheck. Reuses isNotifyStoreConfigured() (the "is KV configured" check
+ *  notify-store.ts already owns) rather than duplicating it. */
+function isServerSideNotifyActive(): boolean {
+  return !!process.env.PERSONAL_JIRA_ACCOUNT_ID && isNotifyStoreConfigured();
 }
 
 export async function GET() {
   const configured = !!process.env.SLACK_WEBHOOK_URL;
   const channelLabel = process.env.SLACK_CHANNEL_LABEL?.trim() || undefined;
-  return NextResponse.json({ configured, channelLabel });
+  return NextResponse.json({ configured, channelLabel, serverSideNotifyActive: isServerSideNotifyActive() });
 }
 
 export async function POST(req: Request) {
@@ -87,8 +72,8 @@ export async function POST(req: Request) {
   }
 
   if ("test" in parsed.data) {
-    const sent = await postToSlack(webhookUrl, TEST_NOTIFICATION_TEXT);
-    return NextResponse.json({ sent, reason: sent ? undefined : "delivery-failed" });
+    const result = await postToSlack(webhookUrl, TEST_NOTIFICATION_TEXT);
+    return NextResponse.json({ sent: result.ok, reason: result.ok ? undefined : "delivery-failed", detail: result.detail });
   }
 
   if (parsed.data.signals.length === 0) {
@@ -97,7 +82,7 @@ export async function POST(req: Request) {
 
   let delivered = 0;
   for (const signal of parsed.data.signals) {
-    if (await postToSlack(webhookUrl, renderSlackText(signal))) delivered++;
+    if ((await postToSlack(webhookUrl, renderSlackText(signal))).ok) delivered++;
   }
 
   return NextResponse.json({ sent: delivered > 0, delivered, total: parsed.data.signals.length });

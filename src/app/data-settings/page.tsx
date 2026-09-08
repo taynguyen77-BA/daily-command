@@ -6,7 +6,7 @@ import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
-import { checkSlackNotifyStatus, sendTestSlackNotification, type SlackNotifyStatus } from "@/lib/command-center/notify-client";
+import { checkSlackNotifyStatus, sendTestSlackNotification, type SlackNotifyStatus, type SlackTestNotificationResult } from "@/lib/command-center/notify-client";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import {
   collectObservedStatuses,
@@ -70,7 +70,7 @@ function PilotChecklistRow({ item }: { item: PilotCheckItem }) {
 function SlackNotificationsPanel() {
   const [status, setStatus] = useState<SlackNotifyStatus | null>(null);
   const [sending, setSending] = useState(false);
-  const [testResult, setTestResult] = useState<{ sent: boolean; reason?: string } | null>(null);
+  const [testResult, setTestResult] = useState<SlackTestNotificationResult | null>(null);
 
   useEffect(() => {
     checkSlackNotifyStatus().then(setStatus);
@@ -109,13 +109,19 @@ function SlackNotificationsPanel() {
         {sending ? "Sending…" : "Send test notification"}
       </button>
       {testResult && (
-        <p className={`mt-2 text-xs ${testResult.sent ? "text-green" : "text-yellow"}`}>
-          {testResult.sent
-            ? "Test notification sent — check your configured Slack destination."
-            : testResult.reason === "not-configured"
-            ? "Not sent — SLACK_WEBHOOK_URL is not configured on the server."
-            : `Not sent — ${testResult.reason ?? "delivery failed"}.`}
-        </p>
+        <div className={`mt-2 text-xs ${testResult.sent ? "text-green" : "text-yellow"}`}>
+          <p>
+            {testResult.sent
+              ? "Test notification sent — check your configured Slack destination."
+              : testResult.reason === "not-configured"
+              ? "Not sent — SLACK_WEBHOOK_URL is not configured on the server."
+              : `Not sent — ${testResult.reason ?? "delivery failed"}.`}
+          </p>
+          {/* V2.13 (bug fix) — Slack's real HTTP status/body (or the network error) instead of
+              a generic "delivery failed", so a revoked/mistyped webhook is actually debuggable
+              without needing to read server logs. */}
+          {!testResult.sent && testResult.detail && <p className="mt-1 font-mono text-text3">{testResult.detail}</p>}
+        </div>
       )}
     </Panel>
   );

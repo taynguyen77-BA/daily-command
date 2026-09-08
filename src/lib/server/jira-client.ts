@@ -9,6 +9,7 @@
 
 import "server-only";
 import {
+  fetchAssignedIssuesWith,
   fetchIssueChangelogWith,
   fetchIssueCommentsWith,
   fetchJiraIssuesWith,
@@ -86,4 +87,10 @@ export async function fetchMentionedIssues(config: JiraConnectionConfig, account
 /** V2.10 §2 — best-effort, called only for the small set of issue keys fetchMentionedIssues returned. */
 export async function fetchIssueComments(config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraComment[]>> {
   return fetchIssueCommentsWith(fetch, config, issueKey);
+}
+
+/** V2.13 §2 — "which issues are currently assigned to this account?", a narrow targeted
+ *  query for the server-side notify check (cron-notify.ts) — never the full sync dataset. */
+export async function fetchAssignedIssues(config: JiraConnectionConfig, accountId: string): Promise<JiraFetchResult<JiraIssue[]>> {
+  return fetchAssignedIssuesWith(fetch, config, accountId);
 }

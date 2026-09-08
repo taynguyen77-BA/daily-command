@@ -349,6 +349,19 @@ export async function fetchMentionedIssuesWith(
 }
 
 /**
+ * V2.13 §2 — "which issues are currently assigned to this account?" A third, separate,
+ * narrowly-targeted search, same discipline as fetchMentionedIssuesWith above: the server-side
+ * notify check (cron-notify.ts) only needs a handful of issues assigned to ONE person, never
+ * the full multi-thousand-issue dataset the main sync fetches — a dedicated `assignee = X`
+ * JQL is strictly cheaper than fetching everything and filtering client-side.
+ */
+export async function fetchAssignedIssuesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string): Promise<JiraFetchResult<JiraIssue[]>> {
+  const safeAccountId = accountId.replace(/"/g, '\\"');
+  const jql = `assignee = "${safeAccountId}" order by updated desc`;
+  return fetchIssuesByJqlCursor(fetchImpl, config, jql);
+}
+
+/**
  * V2.10 §2 — single-page comment fetch for one issue, same "best-effort, called only for a
  * small prioritized set of issue keys" discipline as fetchIssueChangelogWith below (this is
  * only ever called for the issue keys fetchMentionedIssuesWith returned, never every synced

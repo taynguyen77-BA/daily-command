@@ -16,6 +16,9 @@ import {
   getJiraTimezoneOffsetMinutes,
   getProjectClientMap,
 } from "@/lib/server/jira-client";
+import { createNotifyStore } from "@/lib/server/notify-store";
+import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
+import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
@@ -207,17 +210,18 @@ export async function POST(req: Request) {
  * it can only ever request everything this server is configured to see) rather than
  * duplicating any sync logic.
  *
- * Important, honest limitation (flagged, not silently glossed over): this app has no
- * server-side persistence (see types.ts's own "Local-only V1: no auth, no multi-tenant, no
- * backend. All state lives in the browser") — attentionState, snapshotHistory, mentionEvents,
- * and the configured PersonalIdentity.accountId used for Task 3's Slack notifications all
- * live only in a browser's localStorage. A cron-triggered GET here still authenticates,
- * fetches, and returns fresh Jira data (so it genuinely exercises the connection and can
- * surface a credential/connectivity failure on a schedule), but nothing durable consumes that
- * response — there is no accountId to search mentions for for and nowhere server-side to
- * merge/store the result or fire a Slack notification from. Making the cron drive Task 3
- * end-to-end would require adding real server-side persistence, which is a materially larger
- * change than "wire a cron job" and out of scope here — see the final report for this pass.
+ * V2.13 §2 — this app's "no server-side persistence" limitation (see types.ts's own
+ * "Local-only V1: no auth, no multi-tenant, no backend") was, until this pass, a real gap for
+ * an unattended cron GET specifically: there was no accountId to search mentions for and
+ * nowhere server-side to merge/store a result or fire a Slack notification from. That gap is
+ * now closed for the narrow slice of state a personal-notify check needs (see notify-state.ts/
+ * notify-store.ts) — when PERSONAL_JIRA_ACCOUNT_ID and Vercel KV are both configured, this GET
+ * additionally runs runServerSideNotifyCheck AFTER the existing full sync above completes,
+ * using the real Jira config and the real KV-backed store. Everything else about this app
+ * remains exactly as local-only as before — see the dev prompt this pass implements. When
+ * either PERSONAL_JIRA_ACCOUNT_ID or KV is absent, this is a complete no-op (the sync response
+ * is returned completely unchanged) — same graceful-degradation contract as every optional
+ * capability in this app.
  */
 export async function GET(req: Request) {
   const forwarded = new Request(req.url, {
@@ -225,5 +229,27 @@ export async function GET(req: Request) {
     headers: { "Content-Type": "application/json", authorization: req.headers.get("authorization") ?? "" },
     body: "{}",
   });
-  return POST(forwarded);
+  const response = await POST(forwarded);
+
+  const accountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
+  const config = getJiraConfig();
+  if (!accountId || !config || !isNotifyStoreConfigured()) return response;
+
+  // §2 Task 2 point 3 — a connectivity failure inside the notify check must never corrupt
+  // persisted state (cron-notify.ts already guarantees `store.set` is never called on a fetch
+  // failure) AND must never fail this response — the sync above already succeeded or failed
+  // on its own terms; this is a genuinely separate, best-effort concern layered on top.
+  try {
+    const result = await runServerSideNotifyCheck(fetch, config, accountId, createNotifyStore());
+    if (!result.error) return response;
+    const body = (await response.clone().json()) as Record<string, unknown>;
+    const warnings = Array.isArray(body.warnings) ? [...body.warnings] : [];
+    warnings.push(`Server-side notify check failed: ${result.error}`);
+    return NextResponse.json({ ...body, warnings }, { status: response.status });
+  } catch (err) {
+    const body = (await response.clone().json()) as Record<string, unknown>;
+    const warnings = Array.isArray(body.warnings) ? [...body.warnings] : [];
+    warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    return NextResponse.json({ ...body, warnings }, { status: response.status });
+  }
 }

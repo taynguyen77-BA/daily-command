@@ -34,6 +34,7 @@ import type {
   PersonalFocusResult,
   PersonalFocusSourceType,
   ProjectFocusShare,
+  Risk,
   WorkItem,
 } from "./types";
 import type { ProactiveIntelligence } from "./proactive";
@@ -67,7 +68,22 @@ interface ResolvedEntity {
   dueDate?: string; // V1.7 §20 — earliest explicit due/review date found, never invented
 }
 
-function resolveAttentionEntity(item: AttentionItem, data: CommandCenterData): ResolvedEntity {
+/** V2.13 §4 (bug fix) — exported so proactive.ts can resolve AttentionItem.ticketKey/
+ *  ticketUrl from the exact same sourceRef -> WorkItem logic, rather than a second
+ *  implementation of "what work item does this attention item point at".
+ *
+ *  `allRisks` (bug fix, additive/optional — defaults to `data.risks` so every pre-existing
+ *  call not yet updated behaves exactly as before) fixes a real, confirmed gap: a RISK
+ *  sourceRef's `id` is the risk's TITLE (see attention-queue.ts), looked up against a risk
+ *  list — but `data.risks` (the raw, pre-derived CommandCenterData) only ever contains
+ *  MANUALLY-logged risks. Every auto-detected risk (risk-detection.ts's deterministic engine
+ *  — the overwhelming majority of risks in any real or demo dataset) exists only in
+ *  `derived.risks` ("manual + auto-detected, deduped by title" — see selectors.ts), so the old
+ *  unconditional `data.risks.find(...)` silently failed for every auto-detected risk: no
+ *  related work item was ever resolved, which meant a RISK-category candidate/attention item
+ *  could never get a ticket link (§4) AND could never be gated by the Work Relevance Policy
+ *  (§1) — the underlying WorkItem was invisible to this function, gate-or-link included. */
+export function resolveAttentionEntity(item: AttentionItem, data: CommandCenterData, allRisks: Risk[] = data.risks): ResolvedEntity {
   const ref = item.sourceRef;
   if (!ref) return { workItemIds: [] };
 
@@ -77,7 +93,7 @@ function resolveAttentionEntity(item: AttentionItem, data: CommandCenterData): R
     return { projectId: decision?.projectId ?? related[0]?.projectId, workItemIds: related.map((w) => w.id), decisionId: decision?.id, dueDate: decision?.reviewDate };
   }
   if (ref.type === "risk") {
-    const risk = data.risks.find((r) => r.title === ref.id);
+    const risk = allRisks.find((r) => r.title === ref.id);
     const related = risk ? data.workItems.filter((w) => risk.sourceWorkItemIds.includes(w.id)) : [];
     return { projectId: related[0]?.projectId, workItemIds: related.map((w) => w.id) };
   }
@@ -267,8 +283,15 @@ function estimateFor(sourceType: PersonalFocusSourceType, category: string, loop
   return ESTIMATE_HEURISTICS[`attention:${category}`] ?? 10;
 }
 
-function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData, identity: IdentityRef, today: string, workRelevanceIndex: WorkRelevanceIndex | undefined): PersonalFocusCandidate | null {
-  const entity = resolveAttentionEntity(item, data);
+function candidateFromAttentionItem(
+  item: AttentionItem,
+  data: CommandCenterData,
+  identity: IdentityRef,
+  today: string,
+  workRelevanceIndex: WorkRelevanceIndex | undefined,
+  allRisks?: Risk[]
+): PersonalFocusCandidate | null {
+  const entity = resolveAttentionEntity(item, data, allRisks ?? data.risks);
   // V2.13 §1 — MENTION/ASSIGNMENT are gated too (option 3b): the Work Relevance Policy
   // decides whether a ticket represents live personal work at all, and that decision must
   // not depend on which kind of signal is pointing at the ticket — a mention/reassignment on
@@ -312,6 +335,9 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
   const workItem = entity.workItemIds.length > 0 ? data.workItems.find((w) => w.id === entity.workItemIds[0]) : undefined;
   const isBlocked = item.category === "ACTION" && workItem?.blocked === true;
   const naturalCategory = isBlocked ? "BLOCKED" : classify(score, item.severity, ownershipExplicit);
+  // V2.13 §4 (bug fix) — only exposed when exactly one work item is related; a decision or
+  // risk touching several tickets never picks one arbitrarily and presents it as THE ticket.
+  const singleWorkItem = entity.workItemIds.length === 1 ? workItem : undefined;
 
   return {
     id: `focus:attention:${item.id}`,
@@ -336,6 +362,8 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
     actionId: entity.actionId,
     decisionId: entity.decisionId,
     attentionItemId: item.id,
+    ticketKey: singleWorkItem?.key,
+    ticketUrl: singleWorkItem?.sourceUrl,
   };
 }
 
@@ -447,6 +475,8 @@ function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity
     severity,
     dueDate: decision?.reviewDate ?? workItem?.dueDate,
     decisionId: decision?.id,
+    ticketKey: workItem?.key,
+    ticketUrl: workItem?.sourceUrl,
   };
 }
 
@@ -541,21 +571,29 @@ export function deriveDontForget(result: Pick<PersonalFocusResult, "candidates" 
  *  exactly (displayName-only matching, per isExplicitOwner above).
  *  V2.13 §1 — `workRelevanceIndex` is likewise additive/optional: omitting it (or passing an
  *  empty index) reproduces the pre-V2.13 gate-less behavior exactly, matching how
- *  action-plan.ts already treats a missing index as a no-op. */
+ *  action-plan.ts already treats a missing index as a no-op.
+ *  `allRisks` (bug fix, additive/optional — defaults to `data.risks`, see
+ *  resolveAttentionEntity's own comment above) fixes RISK-category candidates being unable to
+ *  resolve their underlying work item at all when the risk was auto-detected rather than
+ *  manually logged — the overwhelming majority of risks in practice — which silently broke
+ *  both the ticket link (§4) and the Work Relevance gate (§1) for that whole category.
+ *  Pass `derived.risks` (selectors.ts's "manual + auto-detected, deduped" list); omitting it
+ *  reproduces the pre-fix (manual-risks-only) behavior exactly. */
 export function computePersonalFocus(
   data: CommandCenterData,
   proactive: ProactiveIntelligence,
   ownerName: string | undefined,
   today: string,
   ownerId?: string,
-  workRelevanceIndex?: WorkRelevanceIndex
+  workRelevanceIndex?: WorkRelevanceIndex,
+  allRisks?: Risk[]
 ): PersonalFocusResult {
   const identity: IdentityRef = { displayName: ownerName, ownerId };
   const eligibleAttention = proactive.attentionQueue.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
   const attentionDecisionIds = new Set(eligibleAttention.filter((i) => i.category === "DECISION" && i.sourceRef?.type === "decision").map((i) => i.sourceRef!.id));
 
   const fromAttention = eligibleAttention
-    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex))
+    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks))
     .filter((c): c is PersonalFocusCandidate => c !== null);
   const fromLoops = proactive.deliveryLoops
     .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex))

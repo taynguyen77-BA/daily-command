@@ -14,6 +14,7 @@ import { AskClaudeAbout } from "./AskClaudeAbout";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
+import { TicketLink } from "./TicketLink";
 
 export function AttentionItemCard({ item, showViewLink = false }: { item: AttentionItem; showViewLink?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -39,6 +40,7 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         {item.lifecycle === "REOPENED" && <span className="text-xs text-red">Reopened — previously resolved</span>}
         {item.lifecycle === "RE_ESCALATED" && <span className="text-xs text-red">Re-escalated — severity increased</span>}
         {item.relatedDecisionId && <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent2">Decision needed</span>}
+        {item.ticketKey && <TicketLink ticketKey={item.ticketKey} url={item.ticketUrl} className="text-xs text-text3" />}
       </div>
       <p className="font-display text-sm text-text">{item.what}</p>
       <p className="mt-1 text-xs text-text2">

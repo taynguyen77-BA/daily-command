@@ -727,6 +727,13 @@ export interface AttentionItem {
   // identity's own accountId). Left undefined for all six pre-existing categories, whose
   // ownership is still resolved the original way, entirely in personal-focus.ts.
   ownershipExplicit?: boolean;
+  // V2.13 §4 (bug fix) — resolved post-construction (see proactive.ts, reusing
+  // personal-focus.ts's resolveAttentionEntity so this is never a second implementation) from
+  // the item's sourceRef -> the real underlying WorkItem, when there is exactly one relevant.
+  // Never fabricated: undefined whenever no single work item is resolvable, or the item has
+  // no sourceUrl (Demo/Local Import) — same "never invent a link" discipline as TicketLink.
+  ticketKey?: string;
+  ticketUrl?: string;
 }
 
 /** Persisted per attention item, keyed by AttentionItem.id — see store.ts StoreState.attentionState. */
@@ -974,6 +981,10 @@ export interface PersonalFocusCandidate {
   actionId?: string;
   decisionId?: string;
   attentionItemId?: string;
+  // V2.13 §4 (bug fix) — same resolution as AttentionItem.ticketKey/ticketUrl above, from the
+  // primary related WorkItem (when there's exactly one) already resolved in personal-focus.ts.
+  ticketKey?: string;
+  ticketUrl?: string;
 }
 
 /** §29 — a workload observation, never an emotional/psychological inference. */

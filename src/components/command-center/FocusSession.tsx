@@ -15,6 +15,7 @@ import { useCommandCenter } from "./use-command-center";
 import { DecisionAssistant } from "./DecisionAssistant";
 import { FocusCategoryBadge, TrustLabel } from "./ui";
 import { openSourceHref } from "./personal-focus-helpers";
+import { TicketLink } from "./TicketLink";
 
 const OUTCOME_STATUSES: ActionOutcomeStatus[] = ["RESOLVED", "IMPROVED", "PARTIALLY_IMPROVED", "NO_CHANGE", "WORSENED", "UNKNOWN"];
 
@@ -142,7 +143,12 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
           <span className="ml-auto rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{sessionState.replace(/_/g, " ")}</span>
         </div>
 
-        {candidate.projectName && <p className="text-xs text-text3">{candidate.projectName}</p>}
+        {(candidate.projectName || candidate.ticketKey) && (
+          <p className="flex items-center gap-2 text-xs text-text3">
+            {candidate.projectName}
+            {candidate.ticketKey && <TicketLink ticketKey={candidate.ticketKey} url={candidate.ticketUrl} className="text-text3" />}
+          </p>
+        )}
         <h2 id="focus-session-title" className="mt-1 font-display text-lg text-text">{candidate.title}</h2>
         <div className="mt-1"><FocusCategoryBadge category={candidate.category} /></div>
         {(relatedDecision || relatedAction) && (

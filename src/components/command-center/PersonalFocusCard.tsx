@@ -10,6 +10,7 @@ import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
 import type { PersonalFocusCandidate } from "@/lib/command-center/types";
 import { FocusCategoryBadge, Panel, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
+import { TicketLink } from "./TicketLink";
 
 export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: PersonalFocusCandidate; onStartFocus: (c: PersonalFocusCandidate) => void }) {
   const [showEvidence, setShowEvidence] = useState(false);
@@ -47,6 +48,7 @@ export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: Pers
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <FocusCategoryBadge category={candidate.category} />
         {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
+        {candidate.ticketKey && <TicketLink ticketKey={candidate.ticketKey} url={candidate.ticketUrl} className="text-xs text-text3" />}
       </div>
       <p className="font-display text-sm text-text">{candidate.title}</p>
       <p className="mt-1 text-xs text-text2">

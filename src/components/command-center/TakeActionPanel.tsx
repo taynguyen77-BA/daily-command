@@ -16,14 +16,25 @@ export function TakeActionPanel({
   result: PriorityScoreResult | null;
   onClose: () => void;
 }) {
-  const { store } = useCommandCenter();
+  const { state, store } = useCommandCenter();
   const [message, setMessage] = useState<string>("");
   const [messageMode, setMessageMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [savedActionId, setSavedActionId] = useState<string | null>(null);
-  const [handled, setHandled] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Bug fix (V2.13) — "Mark as handled" used to only flip local component state, so it was
+  // silently forgotten the moment the panel closed: no Action record was created, nothing
+  // persisted, nothing else in the app could ever know this item had been handled. It now
+  // reuses the exact same ensureActionId + completeAction path action-plan.tsx's "Complete"
+  // already relies on, so a real, persisted Action record backs the badge below, and
+  // reopening this item (or seeing it on the Action Plan) reflects the same completed state.
+  const existingAction = item ? state.data.actions.find((a) => a.relatedWorkItemId === item.id && a.status !== "completed") : undefined;
+  const completedAction = item
+    ? [...state.data.actions].reverse().find((a) => a.relatedWorkItemId === item.id && a.status === "completed")
+    : undefined;
+  const handled = !!completedAction;
 
   useEffect(() => {
     if (!item) return;
@@ -41,7 +52,6 @@ export function TakeActionPanel({
     setMessageMode(null);
     setCopied(false);
     setSavedActionId(null);
-    setHandled(false);
     if (!item) return;
     setLoading(true);
     const why = result?.reasoning ?? "This item needs attention.";
@@ -122,7 +132,7 @@ export function TakeActionPanel({
           )}
         </section>
 
-        {handled && <p className="mb-2 text-xs text-green">Marked as handled.</p>}
+        {handled && <p className="mb-2 text-xs text-green">Marked as handled — recorded as a completed action, visible on the Action Plan.</p>}
 
         <div className="mt-auto flex flex-wrap gap-2 border-t border-border pt-4">
           <button
@@ -150,10 +160,19 @@ export function TakeActionPanel({
             {savedActionId ? "Added ✓" : "Add to today's plan"}
           </button>
           <button
-            onClick={() => setHandled(true)}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2"
+            onClick={() => {
+              const id = savedActionId ?? existingAction?.id ?? store.addAction({
+                title: recommendedStep,
+                why: result?.reasoning ?? "",
+                relatedWorkItemId: item.id,
+                estimateMinutes: item.blocked ? 15 : 10,
+              });
+              store.completeAction(id);
+            }}
+            disabled={handled}
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2 disabled:opacity-50"
           >
-            Mark as handled
+            {handled ? "Handled ✓" : "Mark as handled"}
           </button>
           <button onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-text3 hover:text-text2">
             Snooze

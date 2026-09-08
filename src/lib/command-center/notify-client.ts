@@ -9,6 +9,10 @@ const NOTIFY_ENDPOINT = "/api/command-center/notify";
 export interface SlackNotifyStatus {
   configured: boolean;
   channelLabel?: string;
+  // V2.13 §3 — true iff a cron-driven server-side notify check is active for this install
+  // (both PERSONAL_JIRA_ACCOUNT_ID and Vercel KV configured). use-command-center.ts's notify
+  // effect uses this to defer entirely to the server path rather than double-sending.
+  serverSideNotifyActive?: boolean;
 }
 
 export async function checkSlackNotifyStatus(): Promise<SlackNotifyStatus> {
@@ -21,9 +25,24 @@ export async function checkSlackNotifyStatus(): Promise<SlackNotifyStatus> {
   }
 }
 
+/** V2.13 §3 — fetched once per page session (it doesn't change during a session — see
+ *  use-command-center.ts's own comment), cached at module scope so the many components that
+ *  call useCommandCenter() never trigger more than one real GET between them. */
+let serverSideNotifyActiveCache: Promise<boolean> | null = null;
+export function getServerSideNotifyActiveCached(): Promise<boolean> {
+  if (!serverSideNotifyActiveCache) {
+    serverSideNotifyActiveCache = checkSlackNotifyStatus().then((s) => s.serverSideNotifyActive === true);
+  }
+  return serverSideNotifyActiveCache;
+}
+
 export interface SlackTestNotificationResult {
   sent: boolean;
   reason?: string;
+  // V2.13 (bug fix) — Slack's real HTTP status/body on a non-ok response, or the network
+  // error's message, so a failed test notification is actually debuggable (a revoked/mistyped
+  // webhook vs. a network timeout look identical without this).
+  detail?: string;
 }
 
 /** §2 — the client-side gate on `configured` is a UI convenience only; this always sends

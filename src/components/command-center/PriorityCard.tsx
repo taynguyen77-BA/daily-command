@@ -48,6 +48,10 @@ export function PriorityCard({
 }) {
   const [trace, setTrace] = useState<ReasoningTrace | null>(null);
   const [open, setOpen] = useState(false);
+  // Bug fix (V2.13) — reflects Take Action's "Mark as handled" (now a real, persisted Action
+  // record — see TakeActionPanel.tsx) back on the card itself, so completing it from the
+  // panel is visible here without reopening the panel.
+  const handled = data.actions.some((a) => a.relatedWorkItemId === item.id && a.status === "completed");
 
   useEffect(() => {
     if (!open || trace) return;
@@ -73,6 +77,7 @@ export function PriorityCard({
             </a>
           </>
         )}
+        {handled && <span className="rounded border border-green/30 bg-green/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-green">Handled</span>}
         <span className="ml-auto text-xs font-mono text-text3">{result.score}/100</span>
       </div>
       <h3 className="font-display text-base text-text">{item.title}</h3>
