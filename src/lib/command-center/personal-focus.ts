@@ -34,11 +34,13 @@ import type {
   PersonalFocusResult,
   PersonalFocusSourceType,
   ProjectFocusShare,
+  WorkItem,
 } from "./types";
 import type { ProactiveIntelligence } from "./proactive";
 import { daysBetween } from "./scoring";
 import { projectName as lookupProjectName } from "./selectors";
 import { detectDeadlineConflict } from "./deadline-conflict";
+import { isPersonalWorkEligible, resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 
 const CATEGORY_ORDER: Record<FocusCategory, number> = { DO_NOW: 0, DO_TODAY: 1, WATCH: 2, BLOCKED: 3, DEFER: 4, DONE: 5 };
 
@@ -265,8 +267,14 @@ function estimateFor(sourceType: PersonalFocusSourceType, category: string, loop
   return ESTIMATE_HEURISTICS[`attention:${category}`] ?? 10;
 }
 
-function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData, identity: IdentityRef, today: string): PersonalFocusCandidate {
+function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData, identity: IdentityRef, today: string, workRelevanceIndex: WorkRelevanceIndex | undefined): PersonalFocusCandidate | null {
   const entity = resolveAttentionEntity(item, data);
+  // V2.13 §1 — MENTION/ASSIGNMENT bypass the Work Relevance gate entirely (option 3a): a
+  // comment mentioning you or a new assignment is a signal about a human action directed at
+  // you, not about the ticket's delivery state — still worth surfacing once even on an
+  // already-COMPLETED ticket.
+  const relevanceGate = item.category === "MENTION" || item.category === "ASSIGNMENT" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex);
+  if (relevanceGate === "EXCLUDE") return null;
   const resolution = resolveOwner(entity, data);
   const { label: ownerLabel } = resolution;
   // V2.10 §2 — MENTION/ASSIGNMENT items already carry a hardcoded, wired-directly
@@ -301,6 +309,7 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
 
   const workItem = entity.workItemIds.length > 0 ? data.workItems.find((w) => w.id === entity.workItemIds[0]) : undefined;
   const isBlocked = item.category === "ACTION" && workItem?.blocked === true;
+  const naturalCategory = isBlocked ? "BLOCKED" : classify(score, item.severity, ownershipExplicit);
 
   return {
     id: `focus:attention:${item.id}`,
@@ -312,7 +321,7 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
     why: item.why,
     nowWhat: item.nowWhat,
     evidence: item.evidence,
-    category: isBlocked ? "BLOCKED" : classify(score, item.severity, ownershipExplicit),
+    category: applyRelevanceGate(relevanceGate, naturalCategory),
     score,
     factors,
     estimatedMinutes: estimateFor("attention", item.category),
@@ -328,6 +337,42 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
   };
 }
 
+/** V2.13 §1 — Work Relevance gate, applied ONLY to candidates derived from a Jira work
+ *  item's own delivery/status state (DRIFT/RISK/DEPENDENCY/DECISION/ACTION/COMMUNICATION,
+ *  and loop-sourced candidates) — never to MENTION/ASSIGNMENT, which are about a human
+ *  action directed at you, not the ticket's delivery state (see the bypass in
+ *  candidateFromAttentionItem below).
+ *
+ *  "PASS" — at least one related work item is ACTIONABLE (or the concept doesn't apply, e.g.
+ *  demo/local-import), or there's nothing to gate on (no related work item at all, e.g. an
+ *  overall drift or communication signal) — candidate proceeds exactly as before.
+ *  "FORCE_WATCH" — every related item is specifically OBSERVE: per its own definition
+ *  ("visible as context but not treated as personal work"), this must never reach
+ *  DO_NOW/DO_TODAY, but per V2.5 §14 the underlying attention/risk signal is still legitimate
+ *  — so it's demoted to WATCH rather than dropped.
+ *  "EXCLUDE" — every related item is WAITING/COMPLETED/EXCLUDED/UNKNOWN (or a mix with
+ *  OBSERVE but never ACTIONABLE): none of those represent live personal work, so no candidate
+ *  is produced at all — matching action-plan.ts's full exclusion for the same statuses. */
+type RelevanceGate = "PASS" | "FORCE_WATCH" | "EXCLUDE";
+
+function evaluateWorkRelevanceGate(workItemIds: string[], data: CommandCenterData, workRelevanceIndex: WorkRelevanceIndex | undefined): RelevanceGate {
+  if (!workRelevanceIndex || workItemIds.length === 0) return "PASS";
+  const items = workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
+  if (items.length === 0) return "PASS";
+  const relevances = items.map((item) => resolveWorkRelevance(item, workRelevanceIndex));
+  if (relevances.some((r) => isPersonalWorkEligible(r))) return "PASS";
+  if (relevances.every((r) => r === "OBSERVE")) return "FORCE_WATCH";
+  return "EXCLUDE";
+}
+
+/** Applies a resolved gate to an already-computed natural category — only ever downgrades
+ *  (DO_NOW/DO_TODAY -> WATCH), never upgrades a category the scoring model chose on its own
+ *  (e.g. a naturally DEFER item stays DEFER, it's not bumped up to WATCH). */
+function applyRelevanceGate(gate: RelevanceGate, naturalCategory: FocusCategory): FocusCategory {
+  if (gate === "FORCE_WATCH" && (naturalCategory === "DO_NOW" || naturalCategory === "DO_TODAY")) return "WATCH";
+  return naturalCategory;
+}
+
 function severityToHeat(severity: AttentionSeverity): "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" {
   if (severity === "CRITICAL") return "CRITICAL";
   if (severity === "HIGH") return "HIGH";
@@ -338,7 +383,7 @@ function severityToHeat(severity: AttentionSeverity): "LOW" | "MEDIUM" | "HIGH" 
  *  already represented by a DECISION attention item (decisionRadar → attentionQueue), to
  *  avoid showing the same problem twice (§12). Radar-only synthetic loops (`radar-*` ids)
  *  are always already covered by a DECISION attention item, so they're skipped here. */
-function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity: IdentityRef, attentionDecisionIds: Set<string>, today: string): PersonalFocusCandidate | null {
+function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity: IdentityRef, attentionDecisionIds: Set<string>, today: string, workRelevanceIndex: WorkRelevanceIndex | undefined): PersonalFocusCandidate | null {
   if (loop.id.startsWith("radar-")) return null;
   if (attentionDecisionIds.has(loop.id)) return null;
   if (loop.health !== "STALLED" && loop.health !== "AT_RISK") return null;
@@ -348,6 +393,11 @@ function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity
   const primaryAction = relatedActions[0];
   const workItem = primaryAction?.relatedWorkItemId ? data.workItems.find((w) => w.id === primaryAction.relatedWorkItemId) : undefined;
   const projectId = decision?.projectId ?? workItem?.projectId;
+
+  // V2.13 §1 — same Work Relevance gate as candidateFromAttentionItem above, applied to the
+  // one work item (if any) this loop resolves to.
+  const relevanceGate = evaluateWorkRelevanceGate(workItem ? [workItem.id] : [], data, workRelevanceIndex);
+  if (relevanceGate === "EXCLUDE") return null;
 
   // V1.7 §15 — the action owner and the work item's owner can legitimately disagree (e.g.
   // an action assigned to someone other than the blocked item's usual owner); treat that
@@ -385,7 +435,7 @@ function candidateFromLoop(loop: DeliveryLoop, data: CommandCenterData, identity
     why: loop.why,
     nowWhat: loop.nowWhat,
     evidence: [loop.why],
-    category: classify(score, severity, ownershipExplicit),
+    category: applyRelevanceGate(relevanceGate, classify(score, severity, ownershipExplicit)),
     score,
     factors,
     estimatedMinutes: estimateFor("loop", "LOOP", loop.health === "AT_RISK" ? "outcome-pending" : "no-action"),
@@ -487,15 +537,27 @@ export function deriveDontForget(result: Pick<PersonalFocusResult, "candidates" 
 /** V2.10 §1 — `ownerId` is an additive, optional trailing parameter (the configured
  *  identity's Jira accountId, if any) so every pre-existing call site — none of which pass
  *  a 5th argument — keeps working unchanged; omitting it reproduces pre-V2.10 behavior
- *  exactly (displayName-only matching, per isExplicitOwner above). */
-export function computePersonalFocus(data: CommandCenterData, proactive: ProactiveIntelligence, ownerName: string | undefined, today: string, ownerId?: string): PersonalFocusResult {
+ *  exactly (displayName-only matching, per isExplicitOwner above).
+ *  V2.13 §1 — `workRelevanceIndex` is likewise additive/optional: omitting it (or passing an
+ *  empty index) reproduces the pre-V2.13 gate-less behavior exactly, matching how
+ *  action-plan.ts already treats a missing index as a no-op. */
+export function computePersonalFocus(
+  data: CommandCenterData,
+  proactive: ProactiveIntelligence,
+  ownerName: string | undefined,
+  today: string,
+  ownerId?: string,
+  workRelevanceIndex?: WorkRelevanceIndex
+): PersonalFocusResult {
   const identity: IdentityRef = { displayName: ownerName, ownerId };
   const eligibleAttention = proactive.attentionQueue.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
   const attentionDecisionIds = new Set(eligibleAttention.filter((i) => i.category === "DECISION" && i.sourceRef?.type === "decision").map((i) => i.sourceRef!.id));
 
-  const fromAttention = eligibleAttention.map((item) => candidateFromAttentionItem(item, data, identity, today));
+  const fromAttention = eligibleAttention
+    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex))
+    .filter((c): c is PersonalFocusCandidate => c !== null);
   const fromLoops = proactive.deliveryLoops
-    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today))
+    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex))
     .filter((c): c is PersonalFocusCandidate => c !== null);
 
   const candidates = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);

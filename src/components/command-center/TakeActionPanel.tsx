@@ -5,6 +5,7 @@ import { getAIProvider } from "@/lib/command-center/ai";
 import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 import { useCommandCenter } from "./use-command-center";
 import { AiProviderIndicator, ConfidenceTag, SeverityBadge, TrustLabel } from "./ui";
+import { TicketLink } from "./TicketLink";
 
 export function TakeActionPanel({
   item,
@@ -77,7 +78,7 @@ export function TakeActionPanel({
       >
         <div className="mb-4 flex items-start justify-between">
           <div>
-            <p className="font-mono text-xs text-text3">{item.key}</p>
+            <TicketLink ticketKey={item.key} url={item.sourceUrl} className="font-mono text-xs text-text3" />
             <h2 id="take-action-panel-title" className="font-display text-lg text-text">{item.title}</h2>
           </div>
           <button onClick={onClose} className="text-text3 hover:text-text" aria-label="Close">

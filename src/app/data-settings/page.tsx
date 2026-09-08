@@ -31,6 +31,8 @@ import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadin
 import { isArtifactStale, rebuildDraftFromSourceRef } from "@/lib/command-center/communicate";
 import { computeUsageSummary } from "@/lib/command-center/usage";
 import { ArtifactEditor } from "@/components/command-center/ArtifactEditor";
+import { ProjectMemoryContent } from "@/components/command-center/ProjectMemoryContent";
+import { TicketLink } from "@/components/command-center/TicketLink";
 import type { ArtifactDraft, ArtifactRecord, JiraConformanceReport, JiraProjectScopeMode, JiraProjectSummary } from "@/lib/command-center/types";
 
 const PILOT_STATUS_STYLE: Record<PilotReadinessStatus, string> = {
@@ -560,6 +562,9 @@ export default function DataSettingsPage() {
   const [pendingFirstSync, setPendingFirstSync] = useState(false);
   const [pendingFullSync, setPendingFullSync] = useState(false);
   const [reopening, setReopening] = useState<{ record: ArtifactRecord; draft: ArtifactDraft; staleness: "fresh" | "stale" | "unavailable"; nonce: number } | null>(null);
+  // V2.13 §2 — Project Memory moved out of the primary Nav.tsx list into a collapsed-by-
+  // default "Activity Log" section here; see ProjectMemoryContent.tsx for the rationale.
+  const [activityLogExpanded, setActivityLogExpanded] = useState(false);
 
   useEffect(() => {
     checkClaudeAvailability().then(setClaudeAvailable);
@@ -1273,7 +1278,7 @@ export default function DataSettingsPage() {
                         {state.data.workItems
                           .filter((w) => r.affectedItemIds.includes(w.id))
                           .map((w) => (
-                            <li key={w.id}>{w.key} — {w.title}</li>
+                            <li key={w.id}><TicketLink ticketKey={w.key} url={w.sourceUrl} /> — {w.title}</li>
                           ))}
                       </ul>
                     )}
@@ -1476,6 +1481,27 @@ export default function DataSettingsPage() {
             </div>
           );
         })()}
+      </Panel>
+
+      <Panel className="p-5">
+        <SectionHeading
+          title="Activity Log"
+          subtitle="Every daily snapshot, close-of-day summary, and proactive-intelligence event this app has stored — the same content previously at its own /memory nav entry, kept here since it's rarely opened routinely (see also Project Memory at /memory, still reachable directly)."
+          action={
+            <button
+              onClick={() => setActivityLogExpanded((v) => !v)}
+              aria-expanded={activityLogExpanded}
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-accent hover:text-text"
+            >
+              {activityLogExpanded ? "Collapse" : "Expand"}
+            </button>
+          }
+        />
+        {activityLogExpanded && (
+          <div className="mt-4">
+            <ProjectMemoryContent state={state} store={store} />
+          </div>
+        )}
       </Panel>
 
       {reopening && (

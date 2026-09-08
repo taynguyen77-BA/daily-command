@@ -171,7 +171,7 @@ import {
 // V2.12 — Signal Semantics Fix (Policy Review / Candidate Evaluation / Execution Gap)
 import { computeActionableSignals } from "../src/lib/command-center/jira/work-relevance-signals";
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "../src/lib/command-center/jira/work-relevance-history";
-import type { WorkRelevance } from "../src/lib/command-center/types";
+import type { WorkRelevance, DeliveryLoop } from "../src/lib/command-center/types";
 // V2.10 — Real-time mention/assignment tracking
 import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt } from "../src/lib/command-center/jira/mentions";
 import { detectNewAssignments } from "../src/lib/command-center/assignment-detection";
@@ -181,6 +181,11 @@ import type { JiraComment } from "../src/lib/command-center/jira/types";
 import type { MentionEvent } from "../src/lib/command-center/types";
 // V2.11 §2 — Slack destination visibility: GET/POST /api/command-center/notify
 import { GET as notifyStatusGET, POST as notifyPOST } from "../src/app/api/command-center/notify/route";
+
+// V2.13 §3 — Ticket links
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { TicketLink } from "../src/components/command-center/TicketLink";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -5542,6 +5547,94 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   ok("V2.5 Personal Focus", !plan30.some((c) => c.item?.id === "wi-observe"), "the 30-minute action plan (used by First 30 Minutes and Command Bar next-actions) also respects the Work Relevance gate");
 }
 
+// ----- V2.13 §1 — Personal Focus Engine (My Day) applies the same Work Relevance gate -----
+// personal-focus.ts previously never consulted Work Relevance at all: a COMPLETED/OBSERVE/
+// WAITING/EXCLUDED work item's DRIFT/RISK/DECISION/ACTION/COMMUNICATION attention item (and
+// loop-sourced candidates) could still reach DO_NOW/DO_TODAY. This closes that gap while
+// deliberately exempting MENTION/ASSIGNMENT (option 3a — a human action directed at you, not
+// the ticket's delivery state) and routing OBSERVE to WATCH instead of dropping it silently.
+{
+  const wrGateIdx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE", Done: "COMPLETED", "To Do": "ACTIONABLE" }));
+
+  const completedTicket = jiraItem({ id: "wi-mdc-completed", key: "JPMC-500", jiraStatusName: "Done", status: "Done", owner: "Alice", fixVersion: "R1" });
+  const observeTicket = jiraItem({ id: "wi-mdc-observe", key: "JPMC-501", jiraStatusName: "Ready for UAT/Business Test", owner: "Alice", fixVersion: "R2" });
+  const actionableTicket = jiraItem({ id: "wi-mdc-actionable", key: "JPMC-502", jiraStatusName: "To Do", owner: "Alice", fixVersion: "R3" });
+
+  // A high-scoring DRIFT item (CRITICAL severity, explicit ownership, several days stale)
+  // tied to a specific ticket via the release it belongs to — comfortably clears the DO_NOW
+  // floor (score >= 50) on its own scoring merits, so any downgrade below is purely the gate.
+  const driftAttn = (id: string, fixVersion: string): AttentionItem => ({
+    id,
+    category: "DRIFT",
+    severity: "CRITICAL",
+    what: `Release ${fixVersion} drifting`,
+    why: "Because delivery signals worsened.",
+    impact: "x",
+    nowWhat: "x",
+    evidence: [],
+    lifecycle: "ACTIVE",
+    firstSeenDate: "2026-05-01",
+    lastSeenDate: TODAY,
+    sourceRef: { type: "release", id: fixVersion },
+  });
+  const driftCompleted = driftAttn("DRIFT:release-R1", "R1");
+  const driftObserve = driftAttn("DRIFT:release-R2", "R2");
+  const driftActionable = driftAttn("DRIFT:release-R3", "R3");
+
+  const mentionOnCompleted: AttentionItem = {
+    id: "MENTION:jpmc-500",
+    category: "MENTION",
+    severity: "MEDIUM",
+    what: "Mentioned in a comment",
+    why: "Someone mentioned you.",
+    impact: "x",
+    nowWhat: "Read and respond.",
+    evidence: [],
+    lifecycle: "ACTIVE",
+    firstSeenDate: TODAY,
+    lastSeenDate: TODAY,
+    sourceRef: { type: "workItem", id: "wi-mdc-completed" },
+    ownershipExplicit: true,
+  };
+
+  const mdcData: CommandCenterData = { ...emptyData(), workItems: [completedTicket, observeTicket, actionableTicket] };
+  const mdcProactive = fakeProactive([driftCompleted, driftObserve, driftActionable, mentionOnCompleted]);
+  const mdcFocus = computePersonalFocus(mdcData, mdcProactive, "Alice", TODAY, undefined, wrGateIdx);
+
+  ok(
+    "V2.13 My Day gate",
+    mdcFocus.candidates.find((c) => c.sourceId === driftCompleted.id) === undefined,
+    "a COMPLETED-status ticket's DRIFT attention item produces no Personal Focus candidate at all — never DO_NOW/DO_TODAY/TOP_3/First-30-Minutes"
+  );
+  ok("V2.13 My Day gate", !mdcFocus.top3.some((c) => c.sourceId === driftCompleted.id), "the excluded COMPLETED-ticket candidate never appears in Top 3 either");
+
+  const observeCandidate = mdcFocus.candidates.find((c) => c.sourceId === driftObserve.id);
+  ok("V2.13 My Day gate", observeCandidate !== undefined && observeCandidate.category === "WATCH", "an OBSERVE-status ticket's high-scoring DRIFT item is demoted to WATCH, not dropped silently (OBSERVE stays 'visible as context')");
+
+  const actionableCandidate = mdcFocus.candidates.find((c) => c.sourceId === driftActionable.id);
+  ok("V2.13 My Day gate", actionableCandidate !== undefined && actionableCandidate.category === "DO_NOW", "an ACTIONABLE-status ticket with the identical score is unaffected — no regression to the common case");
+
+  ok(
+    "V2.13 My Day gate",
+    mdcFocus.candidates.some((c) => c.sourceId === mentionOnCompleted.id),
+    "a MENTION item on an already-COMPLETED ticket still appears — MENTION/ASSIGNMENT bypass the Work Relevance gate entirely (option 3a: a human action directed at you, not the ticket's delivery state)"
+  );
+
+  // No index at all preserves pre-V2.13 behavior — never a silent change for an unmigrated caller.
+  const mdcUngated = computePersonalFocus(mdcData, mdcProactive, "Alice", TODAY);
+  ok("V2.13 My Day gate", mdcUngated.candidates.some((c) => c.sourceId === driftCompleted.id), "omitting the Work Relevance index is a no-op — matches pre-V2.13 behavior");
+
+  // The same gate applies to loop-sourced candidates, not just attention-sourced ones.
+  const loopWorkItem = jiraItem({ id: "wi-mdc-loop-observe", key: "JPMC-600", jiraStatusName: "Ready for UAT/Business Test", owner: "Alice" });
+  const loopAction: Action = { id: "mdc-loop-action-1", title: "Loop action", why: "x", relatedWorkItemId: loopWorkItem.id, relatedDecisionId: "mdc-loop-dec-1", owner: "Alice", status: "open", estimateMinutes: 15, createdAt: TODAY };
+  const loopDecision: Decision = { id: "mdc-loop-dec-1", projectId: loopWorkItem.projectId, title: "Loop decision", status: "DECIDED", description: "" };
+  const loop: DeliveryLoop = { id: loopDecision.id, issue: "Loop issue", health: "STALLED", why: "Stalled reason.", nowWhat: "Do something." };
+  const loopData: CommandCenterData = { ...emptyData(), workItems: [loopWorkItem], decisions: [loopDecision], actions: [loopAction] };
+  const loopFocus = computePersonalFocus(loopData, fakeProactive([], [loop]), "Alice", TODAY, undefined, wrGateIdx);
+  const loopCandidate = loopFocus.candidates.find((c) => c.sourceId === loop.id);
+  ok("V2.13 My Day gate", loopCandidate !== undefined && loopCandidate.category === "WATCH", "a loop-sourced candidate whose linked work item is OBSERVE is demoted to WATCH too, not just attention-sourced candidates");
+}
+
 // ----- Attention: non-actionable status never creates attention merely by existing, but
 // existing risk/dependency/decision attention is never broken by this feature (§14, §29). -----
 {
@@ -6525,6 +6618,21 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
       `results over ${size} items are well-formed, not degenerate`
     );
   }
+}
+
+// ===== V2.13 §3 — TicketLink: real link when a real Jira sourceUrl exists, plain text when
+// it doesn't; never a fabricated href guessed from the key pattern. No jsdom in this project
+// (see the V1.8 Accessibility section above) — rendered via react-dom/server's
+// renderToStaticMarkup, a real DOM-structure check, not just "doesn't throw". =====
+{
+  const withUrl = renderToStaticMarkup(React.createElement(TicketLink, { ticketKey: "JPMC-123", url: "https://jira.example.com/browse/JPMC-123" }));
+  ok("V2.13 TicketLink", /<a\b[^>]*\bhref="https:\/\/jira\.example\.com\/browse\/JPMC-123"/.test(withUrl), "with a url, TicketLink renders an <a> with that exact href");
+  ok("V2.13 TicketLink", /target="_blank"/.test(withUrl) && /rel="noopener noreferrer"/.test(withUrl), "the link opens in a new tab with noopener noreferrer");
+  ok("V2.13 TicketLink", withUrl.includes("JPMC-123"), "the ticket key text is rendered inside the link");
+
+  const withoutUrl = renderToStaticMarkup(React.createElement(TicketLink, { ticketKey: "JPMC-124" }));
+  ok("V2.13 TicketLink", !/<a[\s>]/.test(withoutUrl), "with no url, TicketLink renders no <a> tag at all — plain text, never a broken/empty link");
+  ok("V2.13 TicketLink", withoutUrl.includes("JPMC-124"), "the plain ticket key text is still rendered");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

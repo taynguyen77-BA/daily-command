@@ -1,22 +1,38 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { commandCenterStore } from "@/lib/command-center/store";
 
-const LINKS = [
+interface NavLink {
+  href: string;
+  label: string;
+  // V2.13 §2 — hidden from primary nav by default, behind the "Show advanced/rarely-used
+  // sections" toggle (Data & Settings, V2.11 §3B). The route itself is untouched and stays
+  // fully reachable by direct URL/bookmark either way — this only affects whether the link
+  // is listed here.
+  advanced?: boolean;
+}
+
+// V2.13 §2 — Delivery Loops and Decision Log depend entirely on manually-logged Decisions
+// (store.addDecision); with no automatic Jira-derived path into that model, an installation
+// that has never logged a decision sees these as correctly-coded but perpetually empty. Not
+// deleted, not broken — just hidden from the default nav until the user opts in.
+// Project Memory (`/memory`) is a different case (auto-populated by real system activity) and
+// is intentionally not in this list at all — see data-settings/page.tsx's Activity Log section.
+const LINKS: NavLink[] = [
   { href: "/", label: "Command Center" },
   { href: "/focus", label: "My Day" },
   { href: "/meeting", label: "Meeting Mode" },
   { href: "/attention", label: "Attention Queue" },
-  { href: "/loops", label: "Delivery Loops" },
+  { href: "/loops", label: "Delivery Loops", advanced: true },
   { href: "/priorities", label: "Priorities" },
   { href: "/changes", label: "Changes" },
   { href: "/risks", label: "Risks" },
   { href: "/dependencies", label: "Dependencies" },
   { href: "/action-plan", label: "Action Plan" },
-  { href: "/decisions", label: "Decision Log" },
-  { href: "/memory", label: "Project Memory" },
+  { href: "/decisions", label: "Decision Log", advanced: true },
   { href: "/weekly-review", label: "Weekly Review" },
   { href: "/data-settings", label: "Data & Settings" },
 ];
@@ -24,7 +40,13 @@ const LINKS = [
 export function Nav() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const activeLink = LINKS.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? LINKS[0];
+  const showAdvanced = useSyncExternalStore(
+    commandCenterStore.subscribe,
+    () => commandCenterStore.getSnapshot().showAdvancedSettings,
+    () => commandCenterStore.getServerSnapshot().showAdvancedSettings
+  );
+  const links = LINKS.filter((link) => !link.advanced || showAdvanced);
+  const activeLink = links.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? links[0];
 
   return (
     <nav className="border-b border-border">
@@ -55,7 +77,7 @@ export function Nav() {
         id="mobile-nav-links"
         className={`${open ? "flex" : "hidden"} flex-col gap-0.5 px-4 pb-3 md:flex md:flex-row md:flex-wrap md:gap-1 md:px-6 md:py-2 md:pb-2`}
       >
-        {LINKS.map((link) => {
+        {links.map((link) => {
           const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
           return (
             <Link

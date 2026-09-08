@@ -11,6 +11,7 @@ import type { PersonalFocusResult } from "@/lib/command-center/types";
 import { ConfidenceTag, ReasoningTraceBlock, SeverityBadge, TrustLabel } from "./ui";
 import { WhyNotATaskDrawer } from "./WhyNotATaskDrawer";
 import { ExecutionPathTrace } from "./ExecutionPathTrace";
+import { TicketLink } from "./TicketLink";
 
 function recommendedAction(item: WorkItem): string {
   if (item.blocked) return `Escalate the blocker: ${item.blockerReason ?? "unblock dependency"}.`;
@@ -61,7 +62,7 @@ export function PriorityCard({
       <div className="mb-2 flex items-center gap-2">
         <SeverityBadge level={result.classification} />
         <TrustLabel kind="calculated" />
-        <span className="text-xs text-text3">{item.key}</span>
+        <TicketLink ticketKey={item.key} url={item.sourceUrl} className="text-xs text-text3" />
         <span className="text-xs text-text3">·</span>
         <span className="text-xs text-text3">{clientName(data, item.clientId)}</span>
         {item.sourceType === "jira" && item.sourceUrl && (

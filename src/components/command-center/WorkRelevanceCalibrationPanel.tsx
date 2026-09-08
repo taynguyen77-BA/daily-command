@@ -23,6 +23,7 @@ import type { WorkItemCalibrationHistory } from "@/lib/command-center/jira/work-
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { WORK_RELEVANCE_VALUES, type CommandCenterData, type JiraProjectScope, type PersonalFocusResult } from "@/lib/command-center/types";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
+import { TicketLink } from "./TicketLink";
 
 // V2.12 — for the status-level table, a NON-ACTIONABLE row's signal still uses V2.7's own
 // REVIEW/NONE/INSUFFICIENT_EVIDENCE language unchanged (that concept — "this status has
@@ -307,20 +308,11 @@ export function WorkRelevanceCalibrationPanel({
                     </button>
                     {expanded && (
                       <ul className="mt-2 space-y-1 border-t border-border pt-2">
-                        {items.map((item) =>
-                          item.sourceUrl ? (
-                            <li key={item.id}>
-                              <a href={item.sourceUrl} target="_blank" rel="noreferrer" className="text-accent2 hover:underline">
-                                {item.key}
-                              </a>{" "}
-                              <span className="text-text2">{item.title}</span>
-                            </li>
-                          ) : (
-                            <li key={item.id} className="text-text2">
-                              {item.key} {item.title}
-                            </li>
-                          )
-                        )}
+                        {items.map((item) => (
+                          <li key={item.id} className="text-text2">
+                            <TicketLink ticketKey={item.key} url={item.sourceUrl} className="text-accent2" /> {item.title}
+                          </li>
+                        ))}
                       </ul>
                     )}
                   </div>
@@ -339,7 +331,7 @@ export function WorkRelevanceCalibrationPanel({
               {actionableSignals.executionGap.map((s) => (
                 <div key={s.itemId} className="rounded-md border border-yellow/30 bg-yellow/5 p-2.5 text-xs">
                   <p className="font-mono text-text">
-                    {s.itemKey} <span className="text-text3">({s.statusName})</span>
+                    <TicketLink ticketKey={s.itemKey} url={data.workItems.find((w) => w.id === s.itemId)?.sourceUrl} /> <span className="text-text3">({s.statusName})</span>
                   </p>
                   <p className="mt-1 text-text2">{s.explanation}</p>
                   {data.workItems.find((w) => w.id === s.itemId)?.sourceUrl ? (
