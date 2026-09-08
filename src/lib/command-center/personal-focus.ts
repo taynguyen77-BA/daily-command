@@ -269,11 +269,13 @@ function estimateFor(sourceType: PersonalFocusSourceType, category: string, loop
 
 function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData, identity: IdentityRef, today: string, workRelevanceIndex: WorkRelevanceIndex | undefined): PersonalFocusCandidate | null {
   const entity = resolveAttentionEntity(item, data);
-  // V2.13 §1 — MENTION/ASSIGNMENT bypass the Work Relevance gate entirely (option 3a): a
-  // comment mentioning you or a new assignment is a signal about a human action directed at
-  // you, not about the ticket's delivery state — still worth surfacing once even on an
-  // already-COMPLETED ticket.
-  const relevanceGate = item.category === "MENTION" || item.category === "ASSIGNMENT" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex);
+  // V2.13 §1 — MENTION/ASSIGNMENT are gated too (option 3b): the Work Relevance Policy
+  // decides whether a ticket represents live personal work at all, and that decision must
+  // not depend on which kind of signal is pointing at the ticket — a mention/reassignment on
+  // an already-COMPLETED/WAITING/EXCLUDED/UNKNOWN ticket is no more actionable than any other
+  // signal on it, so it's excluded the same way; OBSERVE still downgrades to WATCH rather
+  // than dropping, consistent with every other category.
+  const relevanceGate = evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex);
   if (relevanceGate === "EXCLUDE") return null;
   const resolution = resolveOwner(entity, data);
   const { label: ownerLabel } = resolution;
@@ -337,11 +339,10 @@ function candidateFromAttentionItem(item: AttentionItem, data: CommandCenterData
   };
 }
 
-/** V2.13 §1 — Work Relevance gate, applied ONLY to candidates derived from a Jira work
- *  item's own delivery/status state (DRIFT/RISK/DEPENDENCY/DECISION/ACTION/COMMUNICATION,
- *  and loop-sourced candidates) — never to MENTION/ASSIGNMENT, which are about a human
- *  action directed at you, not the ticket's delivery state (see the bypass in
- *  candidateFromAttentionItem below).
+/** V2.13 §1 — Work Relevance gate, applied to every candidate that resolves to a real work
+ *  item — DRIFT/RISK/DEPENDENCY/DECISION/ACTION/COMMUNICATION, loop-sourced candidates, and
+ *  (option 3b) MENTION/ASSIGNMENT alike: the underlying ticket's status decides whether it's
+ *  live personal work, regardless of which kind of signal is pointing at it.
  *
  *  "PASS" — at least one related work item is ACTIONABLE (or the concept doesn't apply, e.g.
  *  demo/local-import), or there's nothing to gate on (no related work item at all, e.g. an

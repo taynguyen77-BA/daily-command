@@ -5550,9 +5550,10 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
 // ----- V2.13 §1 — Personal Focus Engine (My Day) applies the same Work Relevance gate -----
 // personal-focus.ts previously never consulted Work Relevance at all: a COMPLETED/OBSERVE/
 // WAITING/EXCLUDED work item's DRIFT/RISK/DECISION/ACTION/COMMUNICATION attention item (and
-// loop-sourced candidates) could still reach DO_NOW/DO_TODAY. This closes that gap while
-// deliberately exempting MENTION/ASSIGNMENT (option 3a — a human action directed at you, not
-// the ticket's delivery state) and routing OBSERVE to WATCH instead of dropping it silently.
+// loop-sourced candidates) could still reach DO_NOW/DO_TODAY. This closes that gap, gating
+// MENTION/ASSIGNMENT the same way as every other category (option 3b — the underlying
+// ticket's status decides personal-work eligibility regardless of which signal points at it)
+// and routing OBSERVE to WATCH instead of dropping it silently.
 {
   const wrGateIdx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE", Done: "COMPLETED", "To Do": "ACTIONABLE" }));
 
@@ -5581,8 +5582,8 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   const driftObserve = driftAttn("DRIFT:release-R2", "R2");
   const driftActionable = driftAttn("DRIFT:release-R3", "R3");
 
-  const mentionOnCompleted: AttentionItem = {
-    id: "MENTION:jpmc-500",
+  const mentionAttn = (id: string, workItemId: string): AttentionItem => ({
+    id,
     category: "MENTION",
     severity: "MEDIUM",
     what: "Mentioned in a comment",
@@ -5593,12 +5594,15 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
     lifecycle: "ACTIVE",
     firstSeenDate: TODAY,
     lastSeenDate: TODAY,
-    sourceRef: { type: "workItem", id: "wi-mdc-completed" },
+    sourceRef: { type: "workItem", id: workItemId },
     ownershipExplicit: true,
-  };
+  });
+  const mentionOnCompleted = mentionAttn("MENTION:jpmc-500", "wi-mdc-completed");
+  const mentionOnObserve = mentionAttn("MENTION:jpmc-501", "wi-mdc-observe");
+  const mentionOnActionable = mentionAttn("MENTION:jpmc-502", "wi-mdc-actionable");
 
   const mdcData: CommandCenterData = { ...emptyData(), workItems: [completedTicket, observeTicket, actionableTicket] };
-  const mdcProactive = fakeProactive([driftCompleted, driftObserve, driftActionable, mentionOnCompleted]);
+  const mdcProactive = fakeProactive([driftCompleted, driftObserve, driftActionable, mentionOnCompleted, mentionOnObserve, mentionOnActionable]);
   const mdcFocus = computePersonalFocus(mdcData, mdcProactive, "Alice", TODAY, undefined, wrGateIdx);
 
   ok(
@@ -5616,9 +5620,13 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
 
   ok(
     "V2.13 My Day gate",
-    mdcFocus.candidates.some((c) => c.sourceId === mentionOnCompleted.id),
-    "a MENTION item on an already-COMPLETED ticket still appears — MENTION/ASSIGNMENT bypass the Work Relevance gate entirely (option 3a: a human action directed at you, not the ticket's delivery state)"
+    mdcFocus.candidates.find((c) => c.sourceId === mentionOnCompleted.id) === undefined,
+    "option 3b: a MENTION item on an already-COMPLETED ticket produces no candidate at all — MENTION/ASSIGNMENT are gated by Work Relevance exactly like every other category, not exempted"
   );
+  const mentionObserveCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnObserve.id);
+  ok("V2.13 My Day gate", mentionObserveCandidate !== undefined && mentionObserveCandidate.category === "WATCH", "a MENTION item on an OBSERVE-status ticket is demoted to WATCH, not dropped — same OBSERVE treatment as any other category");
+  const mentionActionableCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnActionable.id);
+  ok("V2.13 My Day gate", mentionActionableCandidate !== undefined && mentionActionableCandidate.category === "DO_TODAY", "a MENTION item on an ACTIONABLE-status ticket is unaffected by the gate — reaches its natural DO_TODAY category from scoring alone");
 
   // No index at all preserves pre-V2.13 behavior — never a silent change for an unmigrated caller.
   const mdcUngated = computePersonalFocus(mdcData, mdcProactive, "Alice", TODAY);
