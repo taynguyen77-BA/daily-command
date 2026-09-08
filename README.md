@@ -2,7 +2,7 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.13
+**Current version:** V2.15
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
 **Version-line reconciliation (again):** this line had drifted stale at V2.10 even though several real passes (V2.10.1's cold-start fix, V2.11's global Work Relevance Policy, V2.12's signal-splitting fixes, and an earlier same-day V2.13 pass covering My Day's Work Relevance gate/hidden sections/ticket links) had already shipped without ever updating it here — the same class of gap this README already flagged and fixed once before (see the V2.10 section below). Corrected to V2.13 as part of this pass, which itself adds the separate "Server-Side Real-Time Notify" capability described below.
@@ -45,7 +45,7 @@ Optional, only meaningful once the three above are set:
 | `JIRA_TIMEZONE_OFFSET_MINUTES` | Tightens the incremental-sync cursor to minute precision for your Jira instance's configured timezone (e.g. `420` for UTC+7 / Vietnam). | Falls back to a day-level cursor — still correct, just re-fetches a bit more per sync. |
 | `JIRA_PROJECT_KEYS` | Comma-separated list to scope sync to specific projects (e.g. `JPMC,UBS`). | Syncs all discoverable projects. |
 | `JIRA_PROJECT_CLIENT_MAP` | JSON object mapping a Jira project key to a display client name (e.g. `{"JPMC":"J.P. Morgan"}`), for "one client, many projects". | Project name is used as the client name. |
-| `CRON_SECRET` (V2.10) | Requires `Authorization: Bearer <value>` on every request to `/api/command-center/jira/sync`, for the scheduled sync in `vercel.json` / `.github/workflows/sync.yml`. | The sync route stays exactly as open as it always was — no auth check. Note: setting this also disables the in-app "Sync Now" button, which cannot safely hold a server secret; see that route's own comment. |
+| `CRON_SECRET` (V2.10, fixed V2.15) | Requires `Authorization: Bearer <value>` on every request to `/api/command-center/jira/sync`, for the scheduled sync in `vercel.json` / `.github/workflows/sync.yml`. | The sync route stays exactly as open as it always was — no auth check. **V2.15 fix:** configuring `CRON_SECRET` alone used to disable the in-app "Sync Now" button (a browser can never safely hold `CRON_SECRET`). The route now also accepts `Authorization: Bearer <APP_STATE_SECRET>` (see Cross-Device Sync below) — pair this device once in Data & Settings and Sync Now works again even with `CRON_SECRET` locked down. Without pairing, the button now fails with a specific "pair this device" message instead of a bare 401. |
 
 A malformed value for any optional variable is ignored (never throws) and falls back to the safe default above.
 
@@ -86,6 +86,39 @@ Both are required together for the server-side path to activate; either one miss
 The very first cron run after this is configured for an install that already has real assigned/mentioned tickets sitting in Jira establishes a baseline and sends **zero** Slack messages — the exact same cold-start discipline V2.10.1 already guarantees for the browser-tab path, now also true for the unattended one. A cron run's own connectivity failure (Jira unreachable, credentials rejected, etc.) never corrupts the persisted baseline — the next successful run still diffs correctly against the last known-good state.
 
 **A note on `@vercel/kv`:** as of this pass, npm reports `@vercel/kv` as deprecated in favor of installing a Redis integration (Upstash) directly from the Vercel Marketplace — Vercel's own KV product is being wound down, though existing KV stores and this package's `KV_REST_API_URL`/`KV_REST_API_TOKEN` contract still work today (the package is a thin wrapper over `@upstash/redis` reading those same two variables). This pass follows the dev prompt's explicit instruction to use `@vercel/kv` and those exact dashboard steps; if Vercel fully sunsets the old dashboard flow before you set this up, installing `@upstash/redis` directly against the same two env var names is a same-shape, one-file (`src/lib/server/notify-store.ts`) swap — the `NotifyStateStore` interface this pass introduced was written specifically so that swap never needs to touch `cron-notify.ts` or any caller.
+
+### Cross-Device Sync (V2.15, optional)
+
+Depends on V2.13 (Server-Side Real-Time Notify) already having Vercel KV set up — this reuses the same KV store/credentials and adds a second, still narrow, blob of server-side state.
+
+**Only the state that actually diverges across devices syncs — not everything.** Work items, risks, drift, dependencies, priorities, and `snapshotHistory` are all recomputed fresh from Jira on every sync, on every device independently — since Jira is the real source of truth, that data is already substantively consistent across devices without any extra plumbing. What genuinely needs to sync (and didn't before this pass) is:
+
+1. `personalIdentity` (accountId, displayName, email)
+2. `jiraWorkRelevancePolicy` (the global policy map, V2.11)
+3. `attentionState` (per-item lifecycle: NEW/ACTIVE/ACKNOWLEDGED/RESOLVED/RE_ESCALATED — the single biggest source of "acknowledged on desktop, still shows as new on phone")
+4. `decisions` (Decision Log entries)
+5. Action Plan / Close Day interaction state (`data.actions` status/notes/outcomes, and the Focus Session/My Day `personalPlan`)
+6. `memoryEvents`
+7. UI preferences added V2.11-V2.14 (advanced-sections toggle, "My action items only" per page, Focus Project Scope selection)
+
+Everything else stays local, per device, un-synced by design — e.g. `snapshotHistory` trend charts can legitimately show slightly different data per device (each device's own recent Jira syncs), while decisions and acknowledgments are identical everywhere once synced.
+
+| Variable | Purpose | Behavior when missing |
+| --- | --- | --- |
+| `APP_STATE_SECRET` | Required by both `GET`/`POST /api/command-center/state`. Unlike `CRON_SECRET` above, this data is genuinely private (decision content, identity, interaction history) — an **unconfigured** `APP_STATE_SECRET` means sync is treated as unavailable (503), never silently open. Generate with `openssl rand -hex 32`, same as `CRON_SECRET`, and set it identically to a server-side Vercel env var. | The Cross-Device Sync layer is completely inert — the app behaves exactly as it does today, local-only, no errors. |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Same Vercel KV store V2.13 already uses. | Same — a complete no-op; `app-state-store.ts`'s `get()` returns `null` and `set()` does nothing. |
+
+**Never put `APP_STATE_SECRET` in a `NEXT_PUBLIC_*` env var** — that would bundle it into every visitor's JS at build time. Instead, each browser is "paired" individually: open **Data & Settings → Cross-Device Sync**, paste the secret once, and it's stored only in that device's own `localStorage` (`device-pairing.ts`) — the same one-time-per-device setup as a password manager or 2FA app. The paired secret is also what a browser's own "Sync Now" button sends to `/api/command-center/jira/sync` (see the `CRON_SECRET` fix above) — it is never a third secret, just reused.
+
+**Client sync lifecycle:** on load, the app renders immediately from local state (unchanged, no blank-screen wait); in the background, a paired device pulls the server's copy and reconciles it against local state:
+- Server has no state yet → this device's local state becomes the baseline (protects an existing pre-V2.15 install's real local data — see the dedicated migration-safety test in `scripts/command-center-test.mts`).
+- Local looks never-meaningfully-used (no attention lifecycle activity, no decisions, no planning activity) → adopt the server's copy wholesale.
+- Both sides have real content and the server is newer → merge: record collections (decisions, actions, personal-plan items, memory events) union by id so a locally-added-but-not-yet-synced record is never dropped, even though the single-timestamp blob design (§ below) means simple preference blocks resolve to "whichever whole side is newer," not true per-field freshness.
+- Otherwise (this device is already at least as fresh as the server knows) → push local forward.
+
+Every mutation to a synced field debounces a single `POST` a few seconds later (rapid edits coalesce into one KV write); a failed `POST` (offline) is retried with exponential backoff and retried immediately on the browser's `online` event — the pending write is never lost in the meantime, since it's already sitting in the same `localStorage`-persisted local state every other mutation already uses.
+
+**Honesty about the merge model:** the server blob carries exactly one `updatedAtIso`, not one per field — so "per-field where reasonable" (Task 3's own escape hatch) means id-level union for record collections, and "whichever whole side is newer" for scalar preference blocks (UI toggles, identity). True concurrent field-level editing is rare for a single-user tool; this is the documented, honest boundary of that design rather than a fabricated finer-grained merge.
 
 ### Configuring in Vercel
 

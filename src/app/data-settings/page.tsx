@@ -25,7 +25,9 @@ import { computeDataHealth } from "@/lib/command-center/data-health";
 import { clearAiTrace, getRecentAiTrace, getAiTraceSummary } from "@/lib/command-center/ai/trace";
 import { aiCacheSize, clearAICache, getCacheStats } from "@/lib/command-center/ai/ai-cache";
 import { listAllUsagePolicies } from "@/lib/command-center/ai/usage-policy";
-import { getTodayIso } from "@/lib/command-center/store";
+import { commandCenterStore, getTodayIso } from "@/lib/command-center/store";
+import { setPairedSecret, clearPairedSecret } from "@/lib/command-center/device-pairing";
+import { checkAppStateSyncStatus, initAppStateSync, resetAppStateSyncForNewPairing } from "@/lib/command-center/app-state-sync";
 import { computeTrustDiagnostic, type TrustDiagnosticStatus } from "@/lib/command-center/trust-diagnostic";
 import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadinessStatus, type PilotCheckItem } from "@/lib/command-center/jira/pilot-checklist";
 import { isArtifactStale, rebuildDraftFromSourceRef } from "@/lib/command-center/communicate";
@@ -123,6 +125,112 @@ function SlackNotificationsPanel() {
           {!testResult.sent && testResult.detail && <p className="mt-1 font-mono text-text3">{testResult.detail}</p>}
         </div>
       )}
+    </Panel>
+  );
+}
+
+// V2.15 §2-3 — Cross-Device Sync pairing screen. This is the ONLY UI path that ever writes
+// APP_STATE_SECRET into localStorage — see device-pairing.ts's own comment: never a
+// NEXT_PUBLIC_* env var, never bundled at build time, one paste per device (like setting up a
+// password manager or 2FA app). "Server configured" / "This device: paired" reuse the state
+// endpoint's own 503/401/200 semantics (checkAppStateSyncStatus) rather than a second status
+// endpoint.
+function CrossDeviceSyncPanel() {
+  const [status, setStatus] = useState<{ configured: boolean; paired: boolean } | null>(null);
+  const [secretInput, setSecretInput] = useState("");
+  const [pairing, setPairing] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [lastSyncedIso, setLastSyncedIso] = useState<string | undefined>(commandCenterStore.getSnapshot().lastAppStateSyncIso);
+
+  useEffect(() => {
+    checkAppStateSyncStatus().then(setStatus);
+    const unsubscribe = commandCenterStore.subscribe(() => setLastSyncedIso(commandCenterStore.getSnapshot().lastAppStateSyncIso));
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  async function handlePair() {
+    const trimmed = secretInput.trim();
+    if (!trimmed) return;
+    setPairing(true);
+    setMessage(null);
+    setPairedSecret(trimmed);
+    // V2.15 §3 — pair now, sync now, rather than waiting for the next full page load.
+    resetAppStateSyncForNewPairing();
+    await initAppStateSync(commandCenterStore);
+    const nextStatus = await checkAppStateSyncStatus();
+    setStatus(nextStatus);
+    setPairing(false);
+    setSecretInput("");
+    setMessage(
+      nextStatus.paired
+        ? "Device paired — synced with the server."
+        : "Saved, but the server didn't accept this secret. Double-check it matches this deployment's APP_STATE_SECRET exactly."
+    );
+  }
+
+  function handleUnpair() {
+    clearPairedSecret();
+    resetAppStateSyncForNewPairing();
+    checkAppStateSyncStatus().then(setStatus);
+    setMessage("This device is unpaired and will no longer sync. Existing server data and other paired devices are untouched.");
+  }
+
+  return (
+    <Panel className="p-5">
+      <SectionHeading
+        title="Cross-Device Sync"
+        subtitle="Syncs identity, Work Relevance Policy, attention lifecycle, decisions, Action Plan/Close Day interaction state, memory events, and UI preferences across your paired devices. Work items, risks, drift, dependencies, priorities, and snapshot history are never synced — each device re-derives them fresh from Jira on its own sync."
+      />
+      <div className="space-y-1 text-sm text-text2">
+        <p>
+          Server configured: <span className="font-mono text-text">{status === null ? "checking…" : status.configured ? "yes" : "no"}</span>
+        </p>
+        <p>
+          This device: <span className={`font-mono ${status?.paired ? "text-green" : "text-text"}`}>{status === null ? "checking…" : status.paired ? "paired" : "not paired"}</span>
+        </p>
+        {lastSyncedIso && (
+          <p>
+            Last synced: <span className="font-mono text-text">{new Date(lastSyncedIso).toLocaleString()}</span>
+          </p>
+        )}
+      </div>
+
+      {status !== null && !status.configured && (
+        <p className="mt-3 text-xs text-text3">
+          Not available on this deployment. Set <span className="font-mono">APP_STATE_SECRET</span> and Vercel KV (
+          <span className="font-mono">KV_REST_API_URL</span>/<span className="font-mono">KV_REST_API_TOKEN</span>) server-side, then redeploy —
+          see the README&apos;s Cross-Device Sync section.
+        </p>
+      )}
+
+      {status?.configured && !status.paired && (
+        <div className="mt-3 flex max-w-md flex-col gap-2 sm:flex-row">
+          <input
+            type="password"
+            value={secretInput}
+            onChange={(e) => setSecretInput(e.target.value)}
+            placeholder="Paste this deployment's APP_STATE_SECRET"
+            className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
+          />
+          <button
+            onClick={handlePair}
+            disabled={pairing || !secretInput.trim()}
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
+          >
+            {pairing ? "Pairing…" : "Pair this device"}
+          </button>
+        </div>
+      )}
+
+      {status?.paired && (
+        <button onClick={handleUnpair} className="mt-3 rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-red hover:text-red">
+          Unpair this device
+        </button>
+      )}
+
+      {message && <p className="mt-2 text-xs text-text3">{message}</p>}
     </Panel>
   );
 }
@@ -545,7 +653,8 @@ const JIRA_ERROR_HELP: Record<string, string> = {
   "not-configured": "Set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN in the server environment.",
   "invalid-url": "JIRA_BASE_URL is not a valid URL.",
   "auth-failure": "Jira rejected the configured email/API token.",
-  "cron-unauthorized": "CRON_SECRET is configured on this deployment, which disables the Sync Now button (the browser can't hold that secret). Unset CRON_SECRET to restore manual sync, or rely on the scheduled cron/GitHub Action instead.",
+  "cron-unauthorized":
+    "CRON_SECRET is configured on this deployment (the browser can't safely hold that secret). Pair this device below under Cross-Device Sync to restore the Sync Now button, unset CRON_SECRET, or rely on the scheduled cron/GitHub Action instead.",
   "permission-failure": "The configured Jira account lacks permission for this request.",
   "rate-limited": "Jira's rate limit was hit — try again shortly.",
   "network-error": "Could not reach the configured Jira base URL.",
@@ -971,6 +1080,8 @@ export default function DataSettingsPage() {
           )}
         </div>
       </Panel>
+
+      <CrossDeviceSyncPanel />
 
       <JiraProjectScopePanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
 

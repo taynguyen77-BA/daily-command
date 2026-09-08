@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { commandCenterStore } from "@/lib/command-center/store";
+import { initAppStateSync } from "@/lib/command-center/app-state-sync";
 
 interface NavLink {
   href: string;
@@ -47,6 +48,16 @@ export function Nav() {
   );
   const links = LINKS.filter((link) => !link.advanced || showAdvanced);
   const activeLink = links.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? links[0];
+
+  // V2.15 §3 point 1 — Nav is mounted exactly once, app-wide, by the root layout (persists
+  // across client-side navigations), making it the natural single init point for Cross-Device
+  // Sync — never blocks first paint (fire-and-forget; render already happened from local
+  // state before this effect even runs). initAppStateSync is itself idempotent (a module-level
+  // guard), so this being technically re-runnable (e.g. React StrictMode's dev double-invoke)
+  // is harmless.
+  useEffect(() => {
+    void initAppStateSync(commandCenterStore);
+  }, []);
 
   return (
     <nav className="border-b border-border">

@@ -196,6 +196,11 @@ import type { SlackFetchLike } from "../src/lib/server/slack-notify";
 import { classifyPersonalRelation, isMyActionItem, matchesIdentity } from "../src/lib/command-center/personal-relation";
 import { RelationBadge } from "../src/components/command-center/ui";
 
+// V2.15 — Cross-Device Sync
+import { isSyncRequestAuthorized } from "../src/lib/command-center/jira/sync-auth";
+import { checkAppStateAuth, createInMemoryAppStateStore, isAppStateStoreConfigured, syncedAppStateSchema, type SyncedAppState } from "../src/lib/command-center/app-state";
+import { decideInitialSync, extractSyncedAppState, looksUnused, mergeSyncedAppState } from "../src/lib/command-center/app-state-sync";
+
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
@@ -1660,8 +1665,10 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const repoRoot = path.resolve(process.cwd());
   const syncRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
   ok("V2.10 Cron", /process\.env\.CRON_SECRET/.test(syncRouteSrc), "the sync route reads CRON_SECRET");
-  ok("V2.10 Cron", /if \(!cronSecret\) return true;/.test(syncRouteSrc), "with no CRON_SECRET configured, every request is authorized — the route stays exactly as open as before this change");
-  ok("V2.10 Cron", /Bearer \$\{cronSecret\}/.test(syncRouteSrc), "once CRON_SECRET is configured, only a matching 'Authorization: Bearer <secret>' header is accepted");
+  // V2.15 §2 — the actual accept/reject decision moved into sync-auth.ts's isSyncRequestAuthorized
+  // (directly unit-tested below); this only checks that the route still wires it up.
+  ok("V2.15 Cron+AppState wiring", /isSyncRequestAuthorized/.test(syncRouteSrc), "the route's auth gate now delegates to the shared, testable isSyncRequestAuthorized rather than a private, unregexable inline check");
+  ok("V2.15 Cron+AppState wiring", /process\.env\.APP_STATE_SECRET/.test(syncRouteSrc), "the route also reads APP_STATE_SECRET, the second secret isSyncRequestAuthorized accepts");
   ok("V2.10 Cron", /export async function GET/.test(syncRouteSrc), "the route exports a GET handler — Vercel Cron Jobs always issue a GET, never a POST");
 
   const vercelJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
@@ -7089,6 +7096,336 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     myActionCandidates.some((c) => c.ticketKey === "REL-1") && myActionCandidates.some((c) => c.ticketKey === "REL-2") && !myActionCandidates.some((c) => c.ticketKey === "REL-3"),
     "'My action items only' keeps ASSIGNED/MENTIONED candidates and excludes the FOLLOWING one"
   );
+}
+
+// ===== V2.15 — Cross-Device Consistency =====
+
+// --- sync-auth.ts: isSyncRequestAuthorized (jira/sync POST gate — accepts EITHER secret) ---
+{
+  ok("V2.15 sync-auth", isSyncRequestAuthorized(null, undefined, undefined) === true, "neither secret configured -> every request authorized, unchanged pre-V2.10 default-open behavior");
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer anything", undefined, undefined) === true, "still open with neither configured, regardless of what header (if any) is sent");
+
+  ok("V2.15 sync-auth", isSyncRequestAuthorized(null, "cron-secret", undefined) === false, "only CRON_SECRET configured, no header -> unauthorized");
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer cron-secret", "cron-secret", undefined) === true, "only CRON_SECRET configured, matching header -> authorized (the automated cron/GitHub Action path)");
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer wrong", "cron-secret", undefined) === false, "only CRON_SECRET configured, wrong header -> unauthorized");
+
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer app-state-secret", undefined, "app-state-secret") === true, "only APP_STATE_SECRET configured, matching header -> authorized (a paired browser with no CRON_SECRET set)");
+
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer cron-secret", "cron-secret", "app-state-secret") === true, "both configured: a request bearing CRON_SECRET is authorized");
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer app-state-secret", "cron-secret", "app-state-secret") === true, "both configured: a request bearing APP_STATE_SECRET is ALSO authorized — the exact V2.15 fix, both work at the same time");
+  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer neither-of-these", "cron-secret", "app-state-secret") === false, "both configured: a request bearing neither valid secret is rejected");
+  ok("V2.15 sync-auth", isSyncRequestAuthorized(null, "cron-secret", "app-state-secret") === false, "both configured: no header at all is rejected — today's default-open behavior only applies when NEITHER secret is configured");
+}
+
+// --- app-state.ts: checkAppStateAuth (state route's own auth — deliberately NOT open when
+// unconfigured, unlike sync-auth.ts above) ---
+{
+  const unconfigured = checkAppStateAuth(null, undefined);
+  ok("V2.15 checkAppStateAuth", unconfigured.ok === false && !unconfigured.ok && unconfigured.status === 503, "APP_STATE_SECRET unset -> 503 (sync treated as unavailable), never silently open — this synced slice is genuinely private, unlike jira/sync's re-derivable-from-Jira data");
+
+  const missingHeader = checkAppStateAuth(null, "state-secret");
+  ok("V2.15 checkAppStateAuth", missingHeader.ok === false && !missingHeader.ok && missingHeader.status === 401, "APP_STATE_SECRET configured, no Authorization header -> 401");
+
+  const wrongHeader = checkAppStateAuth("Bearer wrong-value", "state-secret");
+  ok("V2.15 checkAppStateAuth", wrongHeader.ok === false && !wrongHeader.ok && wrongHeader.status === 401, "APP_STATE_SECRET configured, mismatched header -> 401");
+
+  const correctHeader = checkAppStateAuth("Bearer state-secret", "state-secret");
+  ok("V2.15 checkAppStateAuth", correctHeader.ok === true, "APP_STATE_SECRET configured, matching header -> authorized");
+}
+
+// --- app-state.ts: isAppStateStoreConfigured (KV env-var presence check, same pattern as
+// V2.13's isNotifyStoreConfigured) ---
+{
+  const originalKvUrl = process.env.KV_REST_API_URL;
+  const originalKvToken = process.env.KV_REST_API_TOKEN;
+
+  delete process.env.KV_REST_API_URL;
+  delete process.env.KV_REST_API_TOKEN;
+  ok("V2.15 isAppStateStoreConfigured", isAppStateStoreConfigured() === false, "false with no KV env vars set");
+
+  process.env.KV_REST_API_URL = "https://kv.example.test";
+  ok("V2.15 isAppStateStoreConfigured", isAppStateStoreConfigured() === false, "URL alone is not enough — both are required");
+
+  process.env.KV_REST_API_TOKEN = "kv-tok";
+  ok("V2.15 isAppStateStoreConfigured", isAppStateStoreConfigured() === true, "true once both KV env vars are set");
+
+  if (originalKvUrl === undefined) delete process.env.KV_REST_API_URL;
+  else process.env.KV_REST_API_URL = originalKvUrl;
+  if (originalKvToken === undefined) delete process.env.KV_REST_API_TOKEN;
+  else process.env.KV_REST_API_TOKEN = originalKvToken;
+}
+
+// --- app-state.ts: createInMemoryAppStateStore (the offline-test fake) ---
+{
+  const store = createInMemoryAppStateStore(null);
+  ok("V2.15 in-memory app state store", (await store.get()) === null, "starts with no baseline when constructed with null");
+  const seeded: SyncedAppState = {
+    jiraWorkRelevancePolicy: {},
+    attentionState: {},
+    decisions: [],
+    actionPlanState: { actions: [], personalPlan: [] },
+    memoryEvents: [],
+    uiPreferences: { showAdvancedSettings: false, myActionItemsOnly: { attention: false, myDay: false, priorities: false }, jiraProjectScope: { mode: "ALL", projectKeys: [] } },
+    updatedAtIso: "2026-01-01T00:00:00.000Z",
+  };
+  await store.set(seeded);
+  const roundTripped = await store.get();
+  ok("V2.15 in-memory app state store", roundTripped?.updatedAtIso === "2026-01-01T00:00:00.000Z", "set() then get() round-trips the exact value written");
+}
+
+// --- app-state.ts: syncedAppStateSchema (POST body top-level structural validation) ---
+{
+  const validBody = {
+    personalIdentity: { id: "id1", displayName: "Alice" },
+    jiraWorkRelevancePolicy: { "In Progress": "ACTIONABLE" },
+    attentionState: { "risk:1": { lifecycle: "ACKNOWLEDGED", firstSeenDate: "2026-01-01", lastSeenDate: "2026-01-01" } },
+    decisions: [{ id: "d1", projectId: "p1", title: "T", status: "made", description: "d" }],
+    actionPlanState: { actions: [], personalPlan: [] },
+    memoryEvents: [],
+    uiPreferences: { showAdvancedSettings: true, myActionItemsOnly: { attention: false, myDay: true, priorities: false }, jiraProjectScope: { mode: "ALL", projectKeys: [] } },
+    updatedAtIso: "2026-01-01T00:00:00.000Z",
+  };
+  ok("V2.15 syncedAppStateSchema", syncedAppStateSchema.safeParse(validBody).success === true, "a well-formed synced-state blob parses");
+  ok("V2.15 syncedAppStateSchema", syncedAppStateSchema.safeParse({}).success === false, "an empty body is rejected — every top-level field is required");
+  ok(
+    "V2.15 syncedAppStateSchema",
+    syncedAppStateSchema.safeParse({ ...validBody, jiraProjectScope: undefined, uiPreferences: { ...validBody.uiPreferences, jiraProjectScope: { mode: "SOMETHING_ELSE", projectKeys: [] } } }).success === false,
+    "an invalid jiraProjectScope.mode value is rejected — not just any string"
+  );
+  ok(
+    "V2.15 syncedAppStateSchema",
+    syncedAppStateSchema.safeParse({ ...validBody, decisions: "not-an-array" }).success === false,
+    "a wrong-shaped field (decisions as a string) is rejected rather than silently coerced"
+  );
+}
+
+// --- app-state-sync.ts: pure decision/merge logic (no fetch/timer involved — directly
+// testable, matching jira/http.ts's own fetchXWith dependency-injection discipline) ---
+{
+  function makeSyncedState(overrides: Partial<SyncedAppState> = {}): SyncedAppState {
+    return {
+      personalIdentity: undefined,
+      jiraWorkRelevancePolicy: {},
+      attentionState: {},
+      decisions: [],
+      actionPlanState: { actions: [], personalPlan: [] },
+      memoryEvents: [],
+      uiPreferences: { showAdvancedSettings: false, myActionItemsOnly: { attention: false, myDay: false, priorities: false }, jiraProjectScope: { mode: "ALL", projectKeys: [] } },
+      updatedAtIso: "2026-01-01T00:00:00.000Z",
+      ...overrides,
+    };
+  }
+  function baseStoreState(patch: Partial<StoreState> = {}): StoreState {
+    return { ...parseStoredState("{}"), ...patch };
+  }
+  function makeDecision(id: string, extra: Partial<Decision> = {}): Decision {
+    return { id, projectId: "p1", title: `Decision ${id}`, status: "made", description: "d", ...extra };
+  }
+  function makeAction(id: string): Action {
+    return { id, title: `Action ${id}`, why: "why", status: "open", estimateMinutes: 15, createdAt: "2026-01-01" };
+  }
+  function makePlanItem(id: string): PersonalPlanItem {
+    return { id, sourceType: "attention", sourceId: `src-${id}`, priority: 0, position: 0, plannedDate: "2026-01-01", status: "planned", estimatedMinutes: 15, addedAt: "2026-01-01T00:00:00.000Z" };
+  }
+
+  // extractSyncedAppState — pulls exactly the seven synced fields, untouched.
+  {
+    const state = baseStoreState({
+      personalIdentity: { id: "id1", displayName: "Alice" },
+      jiraWorkRelevancePolicy: { "In Progress": "ACTIONABLE" },
+      attentionState: { "risk:1": { lifecycle: "ACKNOWLEDGED", firstSeenDate: "2026-01-01", lastSeenDate: "2026-01-02" } },
+      data: { ...emptyData(), decisions: [makeDecision("d1")], actions: [makeAction("a1")] },
+      personalPlan: [makePlanItem("p1")],
+      memoryEvents: [{ id: "m1", date: "2026-01-01", kind: "DECISION_MADE", title: "t", impact: "i", evidence: [] }],
+      showAdvancedSettings: true,
+      myActionItemsOnly: { attention: true, myDay: false, priorities: true },
+      jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC"] },
+    });
+    const extracted = extractSyncedAppState(state, "2026-02-01T00:00:00.000Z");
+    ok("V2.15 extractSyncedAppState", extracted.personalIdentity?.id === "id1", "personalIdentity carried through");
+    ok("V2.15 extractSyncedAppState", extracted.decisions.length === 1 && extracted.decisions[0].id === "d1", "decisions pulled from data.decisions");
+    ok(
+      "V2.15 extractSyncedAppState",
+      extracted.actionPlanState.actions.length === 1 && extracted.actionPlanState.actions[0].id === "a1" && extracted.actionPlanState.personalPlan.length === 1 && extracted.actionPlanState.personalPlan[0].id === "p1",
+      "actionPlanState bundles data.actions (Action Plan page) and personalPlan (Focus Session/Close Day) together"
+    );
+    ok("V2.15 extractSyncedAppState", extracted.memoryEvents.length === 1 && extracted.memoryEvents[0].id === "m1", "memoryEvents carried through");
+    ok(
+      "V2.15 extractSyncedAppState",
+      extracted.uiPreferences.showAdvancedSettings === true && extracted.uiPreferences.myActionItemsOnly.attention === true && extracted.uiPreferences.jiraProjectScope.mode === "FOCUSED",
+      "uiPreferences bundles the three V2.11-V2.14 preference fields together"
+    );
+    ok("V2.15 extractSyncedAppState", extracted.updatedAtIso === "2026-02-01T00:00:00.000Z", "updatedAtIso is exactly what the caller supplied — this function never invents a timestamp");
+  }
+
+  // looksUnused — the case-B heuristic.
+  {
+    ok("V2.15 looksUnused", looksUnused(baseStoreState()) === true, "a pristine, never-touched local install looks unused");
+    ok("V2.15 looksUnused", looksUnused(baseStoreState({ data: { ...emptyData(), decisions: [makeDecision("d1")] } })) === false, "a single logged decision disqualifies the 'unused' heuristic");
+    ok(
+      "V2.15 looksUnused",
+      looksUnused(baseStoreState({ attentionState: { x: { lifecycle: "ACKNOWLEDGED", firstSeenDate: "2026-01-01", lastSeenDate: "2026-01-01" } } })) === false,
+      "a real attention-lifecycle transition disqualifies 'unused'"
+    );
+    ok("V2.15 looksUnused", looksUnused(baseStoreState({ personalPlan: [makePlanItem("p1")] })) === false, "real Action Plan/Close Day planning activity disqualifies 'unused'");
+  }
+
+  // mergeSyncedAppState — record collections union by id (never drops a not-yet-synced local
+  // record); Records (attentionState/policy map) union with server winning per shared key;
+  // scalar preference blocks take the server's whole value (single-blob-timestamp honesty
+  // limit — see the function's own comment).
+  {
+    const local = makeSyncedState({
+      personalIdentity: { id: "local-id", displayName: "Local Name" },
+      jiraWorkRelevancePolicy: { "Local Status": "OBSERVE", "Shared Status": "WAITING" },
+      attentionState: {
+        "local-only": { lifecycle: "NEW", firstSeenDate: "2026-01-01", lastSeenDate: "2026-01-01" },
+        shared: { lifecycle: "ACKNOWLEDGED", firstSeenDate: "2026-01-01", lastSeenDate: "2026-01-01" },
+      },
+      decisions: [makeDecision("local-only-d"), makeDecision("shared-d")],
+      actionPlanState: { actions: [makeAction("local-only-a")], personalPlan: [makePlanItem("local-only-p")] },
+      memoryEvents: [{ id: "local-only-m", date: "2026-01-01", kind: "DECISION_MADE", title: "local", impact: "i", evidence: [] }],
+      updatedAtIso: "2026-01-01T00:00:00.000Z",
+    });
+    const server = makeSyncedState({
+      personalIdentity: { id: "server-id", displayName: "Server Name" },
+      jiraWorkRelevancePolicy: { "Server Status": "COMPLETED", "Shared Status": "ACTIONABLE" },
+      attentionState: {
+        "server-only": { lifecycle: "NEW", firstSeenDate: "2026-02-01", lastSeenDate: "2026-02-01" },
+        shared: { lifecycle: "RESOLVED", firstSeenDate: "2026-01-01", lastSeenDate: "2026-02-01" },
+      },
+      decisions: [makeDecision("server-only-d"), makeDecision("shared-d", { title: "Updated on server" })],
+      actionPlanState: { actions: [makeAction("server-only-a")], personalPlan: [makePlanItem("server-only-p")] },
+      memoryEvents: [{ id: "server-only-m", date: "2026-02-01", kind: "DECISION_MADE", title: "server", impact: "i", evidence: [] }],
+      uiPreferences: { showAdvancedSettings: true, myActionItemsOnly: { attention: true, myDay: true, priorities: true }, jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC"] } },
+      updatedAtIso: "2026-02-01T00:00:00.000Z",
+    });
+
+    const merged = mergeSyncedAppState(local, server);
+
+    ok("V2.15 mergeSyncedAppState", merged.personalIdentity?.id === "server-id", "identity: server's whole value wins (single-blob timestamp — see function comment)");
+    ok(
+      "V2.15 mergeSyncedAppState",
+      merged.jiraWorkRelevancePolicy["Local Status"] === "OBSERVE" && merged.jiraWorkRelevancePolicy["Server Status"] === "COMPLETED" && merged.jiraWorkRelevancePolicy["Shared Status"] === "ACTIONABLE",
+      "policy map: local-only and server-only keys both survive; a key present on both sides takes the server's value"
+    );
+    ok(
+      "V2.15 mergeSyncedAppState",
+      "local-only" in merged.attentionState && "server-only" in merged.attentionState && merged.attentionState["shared"].lifecycle === "RESOLVED",
+      "attentionState: same union-with-server-winning-on-conflict rule as the policy map"
+    );
+    const decisionIds = merged.decisions
+      .map((d) => d.id)
+      .sort()
+      .join(",");
+    ok("V2.15 mergeSyncedAppState", decisionIds === "local-only-d,server-only-d,shared-d", "decisions: id-union — a locally-added-but-not-yet-synced decision is never dropped just because the server's overall blob is newer");
+    ok("V2.15 mergeSyncedAppState", merged.decisions.find((d) => d.id === "shared-d")?.title === "Updated on server", "decisions: a shared id takes the server's (newer) version, never the stale local one");
+    ok(
+      "V2.15 mergeSyncedAppState",
+      merged.actionPlanState.actions
+        .map((a) => a.id)
+        .sort()
+        .join(",") === "local-only-a,server-only-a",
+      "actionPlanState.actions: same id-union rule"
+    );
+    ok(
+      "V2.15 mergeSyncedAppState",
+      merged.actionPlanState.personalPlan
+        .map((p) => p.id)
+        .sort()
+        .join(",") === "local-only-p,server-only-p",
+      "actionPlanState.personalPlan: same id-union rule"
+    );
+    ok(
+      "V2.15 mergeSyncedAppState",
+      merged.memoryEvents
+        .map((m) => m.id)
+        .sort()
+        .join(",") === "local-only-m,server-only-m",
+      "memoryEvents: same id-union rule"
+    );
+    ok(
+      "V2.15 mergeSyncedAppState",
+      merged.uiPreferences.showAdvancedSettings === true && merged.uiPreferences.jiraProjectScope.mode === "FOCUSED",
+      "uiPreferences: server's whole preference block wins — a genuinely single toggle blob with no finer-grained freshness signal available"
+    );
+    ok("V2.15 mergeSyncedAppState", merged.updatedAtIso === server.updatedAtIso, "the merge result carries the server's updatedAtIso forward");
+  }
+
+  // decideInitialSync — the full on-load decision tree (Task 3 §2's three cases + Task 4's
+  // migration-safety scenario, all pure and directly testable).
+  {
+    const localRich = baseStoreState({ data: { ...emptyData(), decisions: [makeDecision("local-d")] } });
+    const localFresh = baseStoreState();
+    const localRichSlice = extractSyncedAppState(localRich, "2026-01-01T00:00:00.000Z");
+    const localFreshSlice = extractSyncedAppState(localFresh, "2026-01-01T00:00:00.000Z");
+
+    // Task 4 — an install with real pre-existing local data (attentionState/decisions from a
+    // pre-V2.15 version) must become the server baseline the first time V2.15 ships and this
+    // device loads before any server state exists — never be silently discarded or ignored.
+    const d1 = decideInitialSync(localRichSlice, localRich, null, undefined);
+    ok(
+      "V2.15 decideInitialSync (Task 4 migration safety)",
+      d1.kind === "push-as-baseline",
+      "server has no state yet -> local (including its real, pre-existing decisions) becomes the baseline — the exact scenario Task 4 requires a dedicated test for"
+    );
+
+    const serverState = makeSyncedState({ decisions: [makeDecision("server-d")], updatedAtIso: "2026-03-01T00:00:00.000Z" });
+
+    const d2 = decideInitialSync(localFreshSlice, localFresh, serverState, undefined);
+    ok("V2.15 decideInitialSync", d2.kind === "adopt-server", "a never-meaningfully-used local install adopts the server's real copy wholesale (case B)");
+
+    const d3 = decideInitialSync(localRichSlice, localRich, serverState, "2026-01-01T00:00:00.000Z");
+    ok(
+      "V2.15 decideInitialSync",
+      d3.kind === "merge" && d3.merged.decisions.some((dc) => dc.id === "local-d") && d3.merged.decisions.some((dc) => dc.id === "server-d"),
+      "both sides have real content and the server is newer than this device's last known sync point -> a field-level merge (case C), never a blind overwrite that would drop the local-only decision"
+    );
+
+    const d4 = decideInitialSync(localRichSlice, localRich, serverState, "2026-05-01T00:00:00.000Z");
+    ok(
+      "V2.15 decideInitialSync",
+      d4.kind === "push-local-forward",
+      "this device's last known sync point is already at least as new as the server's current blob -> local is pushed forward rather than pulling something not actually newer (the fourth, implicit case)"
+    );
+  }
+}
+
+// --- state/route.ts wiring (static source checks — the route transitively imports
+// "server-only" via app-state-store.ts, so it can never be imported into this offline test
+// process; same reasoning as jira/sync/route.ts's own V2.13/V2.15 wiring checks above) ---
+{
+  const repoRoot = path.resolve(process.cwd());
+  const stateRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/state/route.ts"), "utf8");
+  ok("V2.15 state route wiring", /checkAppStateAuth/.test(stateRouteSrc), "the route delegates auth to the shared, directly-tested checkAppStateAuth, never a second inline implementation");
+  ok("V2.15 state route wiring", /createAppStateStore/.test(stateRouteSrc), "the route wires the real KV-backed store, not the in-memory test fake");
+  ok("V2.15 state route wiring", /isAppStateStoreConfigured/.test(stateRouteSrc), "the route also checks KV configuration, not just the secret");
+  ok("V2.15 state route wiring", /syncedAppStateSchema/.test(stateRouteSrc), "POST validates the request body's top-level shape via the shared schema before writing it to KV");
+  ok("V2.15 state route wiring", /export async function GET/.test(stateRouteSrc) && /export async function POST/.test(stateRouteSrc), "both GET and POST are exported and (per the auth check above) both require the same Authorization header");
+}
+
+// --- Secret hygiene (Definition of Done: APP_STATE_SECRET must never reach the client bundle
+// via a NEXT_PUBLIC_* env var, and device-pairing.ts — the one client module that touches this
+// secret — must never read it from process.env; the real "grep the built .next output"
+// verification per the dev prompt's own instruction is a separate, manual `npm run build` step,
+// not part of this offline suite, matching this app's own V2.10 Slack-webhook precedent) ---
+{
+  const repoRoot = path.resolve(process.cwd());
+  function walkTsFiles(dir: string, out: string[] = []): string[] {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name === ".next" || entry.name === ".git") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walkTsFiles(full, out);
+      else if (/\.(ts|tsx)$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  }
+  const srcFiles = walkTsFiles(path.join(repoRoot, "src"));
+  const leaked = srcFiles.filter((f) => /NEXT_PUBLIC[_A-Z]*APP_STATE_SECRET|APP_STATE_SECRET[_A-Z]*NEXT_PUBLIC/.test(fs.readFileSync(f, "utf8")));
+  ok("V2.15 secret hygiene", leaked.length === 0, "APP_STATE_SECRET is never wired through a NEXT_PUBLIC_* env var anywhere in source — the only client-side path is device-pairing.ts's localStorage pairing screen");
+
+  const pairingSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/device-pairing.ts"), "utf8");
+  ok("V2.15 secret hygiene", !/process\.env/.test(pairingSrc), "device-pairing.ts never reads any server env var directly — the paired secret only ever comes from this device's own localStorage, pasted once via the Data & Settings pairing screen");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

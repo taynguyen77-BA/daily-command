@@ -1485,4 +1485,13 @@ export interface ArtifactRecord extends ArtifactDraft {
   editedText?: string;
 }
 
+// ===== V2.14 §4 — "My action items only" per-page toggle =====
+// Moved here (from store.ts, where it was originally defined) in V2.15 so app-state.ts (the
+// cross-device sync contract) can reference it without an import cycle with store.ts.
+export interface MyActionItemsOnlyByPage {
+  attention: boolean;
+  myDay: boolean;
+  priorities: boolean;
+}
+
 export const DATA_SCHEMA_VERSION = 5;

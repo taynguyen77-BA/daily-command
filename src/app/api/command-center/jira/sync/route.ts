@@ -19,6 +19,7 @@ import {
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
+import { isSyncRequestAuthorized } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
@@ -42,26 +43,30 @@ const syncRequestSchema = z.object({
 
 /**
  * V2.10 §4 — automated cron requests (see vercel.json / .github/workflows/sync.yml) carry
- * `Authorization: Bearer <CRON_SECRET>`. When CRON_SECRET is configured, a request without a
- * matching header is rejected; when it isn't configured, this route stays exactly as open as
- * it was before this change — same "safe when unconfigured" contract as every other env var
- * here. Note: the in-app "Sync Now" button (Data & Settings) calls this same route from the
- * browser with no such header — configuring CRON_SECRET is an explicit operator trade-off
- * that hardens the automated path at the cost of that manual button (the browser cannot
- * safely hold a server secret) until it's called with the header some other way.
+ * `Authorization: Bearer <CRON_SECRET>`. When neither CRON_SECRET nor APP_STATE_SECRET is
+ * configured, this route stays exactly as open as it was before V2.10 — same "safe when
+ * unconfigured" contract as every other env var here.
+ *
+ * V2.15 §2 — fixes the regression this introduced: CRON_SECRET alone made the in-app "Sync
+ * Now" button 401 (a browser can never safely hold CRON_SECRET). This now also accepts
+ * `Authorization: Bearer <APP_STATE_SECRET>` — the same paired secret the browser holds for
+ * Cross-Device Sync (see device-pairing.ts) — so a paired browser's manual Sync Now works
+ * even while CRON_SECRET locks down the unattended path. The two secrets are never merged
+ * into one trust level (see sync-auth.ts's own comment); this function just accepts either.
  */
-function isAuthorizedCronRequest(req: Request): boolean {
-  const cronSecret = process.env.CRON_SECRET;
-  if (!cronSecret) return true;
-  return req.headers.get("authorization") === `Bearer ${cronSecret}`;
+function isAuthorizedSyncRequest(req: Request): boolean {
+  return isSyncRequestAuthorized(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
 }
 
 export async function POST(req: Request) {
-  if (!isAuthorizedCronRequest(req)) {
+  if (!isAuthorizedSyncRequest(req)) {
+    const appStateSecretConfigured = !!process.env.APP_STATE_SECRET;
     return NextResponse.json(
       {
         ok: false,
-        error: "This server requires a CRON_SECRET header that the browser cannot send. Sync Now is disabled while CRON_SECRET is configured — call this route via the scheduled cron or GitHub Action instead, or unset CRON_SECRET to restore the button.",
+        error: appStateSecretConfigured
+          ? "This device isn't paired for Cross-Device Sync, so it can't authenticate a manual sync while CRON_SECRET is configured. Pair this device in Data & Settings."
+          : "Manual sync requires pairing this device — see Data & Settings. (CRON_SECRET is configured on this deployment, and APP_STATE_SECRET — required to pair a browser — is not.)",
         errorKind: "cron-unauthorized",
       },
       { status: 401 }

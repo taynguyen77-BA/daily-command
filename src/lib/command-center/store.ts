@@ -46,6 +46,7 @@ import type {
   JiraWorkRelevancePolicyMap,
   MemoryEvent,
   MentionEvent,
+  MyActionItemsOnlyByPage,
   PersonalFocusCandidate,
   PersonalIdentity,
   PersonalPlanItem,
@@ -57,6 +58,8 @@ import type {
 } from "./types";
 import { DATA_SCHEMA_VERSION, emptyData } from "./types";
 import type { ImportResult } from "./import";
+import type { SyncedAppState } from "./app-state";
+export type { MyActionItemsOnlyByPage };
 
 const STORAGE_KEY = "command-center:v1";
 const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for trend/pattern/weekly-review, bounded
@@ -144,13 +147,13 @@ export interface StoreState {
   // above. Defaults to false (Everything) on every page for a first-time user — never a
   // surprising silent-hide default; see setMyActionItemsOnly() below.
   myActionItemsOnly: MyActionItemsOnlyByPage;
-}
-
-// V2.14 §4 — one boolean per page this toggle appears on.
-export interface MyActionItemsOnlyByPage {
-  attention: boolean;
-  myDay: boolean;
-  priorities: boolean;
+  // V2.15 §3 — local-only bookkeeping (never sent to the server, never part of
+  // SyncedAppState itself): the `updatedAtIso` of the synced-app-state blob this device last
+  // confirmed matches the server (either just pulled, or just pushed). Used purely to decide,
+  // on the next load, whether the server has moved on since this device last knew about it —
+  // see app-state-sync.ts's decideInitialSync. undefined means this device has never
+  // completed a sync round-trip yet.
+  lastAppStateSyncIso?: string;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -185,6 +188,7 @@ function initialState(): StoreState {
     showAdvancedSettings: false,
     workItemCalibrationHistory: {},
     myActionItemsOnly: initialMyActionItemsOnly(),
+    lastAppStateSyncIso: undefined,
   };
 }
 
@@ -196,7 +200,7 @@ export function previousSnapshotOf(state: StoreState): DailySnapshot | null {
   return state.snapshotHistory[state.snapshotHistory.length - 1] ?? null;
 }
 
-function mergeById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
+export function mergeById<T extends { id: string }>(existing: T[], incoming: T[]): T[] {
   const byId = new Map(existing.map((r) => [r.id, r]));
   for (const row of incoming) byId.set(row.id, row);
   return Array.from(byId.values());
@@ -311,6 +315,7 @@ export function parseStoredState(raw: string): StoreState {
       showAdvancedSettings: parsed.showAdvancedSettings === true,
       workItemCalibrationHistory: asWorkItemCalibrationHistory(parsed.workItemCalibrationHistory),
       myActionItemsOnly: asMyActionItemsOnly(parsed.myActionItemsOnly),
+      lastAppStateSyncIso: typeof parsed.lastAppStateSyncIso === "string" ? parsed.lastAppStateSyncIso : undefined,
     };
   } catch {
     return initialState();
@@ -508,6 +513,44 @@ export class CommandCenterStore {
    *  per page — same pattern as setShowAdvancedSettings() above. */
   setMyActionItemsOnly(page: keyof MyActionItemsOnlyByPage, value: boolean) {
     this.set({ ...this.state, myActionItemsOnly: { ...this.state.myActionItemsOnly, [page]: value } });
+  }
+
+  // ===== V2.15 — Cross-Device Sync =====
+  // The actual network/merge logic lives in app-state-sync.ts (a client module, kept out of
+  // this file the same way jira-source.ts/notify-client.ts keep fetch/network logic out of
+  // it); the store only ever exposes a plain, side-effect-free way to (a) apply an
+  // already-decided synced-state blob onto local state and (b) record the bookkeeping
+  // timestamp that decision-making reads on the next load. Neither method here ever performs
+  // a network call itself.
+
+  /** Applies a synced-state blob (already decided/merged by app-state-sync.ts) onto local
+   *  state. Touches ONLY the seven synced fields (see the V2.15 dev prompt's scope decision)
+   *  — never `data.workItems`/`jiraSync`/`snapshotHistory`/etc, which stay purely local and
+   *  re-derived from Jira on every device independently. `ownerName` is kept in sync with
+   *  `personalIdentity.displayName` via the same rule setPersonalIdentity() already enforces,
+   *  rather than being set independently and risking the two diverging. */
+  applySyncedAppState(synced: SyncedAppState) {
+    this.set({
+      ...this.state,
+      personalIdentity: synced.personalIdentity,
+      ownerName: synced.personalIdentity?.displayName,
+      jiraWorkRelevancePolicy: synced.jiraWorkRelevancePolicy,
+      attentionState: synced.attentionState,
+      data: { ...this.state.data, decisions: synced.decisions, actions: synced.actionPlanState.actions },
+      personalPlan: synced.actionPlanState.personalPlan,
+      memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
+      showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
+      myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
+      jiraProjectScope: synced.uiPreferences.jiraProjectScope,
+      lastAppStateSyncIso: synced.updatedAtIso,
+    });
+  }
+
+  /** Records that this device's local synced slice is now known to match the server as of
+   *  `iso` (either just pulled from it, or just pushed to it) — the comparison basis for
+   *  app-state-sync.ts's decideInitialSync on the next load. Never touches any other field. */
+  setLastAppStateSyncIso(iso: string) {
+    this.set({ ...this.state, lastAppStateSyncIso: iso });
   }
 
   /** V2.3 §3-4, §32 — the ONLY place Focus Project Scope is ever set. Always explicit and

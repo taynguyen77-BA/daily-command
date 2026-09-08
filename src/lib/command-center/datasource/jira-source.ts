@@ -5,6 +5,7 @@
 
 import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary, MentionEvent } from "../types";
 import type { DataSourceProvider, DataSourceSyncResult } from "./types";
+import { pairedAuthHeader } from "../device-pairing";
 
 const SYNC_ENDPOINT = "/api/command-center/jira/sync";
 const STATUS_ENDPOINT = "/api/command-center/jira/status";
@@ -15,9 +16,13 @@ export class JiraDataSource implements DataSourceProvider {
 
   async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string }): Promise<DataSourceSyncResult> {
     try {
+      // V2.15 §2 — when this device is paired for Cross-Device Sync, its paired secret is
+      // also accepted by jira/sync/route.ts's POST auth gate (see sync-auth.ts), so a manual
+      // Sync Now click keeps working even when the deployment locks the route down with
+      // CRON_SECRET. Absent on an unpaired device — identical request to before this pass.
       const res = await fetch(SYNC_ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
         body: JSON.stringify(options ?? {}),
       });
       const json = (await res.json()) as {
