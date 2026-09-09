@@ -6,6 +6,7 @@ import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
+import { JIRA_ERROR_HELP } from "@/lib/command-center/jira/error-help";
 import { checkSlackNotifyStatus, sendTestSlackNotification, type SlackNotifyStatus, type SlackTestNotificationResult } from "@/lib/command-center/notify-client";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import {
@@ -647,19 +648,6 @@ const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
   warn: "text-yellow",
   bad: "text-red",
   info: "text-text3",
-};
-
-const JIRA_ERROR_HELP: Record<string, string> = {
-  "not-configured": "Set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN in the server environment.",
-  "invalid-url": "JIRA_BASE_URL is not a valid URL.",
-  "auth-failure": "Jira rejected the configured email/API token.",
-  "cron-unauthorized":
-    "CRON_SECRET is configured on this deployment (the browser can't safely hold that secret). Pair this device below under Cross-Device Sync to restore the Sync Now button, unset CRON_SECRET, or rely on the scheduled cron/GitHub Action instead.",
-  "permission-failure": "The configured Jira account lacks permission for this request.",
-  "rate-limited": "Jira's rate limit was hit — try again shortly.",
-  "network-error": "Could not reach the configured Jira base URL.",
-  "malformed-response": "Jira returned a response this app didn't recognize.",
-  unknown: "An unexpected error occurred.",
 };
 
 export default function DataSettingsPage() {

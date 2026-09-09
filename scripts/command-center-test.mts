@@ -201,6 +201,9 @@ import { isSyncRequestAuthorized } from "../src/lib/command-center/jira/sync-aut
 import { checkAppStateAuth, createInMemoryAppStateStore, isAppStateStoreConfigured, syncedAppStateSchema, type SyncedAppState } from "../src/lib/command-center/app-state";
 import { decideInitialSync, extractSyncedAppState, looksUnused, mergeSyncedAppState } from "../src/lib/command-center/app-state-sync";
 
+// V2.16 — sync-failure visibility (see the V2.16 test section near the end of this file)
+import { daysStale } from "../src/components/command-center/Header";
+
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
@@ -7426,6 +7429,72 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
   const pairingSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/device-pairing.ts"), "utf8");
   ok("V2.15 secret hygiene", !/process\.env/.test(pairingSrc), "device-pairing.ts never reads any server env var directly — the paired secret only ever comes from this device's own localStorage, pasted once via the Data & Settings pairing screen");
+}
+
+// --- V2.16 — real production incident: HSWB-1298 (assigned overnight) and WF-1083
+// (mentioned overnight) appeared on NEITHER My Day, Priorities, NOR the Attention Queue, with
+// zero error shown anywhere a user would normally look. Traced end-to-end: both tickets'
+// Work Relevance statuses ("In Progress" -> ACTIONABLE, "Awaiting Review" -> WAITING) were
+// already classified — not the V2.11-era "unclassified status" failure mode this app already
+// guards against. The real cause was upstream, at Sync ingestion: this deployment has
+// CRON_SECRET configured with no APP_STATE_SECRET to pair a browser against (see
+// sync-auth.ts/device-pairing.ts), so every client-initiated sync (manual "Sync Now" and any
+// auto-sync-on-load) had been failing with a "cron-unauthorized" 401 for a full week straight
+// — jiraSync.lastSyncCompletedAt was stuck on 2026-09-02 while lastSyncStartedAt showed a
+// same-morning retry, so nothing updated after that date ever reached local state, regardless
+// of Work Relevance/ownership/mention classification downstream. Nothing surfaced this as a
+// *standing* failure: the header's own "Sync failed" text is a few unobtrusive words, and
+// page.tsx's "Before You Trust This Data" panel actually stopped rendering entirely on a
+// failed sync (gated on lastSyncStatus === "success") instead of escalating — the opposite of
+// what a data-trust surface should do when trust is exactly what's in question.
+//
+// Fix: a prominent, impossible-to-miss banner (Header.tsx's SyncFailedBanner) that renders on
+// EVERY page (Header lives in the root layout, not one screen) for as long as
+// jiraSync.lastSyncStatus === "failed" — driven purely by that status field, so it fires for
+// ANY sync failure kind (auth, network, rate-limit, malformed response), not just this one
+// pairing gap. This generalizes the fix beyond the two specific tickets: the next time a sync
+// silently starts failing, for whatever reason, the app now says so loudly on every screen
+// instead of quietly serving stale data with nothing to indicate it's stopped updating. ---
+{
+  const repoRoot = path.resolve(process.cwd());
+
+  // Pure arithmetic behind the banner's staleness sentence — directly testable even though
+  // the component that calls it can't be rendered in this no-DOM/SSR-only test environment.
+  ok("V2.16 daysStale", daysStale(undefined) === undefined, "no lastSyncCompletedAt at all (never synced) reports undefined, not a fabricated 0/NaN day count");
+  const nowMs = new Date("2026-09-09T12:00:00.000Z").getTime();
+  ok("V2.16 daysStale", daysStale("2026-09-02T13:57:19.035Z", nowMs) === 6, "a sync completed 6 days and change before 'now' reports 6 full days stale — the exact real-incident shape (lastSyncCompletedAt stuck on 2026-09-02 while HSWB-1298/WF-1083 were updated on 2026-09-08)");
+  ok("V2.16 daysStale", daysStale("2026-09-09T06:00:00.000Z", nowMs) === 0, "a sync completed earlier the same day reports 0 days stale, not 1 (no off-by-one from truncation)");
+  ok("V2.16 daysStale", daysStale("2026-09-10T00:00:00.000Z", nowMs) === undefined, "a timestamp in the future (clock skew) reports undefined rather than a nonsensical negative day count");
+
+  // The banner itself can't be rendered here (useCommandCenter's useSyncExternalStore takes
+  // the fixed getServerSnapshot branch outside a real browser — see daysStale's own export
+  // comment above) — so its wiring is verified the same way this suite already verifies other
+  // route/UI wiring facts it can't execute directly (e.g. the V2.15 state-route/secret-hygiene
+  // checks above): reading the real source and asserting the specific lines that make the fix
+  // real are actually present, not just a same-shaped decoy.
+  const headerSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/Header.tsx"), "utf8");
+  ok("V2.16 Header wiring", /function SyncFailedBanner/.test(headerSrc), "Header.tsx defines the sync-failed banner");
+  ok("V2.16 Header wiring", /state\.jiraSync\.lastSyncStatus !== "failed"\) return null/.test(headerSrc), "the banner's only gate is lastSyncStatus === 'failed' — no dependency on WHY it failed, so it fires for every failure kind, not just cron-unauthorized");
+  ok("V2.16 Header wiring", /<SyncFailedBanner \/>/.test(headerSrc) && /export function Header/.test(headerSrc), "the banner is rendered unconditionally inside the exported Header component");
+  ok("V2.16 Header wiring", /JIRA_ERROR_HELP\[state\.jiraSync\.lastSyncErrorKind\]/.test(headerSrc), "the banner explains the failure using the same JIRA_ERROR_HELP text Data & Settings shows, not a second/divergent explanation");
+
+  const layoutSrc = fs.readFileSync(path.join(repoRoot, "src/app/layout.tsx"), "utf8");
+  ok("V2.16 Header wiring", /<Header \/>/.test(layoutSrc), "Header (and therefore the banner) is mounted once in the root layout, so it appears on My Day, Priorities, and Attention Queue alike — not copy-pasted per page, which would risk one page being missed");
+
+  // JIRA_ERROR_HELP itself must be the single shared source Data & Settings already had —
+  // moved, not duplicated, so the two surfaces can never drift into disagreeing explanations.
+  const errorHelpSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/jira/error-help.ts"), "utf8");
+  ok("V2.16 error-help wiring", /cron-unauthorized/.test(errorHelpSrc) && /export const JIRA_ERROR_HELP/.test(errorHelpSrc), "the shared JIRA_ERROR_HELP module carries the real explanations, including cron-unauthorized (the actual cause of this incident)");
+  const dataSettingsSrc2 = fs.readFileSync(path.join(repoRoot, "src/app/data-settings/page.tsx"), "utf8");
+  ok("V2.16 error-help wiring", /from "@\/lib\/command-center\/jira\/error-help"/.test(dataSettingsSrc2), "Data & Settings imports JIRA_ERROR_HELP from the shared module");
+  ok("V2.16 error-help wiring", !/const JIRA_ERROR_HELP/.test(dataSettingsSrc2), "Data & Settings no longer carries its own duplicate copy of the map");
+
+  // The trust panel disappearing entirely on a failed sync (documented above as part of why
+  // this went unnoticed) is a real, separate finding — noted here as a currently-accepted
+  // pre-existing behavior (not silently reversed by this pass) so a future change to that
+  // gate is a deliberate decision, not an accidental side effect of this fix.
+  const pageSrc = fs.readFileSync(path.join(repoRoot, "src/app/page.tsx"), "utf8");
+  ok("V2.16 known pre-existing behavior", /jiraSync\.lastSyncStatus === "success" &&/.test(pageSrc), "documents that 'Before You Trust This Data' still only renders on a successful sync today — the new Header banner is what now covers the failed-sync case on every page instead");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
