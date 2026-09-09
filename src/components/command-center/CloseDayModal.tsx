@@ -10,6 +10,8 @@ import { useCommandCenter } from "./use-command-center";
 import { getAIProvider } from "@/lib/command-center/ai";
 import type { EodEntry } from "@/lib/command-center/store";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
+import { dailyReportToMarkdown, summarizeDailyReport } from "@/lib/command-center/daily-report";
+import type { DailyReportSnapshot } from "@/lib/command-center/types";
 import { AiProviderIndicator, LoopHealthBadge, TrustLabel } from "./ui";
 
 export function CloseDayModal({ onClose }: { onClose: () => void }) {
@@ -18,6 +20,22 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
   const [entryMode, setEntryMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  // V2.17 Task 2 — Daily Report: an immutable point-in-time snapshot of today's memoryEvents
+  // (store.ts's generateDailyReport). Seeded from state.dailyReports in case today's report
+  // was already generated earlier this session — never silently regenerated on remount.
+  const [dailyReport, setDailyReport] = useState<DailyReportSnapshot | null>(state.dailyReports[today] ?? null);
+  const [reportCopied, setReportCopied] = useState(false);
+
+  function generateDailyReport() {
+    setDailyReport(store.generateDailyReport(today));
+    setReportCopied(false);
+  }
+
+  async function copyDailyReportMarkdown() {
+    if (!dailyReport) return;
+    await navigator.clipboard.writeText(dailyReportToMarkdown(dailyReport));
+    setReportCopied(true);
+  }
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -219,6 +237,37 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
               <p className="mt-1 text-xs text-text3">{scorecard.controlEffectiveness}</p>
             </section>
           )}
+
+          <section className="rounded-md border border-border bg-surface2 p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <TrustLabel kind="calculated" />
+                <span className="text-xs font-semibold uppercase tracking-wide text-text3">Daily Report</span>
+              </div>
+              {!dailyReport ? (
+                <button onClick={generateDailyReport} className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent2">
+                  Generate Daily Report
+                </button>
+              ) : (
+                <button onClick={copyDailyReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+                  {reportCopied ? "Copied ✓" : "Copy as Markdown"}
+                </button>
+              )}
+            </div>
+            {!dailyReport ? (
+              <p className="text-xs text-text3">A point-in-time snapshot of today&apos;s completed work and decisions — stays stable even after later syncs change live ticket data.</p>
+            ) : (
+              (() => {
+                const summary = summarizeDailyReport(dailyReport);
+                return (
+                  <div className="space-y-1 text-xs text-text2">
+                    <p>{summary.completed.length} completed · {summary.decisions.length} decision(s) · {summary.outcomes.length} outcome(s) recorded.</p>
+                    {summary.completed.length === 0 && summary.decisions.length === 0 && <p className="text-text3">Nothing recorded yet today.</p>}
+                  </div>
+                );
+              })()
+            )}
+          </section>
         </div>
 
         {!entry ? (

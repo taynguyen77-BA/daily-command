@@ -46,8 +46,10 @@ export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: Pers
   return (
     <Panel className="p-4">
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <FocusCategoryBadge category={candidate.category} />
+        {/* V2.17 Task 3 §2 — relation leads, matching every other My Day/Attention
+            Queue/Priorities card. */}
         <RelationBadge relation={candidate.relation} />
+        <FocusCategoryBadge category={candidate.category} />
         {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
         {candidate.ticketKey && <TicketLink ticketKey={candidate.ticketKey} url={candidate.ticketUrl} className="text-xs text-text3" />}
       </div>

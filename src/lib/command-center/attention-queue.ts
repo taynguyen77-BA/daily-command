@@ -62,6 +62,14 @@ interface RawItem {
   sourceRef?: AttentionSourceRef;
   relatedDecisionId?: string;
   ownershipExplicit?: boolean;
+  // V2.17 §1a point 5 — set only for a MENTION raw item whose underlying ticket has resolved
+  // to COMPLETED/EXCLUDED. Forces the lifecycle transition below straight to RESOLVED (an old,
+  // unacknowledged mention on a now-done ticket implies no more action) while still keeping
+  // the item present in `raw`/`items` — deliberately NOT simply omitted from `raw`, since that
+  // would make it vanish from the Attention Queue entirely, contradicting §1b's "a MENTION
+  // always surfaces" bypass (proactive.ts's gate no longer excludes MENTION by ticket status;
+  // this is the one narrower exception, and it acts via lifecycle, not via exclusion).
+  forceResolved?: boolean;
 }
 
 export interface AttentionQueueInputs {
@@ -82,6 +90,12 @@ export interface AttentionQueueInputs {
   mentionEvents?: MentionEvent[];
   newAssignments?: NewAssignmentEvent[];
   workItems?: WorkItem[];
+  // V2.17 §1a point 5 — workItem ids whose Work Relevance has resolved to COMPLETED or
+  // EXCLUDED, so a still-open MENTION tied to one of them can auto-resolve (see RawItem.
+  // forceResolved above). Optional/additive: omitting it (every pre-existing caller) never
+  // force-resolves anything, matching pre-V2.17 behavior exactly. Deliberately NOT threaded
+  // to ASSIGNMENT — see this task's own scope note, that's V2.12 Task 1's territory.
+  completedOrExcludedWorkItemIds?: ReadonlySet<string>;
 }
 
 /** V1.5 §25 — if a RISK/DEPENDENCY item's underlying work items are also related to a
@@ -218,31 +232,31 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
     });
   }
 
-  // V2.10 §2 — MENTION: one attention item per ISSUE, not per comment (an issue mentioning
-  // the configured account twice must still dedupe to one item, via the same
-  // `${category}:${slug}` identity scheme every other category already relies on).
+  // V2.17 §1a — MENTION: one attention item per COMMENT, not per issue (see MentionEvent.
+  // commentId's own comment for the full "why" — collapsing to one record per issue meant a
+  // resolved mention could never truly stay resolved, and a genuinely new comment on an
+  // already-handled issue silently overwrote the old one instead of surfacing as new). Each
+  // comment now gets its own independent `${category}:${issueKey}:${commentId}` identity and
+  // lifecycle. Display-layer grouping (folding several still-open comments on one ticket into
+  // a single card) is a presentation concern handled by mention-grouping.ts, not here — the
+  // underlying tracking stays comment-granular.
   const workItemByKey = new Map((inputs.workItems ?? []).map((w) => [w.key, w]));
-  const mentionsByIssue = new Map<string, MentionEvent[]>();
   for (const m of inputs.mentionEvents ?? []) {
-    const list = mentionsByIssue.get(m.issueKey) ?? [];
-    list.push(m);
-    mentionsByIssue.set(m.issueKey, list);
-  }
-  for (const [issueKey, mentions] of Array.from(mentionsByIssue.entries())) {
-    const workItem = workItemByKey.get(issueKey);
-    // Most recent mention first — an issue with several mentions still leads with the
-    // freshest one, the rest kept as supporting evidence.
-    const sorted = [...mentions].sort((a, b) => (a.mentionedAt < b.mentionedAt ? 1 : -1));
-    const latest = sorted[0];
+    const workItem = workItemByKey.get(m.issueKey);
+    // V2.17 §1a point 5 — an old, unacknowledged mention on a ticket that has since resolved
+    // to COMPLETED/EXCLUDED implies no more action; force it straight to RESOLVED (via the
+    // lifecycle step below) rather than let it linger as if still open. Never applied to
+    // ASSIGNMENT (see this task's own scope note below).
+    const forceResolved = !!(workItem && inputs.completedOrExcludedWorkItemIds?.has(workItem.id));
     out.push({
-      id: `MENTION:${slug(issueKey)}`,
+      id: `MENTION:${slug(m.issueKey)}:${slug(m.commentId)}`,
       category: "MENTION",
       severity: "HIGH",
-      what: `Mentioned in a comment on ${issueKey}`,
-      why: latest.commentAuthor ? `${latest.commentAuthor} mentioned you in a comment.` : "You were mentioned in a comment.",
-      impact: workItem?.title ?? issueKey,
+      what: `Mentioned in a comment on ${m.issueKey}`,
+      why: m.commentAuthor ? `${m.commentAuthor} mentioned you in a comment.` : "You were mentioned in a comment.",
+      impact: workItem?.title ?? m.issueKey,
       nowWhat: "Read the comment and respond if needed.",
-      evidence: sorted.map((m) => (m.commentAuthor ? `${m.commentAuthor}: "${m.excerpt}"` : `"${m.excerpt}"`)),
+      evidence: [m.commentAuthor ? `${m.commentAuthor}: "${m.excerpt}"` : `"${m.excerpt}"`],
       sourceRef: workItem ? { type: "workItem", id: workItem.id } : undefined,
       // §7 — a mention IS an explicit personal signal by construction (mentionEvents only
       // ever cover the configured identity's own accountId — see jira/mentions.ts). Wired
@@ -250,6 +264,7 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
       // categories use (personal-focus.ts resolveOwner), which has no notion of "mentioned in
       // a comment" to resolve in the first place.
       ownershipExplicit: true,
+      forceResolved,
     });
   }
 
@@ -295,7 +310,18 @@ export function buildAttentionQueue(
     const prior = attentionState[r.id];
     let state: AttentionItemState;
 
-    if (!prior) {
+    if (r.forceResolved) {
+      // V2.17 §1a point 5 — idempotent terminal state, bypassing the normal NEW/ACTIVE/
+      // ACKNOWLEDGED/re-escalation chain entirely: as long as the ticket stays COMPLETED/
+      // EXCLUDED, this stays RESOLVED no matter how many syncs re-produce the raw item (never
+      // flips to REOPENED just because `raw` still contains it — unlike the manually-resolved
+      // path below, this isn't "the user asked to stop being bothered," it's "there is
+      // structurally nothing left to do"). If the ticket's relevance later changes away from
+      // COMPLETED/EXCLUDED, `forceResolved` stops being set and normal transition logic
+      // resumes — a still-open mention on a since-un-completed ticket correctly reappears via
+      // the ordinary "reappeared after RESOLVED" -> REOPENED path.
+      state = prior?.lifecycle === "RESOLVED" ? { ...prior, lastSeenDate: today, lastSeverity: r.severity } : { lifecycle: "RESOLVED", firstSeenDate: prior?.firstSeenDate ?? today, lastSeenDate: today, lastSeverity: r.severity };
+    } else if (!prior) {
       state = { lifecycle: "NEW", firstSeenDate: today, lastSeenDate: today, lastSeverity: r.severity };
     } else if (prior.lifecycle === "RESOLVED") {
       // `resolvedManually` (set only by the user's Resolve action, never by the

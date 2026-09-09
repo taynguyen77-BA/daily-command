@@ -847,6 +847,29 @@ export interface MemoryEvent {
   // title/text — left undefined (rendered as Global/Unscoped) when no such FK exists, e.g.
   // portfolio-wide drift or personal-plan events. See jira/project-scope.ts.
   projectId?: string;
+  // V2.17 Task 2 — captured at the point each event is recorded (store.ts), never resolved
+  // later from live WorkItem/Project/Client state: a Daily/Weekly Report about a past day must
+  // reflect what was true THEN (ticket title, project/client name as they stood that day), not
+  // whatever the ticket looks like whenever the report happens to be read. Left undefined
+  // exactly when the underlying fact doesn't exist for that event (e.g. no related work item),
+  // never guessed.
+  ticketKey?: string;
+  projectName?: string;
+  clientName?: string;
+  outcomeNote?: string;
+}
+
+/** V2.17 Task 2 — an immutable, point-in-time Daily Report: exactly the subset of that day's
+ *  `memoryEvents` captured at generation time, never re-derived from current/live state
+ *  afterward. `events` is a plain copy (not a reference into the live, still-growing
+ *  memoryEvents array) so a later mutation of memoryEvents elsewhere can never retroactively
+ *  change a report about a day that has already passed — same point-in-time discipline as
+ *  `snapshotHistory` entries. Display/markdown-export logic (daily-report.ts) groups/formats
+ *  these events at render time; that's a pure, read-only pass over already-frozen data. */
+export interface DailyReportSnapshot {
+  date: string;
+  generatedAt: string;
+  events: MemoryEvent[];
 }
 
 /** V1.4 §32-33 — a single labeled Jira changelog field change. Never used to infer actual
@@ -1178,9 +1201,19 @@ export interface PersonalIdentity {
  *  jira/mentions.ts. `excerpt` is evidence, capped at ~200 characters — never a full
  *  reproduction of the comment. Never fabricated: only ever produced from a real comment
  *  Jira returned that structurally mentions the configured account (see
- *  jira/mentions.ts's commentMentionsAccount — the JQL match alone is never trusted). */
+ *  jira/mentions.ts's commentMentionsAccount — the JQL match alone is never trusted).
+ *  V2.17 §1a — `commentId` is this mention's stable per-COMMENT identity (Jira's real comment
+ *  `id`, or a deterministic fallback when Jira omits one — see mentions.ts's
+ *  mentionCommentId), not merely the issue it's on. Before this field existed, store.ts could
+ *  only dedupe/persist mentions per-ISSUE, which meant a resolved mention could never truly
+ *  stay resolved (the same issue-level record kept getting recomputed on every sync) and a
+ *  genuinely new comment on an already-handled issue silently overwrote the old one instead of
+ *  being recognized as new. attention-queue.ts now builds one attention item per `commentId`,
+ *  not per `issueKey`, so each comment gets its own independent NEW->ACKNOWLEDGED->RESOLVED
+ *  lifecycle. */
 export interface MentionEvent {
   issueKey: string;
+  commentId: string;
   commentAuthor?: string;
   excerpt: string;
   commentUrl?: string;

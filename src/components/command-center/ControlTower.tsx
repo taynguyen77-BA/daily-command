@@ -13,7 +13,7 @@ import { buildStatusUpdateDraft } from "@/lib/command-center/communicate";
 import { formatScopeLabel } from "@/lib/command-center/jira/project-scope";
 import { useCommandCenter } from "./use-command-center";
 import { ArtifactEditor } from "./ArtifactEditor";
-import { DriftBadge, HeatBadge, Panel, TrajectoryBadge, TrustLabel } from "./ui";
+import { DriftBadge, HeatBadge, MetaPill, Panel, TrajectoryBadge, TrustLabel } from "./ui";
 
 function Tile({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -53,9 +53,7 @@ export function ControlTower({
           {/* V2.4 §16 — the current Focus Project Scope is always visible on this surface,
               not just buried in the FilterBar, so a 30-second scan also answers "what am I
               even looking at?" */}
-          <span className="rounded border border-border bg-surface2 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">
-            Scope: {formatScopeLabel(state.jiraProjectScope, state.data)}
-          </span>
+          <MetaPill>Scope: {formatScopeLabel(state.jiraProjectScope, state.data)}</MetaPill>
         </div>
         <button
           onClick={() => setCreatingUpdate(true)}

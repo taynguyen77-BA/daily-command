@@ -14,7 +14,7 @@ import { reviewStatusFor } from "@/lib/command-center/decision-radar";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
 import type { Decision, DecisionConflictAssessment, DecisionConflictCandidate, DecisionEffectivenessClass, DecisionEffectivenessResult, DecisionRadarItem } from "@/lib/command-center/types";
-import { AiProviderIndicator, AttentionSeverityBadge, ConfidenceTag, DecisionEffectivenessBadge, DecisionReviewStatusBadge, Panel, TrustLabel } from "./ui";
+import { AiProviderIndicator, AttentionSeverityBadge, ConfidenceTag, DecisionEffectivenessBadge, DecisionReviewStatusBadge, MetaPill, Panel, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 import { AskClaudeAbout } from "./AskClaudeAbout";
 import { ArtifactEditor } from "./ArtifactEditor";
@@ -95,14 +95,12 @@ export function DecisionCard({
   return (
     <Panel className="p-4">
       <div className="mb-1 flex items-center gap-2">
-        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{decision.status}</span>
+        <MetaPill>{decision.status}</MetaPill>
         {decision.date && <span className="text-xs text-text3">{decision.date}</span>}
-        {radar && radar.stalenessDays > 0 && (
-          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-text3">Unchanged {radar.stalenessDays}d</span>
-        )}
+        {radar && radar.stalenessDays > 0 && <MetaPill>Unchanged {radar.stalenessDays}d</MetaPill>}
         {radar && <AttentionSeverityBadge severity={radar.reviewUrgency === "URGENT_REVIEW" ? "HIGH" : "MEDIUM"} />}
         {(reviewStatus === "REVIEW_DUE" || reviewStatus === "REVIEW_SOON" || reviewStatus === "REVIEW_OVERDUE") && <DecisionReviewStatusBadge status={reviewStatus} />}
-        {decision.outcomeStatus && <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-text3">Outcome: {decision.outcomeStatus}</span>}
+        {decision.outcomeStatus && <MetaPill>Outcome: {decision.outcomeStatus}</MetaPill>}
       </div>
       <p className="font-display text-sm text-text">{decision.title}</p>
       {decision.decision && <p className="mt-1 text-sm text-text2">{decision.decision}</p>}

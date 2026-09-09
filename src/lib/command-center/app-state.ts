@@ -5,16 +5,19 @@
 // directly by the offline test suite and the browser bundle, matching notify-state.ts's own
 // split (pure contract vs. server-only KV wrapper) rather than duplicating that reasoning.
 //
-// Scope (see the V2.15 dev prompt's own "Scope decision" section, not repeated here): exactly
-// the seven fields below sync across devices. Everything else (raw Jira-derived work items,
-// risks, drift, dependencies, priorities, snapshotHistory, the AI response cache) stays local,
-// per device, and is re-derived fresh from Jira on every sync — see store.ts's own
-// CommandCenterData for that half of the model, which this file never touches.
+// Scope (see the V2.15 dev prompt's own "Scope decision" section, not repeated here): the
+// fields below sync across devices — the original seven, plus `dailyReports` (V2.17 Task 2
+// point 5), added on the same "user-generated content" reasoning as `decisions`. Everything
+// else (raw Jira-derived work items, risks, drift, dependencies, priorities, snapshotHistory,
+// the AI response cache) stays local, per device, and is re-derived fresh from Jira on every
+// sync — see store.ts's own CommandCenterData for that half of the model, which this file
+// never touches.
 
 import { z } from "zod";
 import type {
   Action,
   AttentionItemState,
+  DailyReportSnapshot,
   Decision,
   JiraProjectScope,
   JiraWorkRelevancePolicyMap,
@@ -40,6 +43,9 @@ export interface SyncedAppState {
     myActionItemsOnly: MyActionItemsOnlyByPage;
     jiraProjectScope: JiraProjectScope;
   };
+  // V2.17 Task 2 point 5 — user-generated content, same reasoning as `decisions` above: a
+  // Daily Report generated on one device should be visible from another, not stranded locally.
+  dailyReports: Record<string, DailyReportSnapshot>;
   updatedAtIso: string;
 }
 
@@ -111,6 +117,7 @@ export const syncedAppStateSchema = z.object({
     personalPlan: z.array(z.record(z.string(), z.unknown())),
   }),
   memoryEvents: z.array(z.record(z.string(), z.unknown())),
+  dailyReports: z.record(z.string(), z.record(z.string(), z.unknown())),
   uiPreferences: z.object({
     showAdvancedSettings: z.boolean(),
     myActionItemsOnly: z.object({ attention: z.boolean(), myDay: z.boolean(), priorities: z.boolean() }),

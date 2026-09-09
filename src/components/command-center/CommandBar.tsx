@@ -15,7 +15,7 @@ import { useCommandCenter, buildProjectOverrideView } from "./use-command-center
 import type { DerivedData } from "@/lib/command-center/selectors";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { ArtifactEditor } from "./ArtifactEditor";
-import { ConfidenceTag, Panel, TrustLabel } from "./ui";
+import { ConfidenceTag, MetaPill, Panel, TrustLabel } from "./ui";
 
 /** V2.4 §19-20, §22 — the data one Command Bar query actually answers against: either the
  *  current global scope (the default) or a one-time explicit-project override built by
@@ -248,8 +248,8 @@ export function CommandBar() {
             &quot;{lastQuery}&quot;
             {intent && intent !== "unrecognized" && (
               <>
-                <span className="ml-2 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent2">{familyForIntent(intent)}</span>
-                <span className="ml-1 rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{intent.replace(/-/g, " ")}</span>
+                <MetaPill variant="accent" className="ml-2">{familyForIntent(intent)}</MetaPill>
+                <MetaPill className="ml-1">{intent.replace(/-/g, " ")}</MetaPill>
               </>
             )}
           </p>

@@ -8,7 +8,7 @@ import { clientName } from "@/lib/command-center/selectors";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { PersonalFocusResult } from "@/lib/command-center/types";
-import { ConfidenceTag, ReasoningTraceBlock, RelationBadge, SeverityBadge, TrustLabel } from "./ui";
+import { ConfidenceTag, MetaPill, ReasoningTraceBlock, RelationBadge, SeverityBadge, TrustLabel } from "./ui";
 import { WhyNotATaskDrawer } from "./WhyNotATaskDrawer";
 import { ExecutionPathTrace } from "./ExecutionPathTrace";
 import { TicketLink } from "./TicketLink";
@@ -68,22 +68,24 @@ export function PriorityCard({
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-2 flex items-center gap-2">
-        <SeverityBadge level={result.classification} />
+        {/* V2.17 Task 3 §2 — relation ("is this mine?") leads the row, ahead of severity —
+            the most visually prominent signal on this card, per the audit's hierarchy pass. */}
         <RelationBadge relation={relation} />
-        <TrustLabel kind="calculated" />
+        <SeverityBadge level={result.classification} />
         <TicketLink ticketKey={item.key} url={item.sourceUrl} className="text-xs text-text3" />
         <span className="text-xs text-text3">·</span>
         <span className="text-xs text-text3">{clientName(data, item.clientId)}</span>
         {item.sourceType === "jira" && item.sourceUrl && (
-          <>
-            <TrustLabel kind="source" />
-            <a href={item.sourceUrl} target="_blank" rel="noreferrer" className="text-xs text-accent2 hover:underline">
-              Open in Jira
-            </a>
-          </>
+          <a href={item.sourceUrl} target="_blank" rel="noreferrer" className="text-xs text-text3 hover:text-accent2 hover:underline">
+            Open in Jira
+          </a>
         )}
-        {handled && <span className="rounded border border-green/30 bg-green/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-green">Handled</span>}
+        {handled && <MetaPill variant="success">Handled</MetaPill>}
         <span className="ml-auto text-xs font-mono text-text3">{result.score}/100</span>
+      </div>
+      <div className="mb-1 flex items-center gap-2">
+        <TrustLabel kind="calculated" />
+        {item.sourceType === "jira" && item.sourceUrl && <TrustLabel kind="source" />}
       </div>
       <h3 className="font-display text-base text-text">{item.title}</h3>
       <p className="mt-1 text-sm text-text2">{result.reasoning}</p>

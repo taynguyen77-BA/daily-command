@@ -14,7 +14,7 @@ import { evidenceForRisk } from "@/lib/command-center/evidence";
 import { projectRiskImpact } from "@/lib/command-center/impact-projection";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
 import type { ProactiveAssessment, Risk, RiskEscalation } from "@/lib/command-center/types";
-import { AiProviderIndicator, ConfidenceTag, RiskBadge, TrustLabel } from "./ui";
+import { AiProviderIndicator, ConfidenceTag, MetaPill, RiskBadge, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 
 function RiskAgingAssessment({ risk, escalation }: { risk: Risk; escalation: RiskEscalation }) {
@@ -92,13 +92,9 @@ export function RiskCard({ risk, isDemo, escalation, showAgingAssessment }: { ri
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-2 flex items-center gap-2">
         <RiskBadge level={risk.level} />
-        {risk.auto === false && (
-          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">
-            Manually logged
-          </span>
-        )}
+        {risk.auto === false && <MetaPill>Manually logged</MetaPill>}
         <ConfidenceTag confidence={risk.confidence} />
-        {escalation?.reopened && <span className="rounded border border-red/30 bg-red/15 px-1.5 py-0.5 text-[10px] text-red">Reopened</span>}
+        {escalation?.reopened && <MetaPill variant="danger">Reopened</MetaPill>}
       </div>
       <h3 className="font-display text-base text-text">{risk.title}</h3>
       <p className="mt-2 text-sm text-text2">{risk.reason}</p>

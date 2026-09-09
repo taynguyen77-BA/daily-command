@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
-import { ActionOutcomeBadge, EmptyState, Panel, SectionHeading, SeverityBadge } from "@/components/command-center/ui";
+import { ActionOutcomeBadge, EmptyState, MetaPill, Panel, SectionHeading, SeverityBadge } from "@/components/command-center/ui";
 import { buildPlan, TIME_BUDGET_LABELS, type PlanCandidate, type TimeBudget } from "@/lib/command-center/action-plan";
 import { commandCenterStore } from "@/lib/command-center/store";
 import type { ActionOutcomeStatus } from "@/lib/command-center/types";
@@ -46,11 +46,7 @@ function CandidateRow({ candidate }: { candidate: PlanCandidate }) {
           <div className="mb-1 flex items-center gap-2">
             {candidate.result && <SeverityBadge level={candidate.result.classification} />}
             <span className="text-xs text-text3">{candidate.estimateMinutes} min</span>
-            {status !== "open" && (
-              <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">
-                {status}
-              </span>
-            )}
+            {status !== "open" && <MetaPill>{status}</MetaPill>}
             {liveAction?.outcomeStatus && <ActionOutcomeBadge status={liveAction.outcomeStatus} />}
           </div>
           <p className="font-display text-sm text-text">{candidate.title}</p>

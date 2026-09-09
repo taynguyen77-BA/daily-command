@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { Communication } from "@/lib/command-center/types";
 import { useCommandCenter } from "./use-command-center";
-import { TrustLabel } from "./ui";
+import { MetaPill, TrustLabel } from "./ui";
 
 export function CommunicationCard({ comm }: { comm: Communication }) {
   const { store } = useCommandCenter();
@@ -13,10 +13,8 @@ export function CommunicationCard({ comm }: { comm: Communication }) {
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-1 flex items-center justify-between">
-        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{comm.audience}</span>
-        {comm.status !== "open" && (
-          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{comm.status}</span>
-        )}
+        <MetaPill>{comm.audience}</MetaPill>
+        {comm.status !== "open" && <MetaPill>{comm.status}</MetaPill>}
       </div>
       <p className="text-sm font-medium text-text">{comm.who}</p>
       <p className="mt-1 text-xs text-text2">

@@ -11,6 +11,7 @@
 // localStorage data into IndexedDB once, the first time a device with IndexedDB loads.
 
 import { buildDemoData } from "./demo-data";
+import { slug } from "./attention-queue";
 import { detectChanges, toSnapshot } from "./change-detection";
 import { getAIProvider } from "./ai";
 import { todayLocalIso } from "./date-utils";
@@ -42,6 +43,7 @@ import type {
   AttentionLifecycle,
   CommandCenterData,
   Communication,
+  DailyReportSnapshot,
   DailySnapshot,
   DataSourceType,
   Decision,
@@ -78,6 +80,15 @@ const MAX_PERSONAL_PLAN_ITEMS = 400; // bounded personal-plan history, same phil
 // ArtifactType values, QueryIntent values); this cap is a defensive backstop only.
 const MAX_ARTIFACTS = 30;
 const MAX_USAGE_COUNTER_KEYS = 200;
+// V2.17 §1a point 1 — mentionEvents is now keyed per-COMMENT, not per-issue (see
+// MentionEvent.commentId's own comment), so a ticket with a long comment history can
+// accumulate many more entries than before. Global cap, oldest-RESOLVED-first eviction (see
+// capMentionEvents below) — a mention the user hasn't dealt with yet is only ever dropped if
+// there's truly nothing already-resolved left to evict instead.
+const MAX_MENTION_EVENTS = 500;
+// V2.17 Task 2 — at most one entry per calendar day; ~2 years of daily reports is generous
+// headroom while still bounded, same philosophy as MAX_SNAPSHOT_HISTORY above.
+const MAX_DAILY_REPORTS = 730;
 
 export interface EodEntry {
   date: string;
@@ -161,6 +172,12 @@ export interface StoreState {
   // see app-state-sync.ts's decideInitialSync. undefined means this device has never
   // completed a sync round-trip yet.
   lastAppStateSyncIso?: string;
+  // V2.17 Task 2 — immutable, point-in-time Daily Reports, keyed by ISO date. Built once
+  // (generateDailyReport, below) from that day's already-recorded memoryEvents and never
+  // silently recomputed afterward — see DailyReportSnapshot's own comment for the full "why".
+  // Bounded like snapshotHistory (oldest evicted first), same discipline as every other
+  // history-shaped field in this file.
+  dailyReports: Record<string, DailyReportSnapshot>;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -196,6 +213,7 @@ function initialState(): StoreState {
     workItemCalibrationHistory: {},
     myActionItemsOnly: initialMyActionItemsOnly(),
     lastAppStateSyncIso: undefined,
+    dailyReports: {},
   };
 }
 
@@ -276,6 +294,65 @@ function asWorkItemCalibrationHistory(v: unknown): WorkItemCalibrationHistory {
   return out;
 }
 
+// V2.17 §1a — a pre-existing persisted MentionEvent (from before `commentId` existed) is
+// backfilled with a deterministic id derived from what it does have (issueKey+mentionedAt) —
+// never dropped outright, since that would silently lose real, possibly-unresolved mention
+// history on the very upgrade this task exists to fix. A structurally malformed entry (missing
+// even the pre-existing required fields) is dropped, same discipline as every other parsed
+// array here.
+function normalizeMentionEvents(v: unknown): MentionEvent[] {
+  if (!Array.isArray(v)) return [];
+  const out: MentionEvent[] = [];
+  for (const raw of v) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const m = raw as Partial<MentionEvent>;
+    if (typeof m.issueKey !== "string" || typeof m.excerpt !== "string" || typeof m.mentionedAt !== "string") continue;
+    out.push({
+      issueKey: m.issueKey,
+      commentId: typeof m.commentId === "string" && m.commentId.length > 0 ? m.commentId : `${m.issueKey}:legacy:${m.mentionedAt}`,
+      commentAuthor: typeof m.commentAuthor === "string" ? m.commentAuthor : undefined,
+      excerpt: m.excerpt,
+      commentUrl: typeof m.commentUrl === "string" ? m.commentUrl : undefined,
+      mentionedAt: m.mentionedAt,
+    });
+  }
+  return out;
+}
+
+// V2.17 §1a point 1 — global cap on mentionEvents, oldest-RESOLVED-first eviction: a comment
+// whose MENTION attention item has already reached RESOLVED is safe to forget (its evidence
+// stays available via memoryEvents/history where relevant); only once every resolved entry is
+// exhausted does this fall back to evicting the oldest still-open entries, so a genuinely
+// unactioned mention is the last thing ever dropped, not the first.
+export function capMentionEvents(events: MentionEvent[], attentionState: Record<string, AttentionItemState>, max: number): MentionEvent[] {
+  if (events.length <= max) return events;
+  const isResolved = (m: MentionEvent) => attentionState[`MENTION:${slug(m.issueKey)}:${slug(m.commentId)}`]?.lifecycle === "RESOLVED";
+  const byAge = (a: MentionEvent, b: MentionEvent) => (a.mentionedAt < b.mentionedAt ? -1 : a.mentionedAt > b.mentionedAt ? 1 : 0);
+  const evictionOrder = [...events.filter(isResolved).sort(byAge), ...events.filter((m) => !isResolved(m)).sort(byAge)];
+  const drop = new Set(evictionOrder.slice(0, events.length - max).map((m) => m.commentId));
+  return events.filter((m) => !drop.has(m.commentId));
+}
+
+// V2.17 Task 2 — a malformed entry (or a corrupted map) is dropped rather than trusted, same
+// discipline as every other parsed field here; a missing/invalid report just means that day
+// has no report yet, never a crash. A minimally-shaped entry (right date/generatedAt, even an
+// empty events array) is still accepted — an empty report for a day with no memoryEvents is a
+// legitimate, real result, not a malformed one.
+function isDailyReportSnapshotShape(v: unknown): v is DailyReportSnapshot {
+  if (typeof v !== "object" || v === null) return false;
+  const r = v as Partial<DailyReportSnapshot>;
+  return typeof r.date === "string" && typeof r.generatedAt === "string" && Array.isArray(r.events);
+}
+
+function asDailyReports(v: unknown): Record<string, DailyReportSnapshot> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailyReportSnapshot> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (isDailyReportSnapshotShape(value)) out[key] = value;
+  }
+  return out;
+}
+
 // V2.14 §4 — same discipline as every other parsed field here: a malformed/missing entry
 // falls back to its safe default (false — "Everything") rather than being trusted as-is.
 function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
@@ -318,11 +395,12 @@ export function parseStoredState(raw: string): StoreState {
       personalPlan: Array.isArray(parsed.personalPlan) ? parsed.personalPlan : [],
       artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts.filter(isArtifactRecordShape) : [],
       usageCounters: asUsageCounters(parsed.usageCounters),
-      mentionEvents: Array.isArray(parsed.mentionEvents) ? parsed.mentionEvents : [],
+      mentionEvents: normalizeMentionEvents(parsed.mentionEvents),
       showAdvancedSettings: parsed.showAdvancedSettings === true,
       workItemCalibrationHistory: asWorkItemCalibrationHistory(parsed.workItemCalibrationHistory),
       myActionItemsOnly: asMyActionItemsOnly(parsed.myActionItemsOnly),
       lastAppStateSyncIso: typeof parsed.lastAppStateSyncIso === "string" ? parsed.lastAppStateSyncIso : undefined,
+      dailyReports: asDailyReports(parsed.dailyReports),
     };
   } catch {
     return initialState();
@@ -481,9 +559,12 @@ export class CommandCenterStore {
     this.set(initialState());
   }
 
-  /** V1.2 §17 "No Hidden Memory" — memory must be deletable without wiping live data. */
+  /** V1.2 §17 "No Hidden Memory" — memory must be deletable without wiping live data.
+   *  V2.17 Task 2 — dailyReports is derived memory too (built from memoryEvents), so it's
+   *  cleared alongside them; leaving old reports behind after "clear memory" would be exactly
+   *  the kind of hidden memory §17 forbids. */
   clearMemory() {
-    this.set({ ...this.state, snapshotHistory: [], eodHistory: [], memoryEvents: [] });
+    this.set({ ...this.state, snapshotHistory: [], eodHistory: [], memoryEvents: [], dailyReports: {} });
   }
 
   // ===== V1.4 §39-40, V1.5 §22-24 — Attention lifecycle =====
@@ -607,6 +688,7 @@ export class CommandCenterStore {
       data: { ...this.state.data, decisions: synced.decisions, actions: synced.actionPlanState.actions },
       personalPlan: synced.actionPlanState.personalPlan,
       memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
+      dailyReports: synced.dailyReports,
       showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
       myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
       jiraProjectScope: synced.uiPreferences.jiraProjectScope,
@@ -779,20 +861,23 @@ export class CommandCenterStore {
 
     const newMemoryEvents = prevSnapshot ? this.computeMemoryEvents(merged, this.state.snapshotHistory, getTodayIso()) : [];
 
-    // V2.10 §2 — mentionEvents are cumulative across syncs (like workItems/dependencies
-    // above), keyed by issueKey: each incremental sync's mention search only covers issues
-    // updated since the last sync, so a mention seen on an earlier sync must persist here
-    // until the attention item itself is acknowledged/resolved by the user — it is never
-    // silently dropped just because a later sync's narrower JQL window didn't re-fetch it.
-    // Absent from `result` entirely (no accountId configured, or the best-effort fetch
-    // failed) leaves the existing list untouched.
+    // V2.10 §2, revised V2.17 §1a — mentionEvents are cumulative across syncs (like
+    // workItems/dependencies above), now keyed by COMMENT id, not issue key: each incremental
+    // sync's mention search only covers issues updated since the last sync, so a mention seen
+    // on an earlier sync must persist here until its own attention item is acknowledged/
+    // resolved by the user — it is never silently dropped just because a later sync's
+    // narrower JQL window didn't re-fetch it. Keying by commentId (rather than the old
+    // issue-level key) means a second, genuinely different comment on the same issue is
+    // tracked as its own entry instead of overwriting the first — see MentionEvent.commentId's
+    // own comment for the bug this fixes. Absent from `result` entirely (no accountId
+    // configured, or the best-effort fetch failed) leaves the existing list untouched.
     const mergedMentionEvents =
       result.mentionEvents === undefined
         ? this.state.mentionEvents
         : (() => {
-            const byIssueKey = new Map(this.state.mentionEvents.map((m) => [m.issueKey, m]));
-            for (const m of result.mentionEvents!) byIssueKey.set(m.issueKey, m);
-            return Array.from(byIssueKey.values());
+            const byCommentId = new Map(this.state.mentionEvents.map((m) => [m.commentId, m]));
+            for (const m of result.mentionEvents!) byCommentId.set(m.commentId, m);
+            return capMentionEvents(Array.from(byCommentId.values()), this.state.attentionState, MAX_MENTION_EVENTS);
           })();
 
     // V2.12 — first-observed timestamps for the Policy Review / Execution Gap signals
@@ -856,6 +941,34 @@ export class CommandCenterStore {
     return this.state.data.workItems.find((w) => w.id === action.relatedWorkItemId)?.projectId;
   }
 
+  /** V2.17 Task 2 — a Decision's point-in-time report context: projectName/clientName from
+   *  its own explicit projectId/clientId fields, and ticketKey ONLY when exactly one work
+   *  item is related (a decision touching several tickets never picks one arbitrarily and
+   *  presents it as THE ticket — same discipline as personal-focus.ts's singleWorkItem). */
+  private reportContextForDecision(projectId: string | undefined, clientId: string | undefined, relatedWorkItemIds: string[] | undefined): { ticketKey?: string; projectName?: string; clientName?: string } {
+    const singleWorkItemId = relatedWorkItemIds?.length === 1 ? relatedWorkItemIds[0] : undefined;
+    return {
+      ticketKey: singleWorkItemId ? this.state.data.workItems.find((w) => w.id === singleWorkItemId)?.key : undefined,
+      projectName: projectId ? this.state.data.projects.find((p) => p.id === projectId)?.name : undefined,
+      clientName: clientId ? this.state.data.clients.find((c) => c.id === clientId)?.name : undefined,
+    };
+  }
+
+  /** V2.17 Task 2 — the same explicit `relatedWorkItemId` FK as projectIdForAction above, but
+   *  resolving the full point-in-time context (ticket key, project/client NAME, not just the
+   *  internal projectId) so it can be captured directly on the memory event at write time —
+   *  see MemoryEvent.ticketKey's own comment for why this must never be resolved later from
+   *  live state instead. */
+  private reportContextForWorkItem(workItemId: string | undefined): { ticketKey?: string; projectName?: string; clientName?: string } {
+    const workItem = workItemId ? this.state.data.workItems.find((w) => w.id === workItemId) : undefined;
+    if (!workItem) return {};
+    return {
+      ticketKey: workItem.key,
+      projectName: this.state.data.projects.find((p) => p.id === workItem.projectId)?.name,
+      clientName: this.state.data.clients.find((c) => c.id === workItem.clientId)?.name,
+    };
+  }
+
   completeAction(id: string) {
     this.updateAction(id, { status: "completed", completedAt: getTodayIso() });
     const action = this.state.data.actions.find((a) => a.id === id);
@@ -865,6 +978,7 @@ export class CommandCenterStore {
       impact: "Awaiting outcome confirmation.",
       evidence: [],
       projectId: this.projectIdForAction(action),
+      ...this.reportContextForWorkItem(action?.relatedWorkItemId),
     });
     this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
   }
@@ -900,6 +1014,7 @@ export class CommandCenterStore {
       impact: "Work has begun on this action.",
       evidence: [],
       projectId: this.projectIdForAction(action),
+      ...this.reportContextForWorkItem(action?.relatedWorkItemId),
     });
   }
 
@@ -914,6 +1029,8 @@ export class CommandCenterStore {
       impact: note ?? `Classified ${outcomeStatus}.`,
       evidence: note ? [note] : [],
       projectId: this.projectIdForAction(action),
+      outcomeNote: note,
+      ...this.reportContextForWorkItem(action?.relatedWorkItemId),
     });
     this.bumpUsage(USAGE_KEYS.OUTCOME_CAPTURED);
   }
@@ -992,6 +1109,7 @@ export class CommandCenterStore {
       impact: input.expectedOutcome,
       evidence: selected?.evidence ?? [],
       projectId: input.projectId,
+      ...this.reportContextForDecision(input.projectId, input.clientId, input.relatedWorkItemIds),
     });
     this.bumpUsage(USAGE_KEYS.DECISION_CONFIRMED);
     return id;
@@ -1009,6 +1127,8 @@ export class CommandCenterStore {
       impact: note ?? `Classified ${outcomeStatus}.`,
       evidence: note ? [note] : [],
       projectId: decision?.projectId,
+      outcomeNote: note,
+      ...this.reportContextForDecision(decision?.projectId, decision?.clientId, decision?.relatedWorkItemIds),
     });
   }
 
@@ -1213,7 +1333,12 @@ export class CommandCenterStore {
     const item = this.state.personalPlan.find((p) => p.id === id);
     if (!item) return;
     this.updatePersonalPlanItem(id, { status, ...(status === "completed" ? { completedAt: today } : {}) });
-    this.appendMemoryEvent({ kind, title: `Focus ${status}: ${item.sourceType}:${item.sourceId}`, impact: `Planned for ${item.plannedDate}.`, evidence: [] });
+    // V2.17 Task 2 — a plan item's snapshot.projectId (captured when it was added to the
+    // plan) is the only point-in-time project fact readily available here; its source can be
+    // any of several entity types (attention/action/decision/loop), so — same "never guess
+    // which ticket" discipline as reportContextForDecision above — no ticketKey is attempted.
+    const projectName = item.snapshot?.projectId ? this.state.data.projects.find((p) => p.id === item.snapshot!.projectId)?.name : undefined;
+    this.appendMemoryEvent({ kind, title: `Focus ${status}: ${item.sourceType}:${item.sourceId}`, impact: `Planned for ${item.plannedDate}.`, evidence: [], projectId: item.snapshot?.projectId, projectName });
   }
 
   /** §16, §18 — Focus Session lifecycle. These are personal execution states only — they
@@ -1240,6 +1365,31 @@ export class CommandCenterStore {
    *  emitted at most once per day (call sites are responsible for the once-per-day check). */
   recordDailyFocusReviewed(today: string) {
     this.appendMemoryEvent({ kind: "DAILY_FOCUS_REVIEWED", title: "Daily focus reviewed", impact: `Reviewed on ${today}.`, evidence: [] });
+  }
+
+  /** V2.17 Task 2 — builds an immutable Daily Report for `dateIso` from that day's
+   *  already-recorded memoryEvents (each entry a plain copy, never a live reference — see
+   *  DailyReportSnapshot's own comment). Write-once by default: once a report exists for a
+   *  given day, calling this again returns the existing snapshot completely untouched — a
+   *  report about a day that has already passed must never silently change later just because
+   *  Close Day (or this action) runs again. Pass `force: true` to deliberately regenerate —
+   *  the one legitimate case is TODAY's own report, before the day is actually over and more
+   *  memoryEvents might still land. */
+  generateDailyReport(dateIso: string, force = false): DailyReportSnapshot {
+    const existing = this.state.dailyReports[dateIso];
+    if (existing && !force) return existing;
+    const snapshot: DailyReportSnapshot = {
+      date: dateIso,
+      generatedAt: new Date().toISOString(),
+      events: this.state.memoryEvents.filter((e) => e.date === dateIso).map((e) => ({ ...e })),
+    };
+    const dailyReports: Record<string, DailyReportSnapshot> = { ...this.state.dailyReports, [dateIso]: snapshot };
+    const overflow = Object.keys(dailyReports).length - MAX_DAILY_REPORTS;
+    if (overflow > 0) {
+      for (const oldestKey of Object.keys(dailyReports).sort().slice(0, overflow)) delete dailyReports[oldestKey];
+    }
+    this.set({ ...this.state, dailyReports });
+    return snapshot;
   }
 
   // ===== V2.2 — Delivery Artifacts (§16) =====

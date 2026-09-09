@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import type { CommandCenterStore, StoreState } from "@/lib/command-center/store";
 import { formatScopeLabel } from "@/lib/command-center/jira/project-scope";
-import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
+import { EmptyState, MetaPill, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { ProjectStory } from "@/components/command-center/ProjectStory";
 
 /** V2.13 §2 — the actual Project Memory body, extracted so it can be rendered both at its
@@ -125,12 +125,8 @@ export function ProjectMemoryContent({ state, store }: { state: StoreState; stor
               <Panel key={e.id} className="p-4">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-text3">{e.date}</span>
-                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{e.kind.replace(/-/g, " ")}</span>
-                  {e.projectId && (
-                    <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent2">
-                      {projectNameById.get(e.projectId) ?? e.projectId}
-                    </span>
-                  )}
+                  <MetaPill>{e.kind.replace(/-/g, " ")}</MetaPill>
+                  {e.projectId && <MetaPill variant="accent">{projectNameById.get(e.projectId) ?? e.projectId}</MetaPill>}
                 </div>
                 <p className="mt-1 font-display text-sm text-text">{e.title}</p>
                 <p className="mt-1 text-xs text-text2">{e.impact}</p>
@@ -157,7 +153,7 @@ export function ProjectMemoryContent({ state, store }: { state: StoreState; stor
               <Panel key={e.id} className="p-4">
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-text3">{e.date}</span>
-                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{e.kind.replace(/-/g, " ")}</span>
+                  <MetaPill>{e.kind.replace(/-/g, " ")}</MetaPill>
                 </div>
                 <p className="mt-1 font-display text-sm text-text">{e.title}</p>
                 <p className="mt-1 text-xs text-text2">{e.impact}</p>

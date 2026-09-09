@@ -6,6 +6,7 @@ import { getAIProvider } from "@/lib/command-center/ai";
 import { buildWeeklyReviewFacts, type WeeklyReviewFacts } from "@/lib/command-center/weekly-review";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
 import { getTodayIso } from "@/lib/command-center/store";
+import { buildWeeklyReportSummary, last7DaysEnding, weeklyReportToMarkdown } from "@/lib/command-center/daily-report";
 import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 
 function renderReview(text: string) {
@@ -30,6 +31,20 @@ export default function WeeklyReviewPage() {
   const { state, today, filteredData, personalFocus, proactive, store } = useCommandCenter();
   const [reviewText, setReviewText] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [weeklyReportCopied, setWeeklyReportCopied] = useState(false);
+
+  // V2.17 Task 2 point 3 — computed on demand over the 7 relevant already-persisted
+  // DailyReportSnapshots, never a redundant separately-persisted weekly blob. Distinct from
+  // `facts`/`personalReview` below: those recompute live from current data.actions/decisions
+  // (fine for their own AI-narrative purpose), whereas this aggregates only already-frozen,
+  // point-in-time snapshots — the only one of the three that satisfies "stays stable after a
+  // later sync changes live ticket data".
+  const weeklyReport = useMemo(() => buildWeeklyReportSummary(last7DaysEnding(today), state.dailyReports), [today, state.dailyReports]);
+
+  async function copyWeeklyReportMarkdown() {
+    await navigator.clipboard.writeText(weeklyReportToMarkdown(weeklyReport));
+    setWeeklyReportCopied(true);
+  }
 
   // V1.6 §46-49 — "My Delivery Review". Purely deterministic — arithmetic over
   // PersonalPlanItem history, no AI, no productivity scoring.
@@ -72,6 +87,35 @@ export default function WeeklyReviewPage() {
   return (
     <div className="space-y-4 pb-16">
       <SectionHeading title="Weekly Review" subtitle="Grounded in the daily snapshots this app has stored — never fabricated." />
+
+      <section>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <p className="font-display text-sm text-text">WEEKLY REPORT</p>
+          <button onClick={copyWeeklyReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+            {weeklyReportCopied ? "Copied ✓" : "Copy as Markdown"}
+          </button>
+        </div>
+        <Panel className="p-5">
+          <div className="mb-2 flex items-center gap-2">
+            <TrustLabel kind="calculated" />
+            <span className="text-xs text-text3">
+              {weeklyReport.snapshots.length} of {weeklyReport.dateRange.length} day(s) in this range have a Daily Report — generate one from Close Day for a day that&apos;s missing.
+            </span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-sm text-text2 sm:grid-cols-3">
+            <span>Completed: {weeklyReport.totalCompleted}</span>
+            <span>Decisions: {weeklyReport.totalDecisions}</span>
+            <span>Outcomes recorded: {weeklyReport.totalOutcomes}</span>
+          </div>
+          {weeklyReport.byProject.length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-xs text-text2">
+              {weeklyReport.byProject.map((p) => (
+                <li key={p.projectName}>{p.projectName}: {p.count}</li>
+              ))}
+            </ul>
+          )}
+        </Panel>
+      </section>
 
       <section>
         <p className="font-display text-sm text-text">DELIVERY</p>

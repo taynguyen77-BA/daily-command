@@ -10,7 +10,8 @@ import type { FocusCategory, PersonalFocusCandidate, PersonalFocusResult, Person
 import { useCommandCenter } from "./use-command-center";
 import { FocusSession } from "./FocusSession";
 import { isMyActionItem } from "@/lib/command-center/personal-relation";
-import { FocusCategoryBadge, Panel, RelationBadge, SectionHeading, TrustLabel } from "./ui";
+import { groupMentionItems, mentionGroupLabel } from "@/lib/command-center/mention-grouping";
+import { FocusCategoryBadge, MetaPill, Panel, RelationBadge, SectionHeading, TrustLabel } from "./ui";
 
 const SECTIONS: { category: FocusCategory; title: string }[] = [
   { category: "DO_NOW", title: "Do Now" },
@@ -79,11 +80,12 @@ function PlanRow({
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="mb-1 flex flex-wrap items-center gap-2">
-            <FocusCategoryBadge category={candidate.category} />
+            {/* V2.17 Task 3 §2 — relation leads, matching Attention Queue/Priorities. */}
             <RelationBadge relation={candidate.relation} />
-            {item.pinned && <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-accent2">Pinned</span>}
+            <FocusCategoryBadge category={candidate.category} />
+            {item.pinned && <MetaPill variant="accent">Pinned</MetaPill>}
             {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
-            <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{item.status}</span>
+            <MetaPill>{item.status}</MetaPill>
             {item.origin && <span className="text-[10px] text-text3">{ORIGIN_LABELS[item.origin]}</span>}
           </div>
           <p className="font-display text-sm text-text">{candidate.title}</p>
@@ -187,7 +189,23 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
   }
 
   const hasPlanToday = todayItems.length > 0;
-  const suggestedAll = useMemo(() => buildSuggestedDailyPlan(personalFocus.candidates), [personalFocus.candidates]);
+  // V2.17 §1a point 4 — folds several still-open MENTION candidates on the same ticket into
+  // one suggested-plan row before ranking, so a ticket with 3 unread comments suggests one
+  // "3 new comments" item rather than 3 near-duplicate rows competing for the same slots.
+  // Display-only, applied here (never to `personalFocus.candidates` itself, per this file's
+  // own "TRUE full candidate set" rule above) — reconciliation/carry-forward/new-arrivals still
+  // see every individual candidate.
+  const groupedForSuggestion = useMemo(
+    () =>
+      groupMentionItems(personalFocus.candidates, {
+        isMention: (c) => !!c.attentionItemId?.startsWith("MENTION:"),
+        groupKey: (c) => c.ticketKey,
+        recency: () => "",
+        relabel: (mostRecent, count) => ({ ...mostRecent, title: mentionGroupLabel(count) }),
+      }),
+    [personalFocus.candidates]
+  );
+  const suggestedAll = useMemo(() => buildSuggestedDailyPlan(groupedForSuggestion), [groupedForSuggestion]);
   // V2.14 §4 — narrows the already-computed suggestion, never re-selects a different one;
   // "Accept Plan" below accepts exactly what's shown, so the two never disagree.
   const suggested = myActionItemsOnly ? suggestedAll.filter((c) => isMyActionItem(c.relation)) : suggestedAll;

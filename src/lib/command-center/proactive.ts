@@ -98,6 +98,20 @@ export function computeProactiveIntelligence(
 
   const newAssignments = detectNewAssignments(data, previousSnapshot, identityOwnerId);
 
+  // V2.17 §1a point 5 — resolved once, before buildAttentionQueue, so a still-open MENTION
+  // tied to one of these work items can auto-resolve (see attention-queue.ts's forceResolved).
+  // Deliberately not threaded for ASSIGNMENT — see that task's own scope note.
+  const completedOrExcludedWorkItemIds = workRelevanceIndex
+    ? new Set(
+        data.workItems
+          .filter((w) => {
+            const relevance = resolveWorkRelevance(w, workRelevanceIndex);
+            return relevance === "COMPLETED" || relevance === "EXCLUDED";
+          })
+          .map((w) => w.id)
+      )
+    : undefined;
+
   const { items: attentionQueue, nextAttentionState } = buildAttentionQueue(
     {
       drift,
@@ -112,6 +126,7 @@ export function computeProactiveIntelligence(
       mentionEvents,
       newAssignments,
       workItems: data.workItems,
+      completedOrExcludedWorkItemIds,
     },
     attentionState,
     today
@@ -140,7 +155,13 @@ export function computeProactiveIntelligence(
   const gatedAttentionQueue: AttentionItem[] = [];
   for (const item of attentionQueue) {
     const entity = resolveAttentionEntity(item, data, derived.risks);
-    if (workRelevanceIndex && entity.workItemIds.length > 0) {
+    // V2.17 §1b — re-confirms the V2.12 decision: MENTION always bypasses this gate. A mention
+    // is about a person waiting on a reply, not about the ticket's delivery state, so it must
+    // surface here regardless of the underlying ticket's Work Relevance classification (a
+    // COMPLETED/EXCLUDED ticket's mention still auto-resolves via attention-queue.ts's
+    // forceResolved above — a different, lifecycle-based mechanism, not this exclusion). Not
+    // extended to ASSIGNMENT — that stays gated exactly as before (V2.12 Task 1's territory).
+    if (workRelevanceIndex && entity.workItemIds.length > 0 && item.category !== "MENTION") {
       const relatedItems = entity.workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
       const relevances = relatedItems.map((w) => resolveWorkRelevance(w, workRelevanceIndex));
       const stillLive = relevances.some((r) => r !== "COMPLETED" && r !== "EXCLUDED");

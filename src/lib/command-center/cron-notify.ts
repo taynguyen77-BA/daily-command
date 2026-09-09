@@ -62,25 +62,18 @@ function syntheticPreviousSnapshot(assignedIssueKeys: string[], accountId: strin
   return { date: today, workItems, risks: [], requirements: [], dependencies: [], projects: [] };
 }
 
-/** V2.13 §2 — one mentioning comment's stable identity for dedup. Jira always returns a real
- *  `id` for a genuine comment; the fallback (never expected to actually trigger against a real
- *  Jira instance) keeps this deterministic rather than crashing on an unexpected shape, same
- *  "never assume the ideal shape" discipline as jira/mentions.ts's own ADF walker. */
-function commentIdentity(issueKey: string, comment: { id?: string; created?: string }): string {
-  return comment.id ?? `${issueKey}:no-id:${comment.created ?? ""}`;
-}
-
 interface MentionEntry {
   commentId: string;
   event: MentionEvent;
 }
 
-/** Fetches comments for every currently-mentioning issue and pairs each mentioning comment's
- *  stable id with the MentionEvent buildMentionEvents renders for it — calling
- *  buildMentionEvents per-comment (cheap, pure, no extra network call) rather than per-issue
- *  batch, since MentionEvent itself carries no raw comment id to pair back up after the fact.
- *  A single issue's comment-fetch failure is best-effort (never fails the whole check), same
- *  discipline as jira/sync/route.ts's own mention-fetching chain. */
+/** Fetches comments for every currently-mentioning issue and builds the MentionEvent for each
+ *  one that actually mentions `accountId` — calling buildMentionEvents per-comment (cheap,
+ *  pure, no extra network call) rather than per-issue batch. `event.commentId` (V2.17 §1a) is
+ *  the same stable per-comment identity mentions.ts's mentionCommentId derives, so this no
+ *  longer needs a second, locally-duplicated identity function. A single issue's comment-fetch
+ *  failure is best-effort (never fails the whole check), same discipline as
+ *  jira/sync/route.ts's own mention-fetching chain. */
 async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, issueKeys: string[], today: string): Promise<MentionEntry[]> {
   const entries: MentionEntry[] = [];
   await Promise.all(
@@ -92,7 +85,7 @@ async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnecti
           if (!commentMentionsAccount(comment.body, accountId)) continue;
           const [event] = buildMentionEvents(issueKey, [comment], accountId, { baseUrl: config.baseUrl, today });
           if (!event) continue;
-          entries.push({ commentId: commentIdentity(issueKey, comment), event });
+          entries.push({ commentId: event.commentId, event });
         }
       } catch {
         // best-effort — a single issue's comment fetch failure never fails the check

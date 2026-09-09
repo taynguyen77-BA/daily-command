@@ -299,13 +299,16 @@ function candidateFromAttentionItem(
   mentionedIssueKeys: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
   const entity = resolveAttentionEntity(item, data, allRisks ?? data.risks);
-  // V2.13 §1 — MENTION/ASSIGNMENT are gated too (option 3b): the Work Relevance Policy
-  // decides whether a ticket represents live personal work at all, and that decision must
-  // not depend on which kind of signal is pointing at the ticket — a mention/reassignment on
-  // an already-COMPLETED/WAITING/EXCLUDED/UNKNOWN ticket is no more actionable than any other
-  // signal on it, so it's excluded the same way; OBSERVE still downgrades to WATCH rather
-  // than dropping, consistent with every other category.
-  const relevanceGate = evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex);
+  // V2.17 §1b — reverses V2.13 §1's "option 3b" for MENTION specifically: a mention always
+  // surfaces regardless of the underlying ticket's Work Relevance classification, because a
+  // mention is about a person waiting on a reply, not about the ticket's delivery state (same
+  // reasoning as proactive.ts's Attention Queue gate above). ASSIGNMENT keeps the original
+  // option-3b gating — that decision is V2.12 Task 1's territory, not touched here. A
+  // COMPLETED/EXCLUDED ticket's mention is still excluded from My Day, just via a different
+  // mechanism: attention-queue.ts auto-resolves it (RESOLVED lifecycle), and this file's own
+  // `eligibleAttention` filter (see computePersonalFocus) already drops RESOLVED items before
+  // they ever reach this function.
+  const relevanceGate = item.category === "MENTION" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex);
   if (relevanceGate === "EXCLUDE") return null;
   const resolution = resolveOwner(entity, data);
   const { label: ownerLabel } = resolution;

@@ -22,7 +22,7 @@ import { buildDailySnapshot, buildSnapshotMetrics, compareSnapshots } from "../s
 import { detectDecisionConflictCandidates } from "../src/lib/command-center/decision-conflicts";
 import { detectRecurringPatterns } from "../src/lib/command-center/pattern-detection";
 import { buildWeeklyReviewFacts } from "../src/lib/command-center/weekly-review";
-import { parseStoredState, commandCenterStore, getTodayIso, type StoreState } from "../src/lib/command-center/store";
+import { parseStoredState, commandCenterStore, getTodayIso, capMentionEvents, type StoreState } from "../src/lib/command-center/store";
 import type { Decision, DailySnapshot, SnapshotMetrics } from "../src/lib/command-center/types";
 
 // V1.3 — Live Project Intelligence
@@ -173,12 +173,16 @@ import { computeActionableSignals } from "../src/lib/command-center/jira/work-re
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "../src/lib/command-center/jira/work-relevance-history";
 import type { WorkRelevance, DeliveryLoop } from "../src/lib/command-center/types";
 // V2.10 — Real-time mention/assignment tracking
-import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt, selectRecentMentionCandidates } from "../src/lib/command-center/jira/mentions";
+import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt, mentionCommentId, selectRecentMentionCandidates } from "../src/lib/command-center/jira/mentions";
+import { groupMentionAttentionItems } from "../src/components/command-center/AttentionQueuePanel";
+import { groupMentionItems, mentionGroupLabel } from "../src/lib/command-center/mention-grouping";
 import { detectNewAssignments } from "../src/lib/command-center/assignment-detection";
 import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "../src/lib/command-center/notify";
 import { fetchMentionedIssuesWith, fetchIssueCommentsWith } from "../src/lib/command-center/jira/http";
 import type { JiraComment } from "../src/lib/command-center/jira/types";
 import type { MentionEvent } from "../src/lib/command-center/types";
+import type { MemoryEvent, DailyReportSnapshot } from "../src/lib/command-center/types";
+import { summarizeDailyReport, dailyReportToMarkdown, buildWeeklyReportSummary, last7DaysEnding, weeklyReportToMarkdown } from "../src/lib/command-center/daily-report";
 // V2.11 §2 — Slack destination visibility: GET/POST /api/command-center/notify
 import { GET as notifyStatusGET, POST as notifyPOST } from "../src/app/api/command-center/notify/route";
 
@@ -1451,24 +1455,56 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const eventsForMe = buildMentionEvents("MENT-1", commentsForIssue, "acc-me", { today: TODAY });
   ok("V2.10 Mentions", eventsForMe.length === 1, "a comment mentioning a different account never produces a MentionEvent for the configured identity — only the real match is returned");
   ok("V2.10 Mentions", eventsForMe[0].commentAuthor === "Alice", "the returned MentionEvent is the real matching comment's author, not the non-matching one");
+  ok("V2.17 Mentions commentId", eventsForMe[0].commentId === "c1", "buildMentionEvents carries the real Jira comment id through as MentionEvent.commentId");
+  ok(
+    "V2.17 Mentions commentId",
+    mentionCommentId("MENT-1", { created: "2026-06-14T10:00:00.000Z" }) === "MENT-1:no-id:2026-06-14T10:00:00.000Z",
+    "when Jira omits a comment id entirely, the fallback is a deterministic string derived from the issue key + created timestamp, never crashing and never colliding with a real id"
+  );
 
-  // --- attention-queue dedup: two mentions on the SAME issue collapse to one item ---
-  const twoMentionsSameIssue: MentionEvent[] = [
-    { issueKey: "MENT-1", commentAuthor: "Alice", excerpt: "first mention", mentionedAt: "2026-06-14T10:00:00.000Z" },
-    { issueKey: "MENT-1", commentAuthor: "Carol", excerpt: "second mention", mentionedAt: "2026-06-14T12:00:00.000Z" },
+  // --- V2.17 §1a — two DISTINCT comments on the same issue now produce two INDEPENDENT
+  // MENTION attention items (comment-level identity), not one collapsed record. This is the
+  // exact fix for "an old resolved mention can never truly resolve" / "a genuinely new
+  // comment gets absorbed into the old record" from the dev prompt's Task 1a. ---
+  const twoCommentsSameIssue: MentionEvent[] = [
+    { issueKey: "MENT-1", commentId: "c1", commentAuthor: "Alice", excerpt: "first mention", mentionedAt: "2026-06-14T10:00:00.000Z" },
+    { issueKey: "MENT-1", commentId: "c2", commentAuthor: "Carol", excerpt: "second mention", mentionedAt: "2026-06-14T12:00:00.000Z" },
   ];
-  const mentionQueue = buildAttentionQueue({ ...mentionInputsBase, mentionEvents: twoMentionsSameIssue, workItems: [mentionWorkItem] }, {}, TODAY);
+  const mentionQueue = buildAttentionQueue({ ...mentionInputsBase, mentionEvents: twoCommentsSameIssue, workItems: [mentionWorkItem] }, {}, TODAY);
   const mentionItems = mentionQueue.items.filter((i) => i.category === "MENTION");
-  ok("V2.10 Mentions", mentionItems.length === 1, "a comment mentioning the configured account twice on the same issue (via two comments) produces exactly one MENTION attention item — the existing ${category}:${slug} dedup scheme");
-  ok("V2.10 Mentions", mentionItems[0].id === `MENTION:${slug("MENT-1")}`, "the MENTION item's id follows the same deterministic ${category}:${slug} identity scheme as every other category");
-  ok("V2.10 Mentions", mentionItems[0].ownershipExplicit === true, "a MENTION item is always explicitly owned — wired directly, never routed through generic owner resolution");
-  ok("V2.10 Mentions", mentionItems[0].evidence.length === 2, "both underlying comments are preserved as evidence, even though they collapse to one attention item");
+  ok("V2.17 Mentions comment-level identity", mentionItems.length === 2, "two distinct comments mentioning the account on the same issue now produce two independent MENTION attention items, each trackable through its own lifecycle — never collapsed into one");
+  ok(
+    "V2.17 Mentions comment-level identity",
+    mentionItems.every((i) => i.id === `MENTION:${slug("MENT-1")}:${slug("c1")}` || i.id === `MENTION:${slug("MENT-1")}:${slug("c2")}`),
+    "each MENTION item's id is keyed by issue AND comment id (`${category}:${issueKey}:${commentId}`), not just the issue"
+  );
+  ok("V2.17 Mentions comment-level identity", mentionItems.every((i) => i.ownershipExplicit === true), "each per-comment MENTION item is still always explicitly owned");
+
+  // --- Test for Task 1: first comment acknowledged/resolved, second still NEW — only the
+  // second surfaces as an unresolved item, and the display-layer grouping (mention-
+  // grouping.ts) shows "1 new comment", not 2. ---
+  const c1ResolvedState = { [`MENTION:${slug("MENT-1")}:${slug("c1")}`]: { lifecycle: "RESOLVED" as const, firstSeenDate: "2026-06-01", lastSeenDate: "2026-06-01", resolvedManually: true } };
+  const afterFirstResolved = buildAttentionQueue({ ...mentionInputsBase, mentionEvents: twoCommentsSameIssue, workItems: [mentionWorkItem] }, c1ResolvedState, TODAY);
+  const stillOpenMentions = afterFirstResolved.items.filter((i) => i.category === "MENTION" && i.lifecycle !== "RESOLVED" && i.lifecycle !== "SNOOZED");
+  ok("V2.17 Mentions independent lifecycle", stillOpenMentions.length === 1 && stillOpenMentions[0].id.endsWith(":c2"), "once the first comment's mention is resolved, it stays resolved on the next sync (the underlying issue's mentionEvents still contain it) while the second, still-unacknowledged comment remains visibly open — exactly the Task 1 test scenario");
+  const groupedStillOpen = groupMentionAttentionItems(afterFirstResolved.items.filter((i) => i.lifecycle !== "RESOLVED" && i.lifecycle !== "SNOOZED"));
+  const groupedMention = groupedStillOpen.find((i) => i.category === "MENTION");
+  ok("V2.17 Mentions grouping", groupedMention !== undefined && groupedMention.what === mentionGroupLabel(1), "the grouped display card for this ticket reads '1 new comment', not 2 — the resolved comment is correctly excluded from the count");
+
+  // --- a genuinely new comment on an issue that already had an OLDER comment resolved must
+  // surface as NEW, never silently absorbed into the old (already-resolved) record. ---
+  const onlyOldCommentResolved = { [`MENTION:${slug("MENT-1")}:${slug("c1")}`]: { lifecycle: "RESOLVED" as const, firstSeenDate: "2026-06-01", lastSeenDate: "2026-06-01", resolvedManually: true } };
+  const newCommentArrives = buildAttentionQueue({ ...mentionInputsBase, mentionEvents: [twoCommentsSameIssue[0]], workItems: [mentionWorkItem] }, onlyOldCommentResolved, TODAY);
+  ok("V2.17 Mentions independent lifecycle", newCommentArrives.items.find((i) => i.id.endsWith(":c1"))?.lifecycle === "RESOLVED", "the already-resolved comment stays resolved across a sync where the underlying issue's `updated` timestamp changes for an unrelated reason — the exact regression this task prevents");
+  const secondSync = buildAttentionQueue({ ...mentionInputsBase, mentionEvents: twoCommentsSameIssue, workItems: [mentionWorkItem] }, newCommentArrives.nextAttentionState, TODAY);
+  const brandNewComment = secondSync.items.find((i) => i.id.endsWith(":c2"));
+  ok("V2.17 Mentions independent lifecycle", brandNewComment !== undefined && brandNewComment.lifecycle === "NEW", "a genuinely new second comment on the same issue surfaces as NEW on its own id, never absorbed into the first comment's already-resolved record");
 
   // --- an issue both newly assigned AND newly mentioned in the same sync must not double-count ---
   const bothQueue = buildAttentionQueue(
     {
       ...mentionInputsBase,
-      mentionEvents: [{ issueKey: "MENT-1", commentAuthor: "Alice", excerpt: "check this", mentionedAt: "2026-06-14T10:00:00.000Z" }],
+      mentionEvents: [{ issueKey: "MENT-1", commentId: "c1", commentAuthor: "Alice", excerpt: "check this", mentionedAt: "2026-06-14T10:00:00.000Z" }],
       newAssignments: [{ workItemId: "jira-MENT-1", issueKey: "MENT-1", title: mentionWorkItem.title, projectId: mentionWorkItem.projectId }],
       workItems: [mentionWorkItem],
     },
@@ -1512,6 +1548,60 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const outOfOrderIssues = [makeJiraIssue({ key: "OLDER", updated: "2026-09-08T00:00:00.000Z" }), makeJiraIssue({ key: "NEWER", updated: "2026-09-09T06:00:00.000Z" })];
   const orderedCandidates = selectRecentMentionCandidates(outOfOrderIssues, new Set(), NOW_MS);
   ok("V2.17 Recent mention candidates", orderedCandidates[0].key === "NEWER", "candidates are sorted most-recently-updated-first regardless of input order — never trusts the caller's ordering blindly, per the function's own documented defensiveness");
+}
+
+// ===== V2.17 §1a point 1 — store.ts: mentionEvents is keyed per-comment, capped, and legacy
+// (pre-commentId) persisted entries are backfilled rather than dropped or crashing. =====
+{
+  // --- legacy migration: a pre-V2.17 persisted mentionEvents entry has no commentId at all ---
+  const legacyBlob = JSON.stringify({
+    loaded: true,
+    mentionEvents: [
+      { issueKey: "LEG-1", commentAuthor: "Alice", excerpt: "old shape", mentionedAt: "2026-01-01T00:00:00.000Z" },
+      { issueKey: "LEG-1", commentAuthor: "Bob", excerpt: "old shape 2", mentionedAt: "2026-01-02T00:00:00.000Z" },
+      "not even an object",
+      { commentAuthor: "no issueKey at all" },
+    ],
+  });
+  const migratedLegacy = parseStoredState(legacyBlob);
+  ok("V2.17 mentionEvents legacy migration", migratedLegacy.mentionEvents.length === 2, "the two structurally-valid legacy entries survive migration; the malformed ones are dropped, never crash parseStoredState");
+  ok("V2.17 mentionEvents legacy migration", migratedLegacy.mentionEvents.every((m) => typeof m.commentId === "string" && m.commentId.length > 0), "every migrated entry gets a real, non-empty commentId backfilled");
+  ok(
+    "V2.17 mentionEvents legacy migration",
+    new Set(migratedLegacy.mentionEvents.map((m) => m.commentId)).size === 2,
+    "the two same-issue legacy entries (which used to collapse under the old issue-keyed scheme) get DISTINCT backfilled commentIds, since they differ by mentionedAt — real, distinct history is preserved rather than merged"
+  );
+
+  // --- a valid, already-V2.17-shaped MentionEvent round-trips unchanged ---
+  const validBlob = JSON.stringify({ loaded: true, mentionEvents: [{ issueKey: "V-1", commentId: "real-comment-id", excerpt: "x", mentionedAt: TODAY }] });
+  ok("V2.17 mentionEvents legacy migration", parseStoredState(validBlob).mentionEvents[0].commentId === "real-comment-id", "an already-valid commentId is preserved as-is, never overwritten by the legacy fallback");
+
+  // --- capMentionEvents: global cap, oldest-RESOLVED-first eviction ---
+  const manyEvents: MentionEvent[] = Array.from({ length: 5 }, (_, i) => ({
+    issueKey: `CAP-${i}`,
+    commentId: `c-${i}`,
+    excerpt: "x",
+    mentionedAt: new Date(2026, 0, i + 1).toISOString(),
+  }));
+  const noEviction = capMentionEvents(manyEvents, {}, 5);
+  ok("V2.17 capMentionEvents", noEviction.length === 5, "under the cap, nothing is evicted at all");
+
+  // Two of the five are RESOLVED (the oldest of those two should be evicted first), the rest
+  // are still open (untouched, even though some are older than the resolved ones).
+  const capState: Record<string, AttentionItemState> = {
+    [`MENTION:${slug("CAP-0")}:${slug("c-0")}`]: { lifecycle: "RESOLVED", firstSeenDate: TODAY, lastSeenDate: TODAY },
+    [`MENTION:${slug("CAP-3")}:${slug("c-3")}`]: { lifecycle: "RESOLVED", firstSeenDate: TODAY, lastSeenDate: TODAY },
+  };
+  const evicted = capMentionEvents(manyEvents, capState, 4);
+  ok("V2.17 capMentionEvents", evicted.length === 4, "evicts exactly one entry to get back under the cap of 4");
+  ok("V2.17 capMentionEvents", !evicted.some((m) => m.commentId === "c-0"), "the older of the two RESOLVED entries (c-0, mentionedAt Jan 1) is evicted first — oldest-resolved-first");
+  ok("V2.17 capMentionEvents", evicted.some((m) => m.commentId === "c-3"), "the newer RESOLVED entry (c-3) survives — only as many resolved entries are evicted as needed to get under the cap");
+  ok("V2.17 capMentionEvents", ["c-1", "c-2", "c-4"].every((id) => evicted.some((m) => m.commentId === id)), "every still-open (unresolved) entry survives untouched, even ones older than a resolved entry that got evicted");
+
+  // If evicting every resolved entry still isn't enough, falls back to oldest-unresolved-first.
+  const evictedHard = capMentionEvents(manyEvents, capState, 2);
+  ok("V2.17 capMentionEvents", evictedHard.length === 2, "evicts down to the cap even when every resolved entry alone isn't enough");
+  ok("V2.17 capMentionEvents", evictedHard.some((m) => m.commentId === "c-4"), "the most recent entries survive when eviction has to fall back past the resolved ones");
 }
 
 // ===== V2.10 §3 — computeNewPersonalSignals (real-time Slack delivery gate) =====
@@ -5363,6 +5453,158 @@ function makeThreeProjectFixture() {
   commandCenterStore.resetAll();
 }
 
+// ===== V2.17 Task 2 — MemoryEvent point-in-time report context (ticketKey/projectName/
+// clientName/outcomeNote), captured at write time in store.ts, never resolved later from
+// live state. =====
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const before = commandCenterStore.getSnapshot();
+  const jpmcAction = before.data.actions.find((a) => a.relatedWorkItemId && before.data.workItems.find((w) => w.id === a.relatedWorkItemId)?.projectId === "p-jpmc");
+  ok("V2.17 MemoryEvent context", !!jpmcAction, "the demo dataset has at least one action linked to a JPMC work item (fixture precondition)");
+
+  if (jpmcAction) {
+    const linkedWorkItem = before.data.workItems.find((w) => w.id === jpmcAction.relatedWorkItemId)!;
+    const expectedProjectName = before.data.projects.find((p) => p.id === "p-jpmc")?.name;
+    const expectedClientName = before.data.clients.find((c) => c.id === linkedWorkItem.clientId)?.name;
+
+    commandCenterStore.completeAction(jpmcAction.id);
+    const completedEvent = [...commandCenterStore.getSnapshot().memoryEvents].reverse().find((e) => e.kind === "ACTION_COMPLETED");
+    ok("V2.17 MemoryEvent context", completedEvent?.ticketKey === linkedWorkItem.key, "ACTION_COMPLETED carries the real ticket key, resolved via the action's relatedWorkItemId FK");
+    ok("V2.17 MemoryEvent context", completedEvent?.projectName === expectedProjectName && !!expectedProjectName, "ACTION_COMPLETED carries the real project name, not just the internal projectId");
+    ok("V2.17 MemoryEvent context", completedEvent?.clientName === expectedClientName, "ACTION_COMPLETED carries the real client name too");
+
+    commandCenterStore.recordActionOutcomeStatus(jpmcAction.id, "IMPROVED", "Confirmed with the client.");
+    const outcomeEvent = [...commandCenterStore.getSnapshot().memoryEvents].reverse().find((e) => e.kind === "ACTION_OUTCOME");
+    ok("V2.17 MemoryEvent context", outcomeEvent?.outcomeNote === "Confirmed with the client.", "ACTION_OUTCOME carries the free-text outcome note as its own structured field, not just folded into `impact`");
+    ok("V2.17 MemoryEvent context", outcomeEvent?.ticketKey === linkedWorkItem.key, "ACTION_OUTCOME carries the same real ticket key");
+  }
+
+  const confirmedId = commandCenterStore.confirmDecisionFromOptions({
+    projectId: "p-ubs",
+    title: "Test UBS decision context",
+    options: [{ id: "opt-1", label: "Option A", rationale: "x", upside: "x", downside: "x", dependencies: [], risks: [], evidence: [], confidence: 0.8 }],
+    selectedOptionId: "opt-1",
+    expectedOutcome: "x",
+  });
+  ok("V2.17 MemoryEvent context", !!confirmedId, "confirmDecisionFromOptions succeeds against the demo dataset");
+  const decisionEvent = [...commandCenterStore.getSnapshot().memoryEvents].reverse().find((e) => e.kind === "DECISION_MADE" && e.title.includes("Test UBS decision context"));
+  const expectedUbsName = commandCenterStore.getSnapshot().data.projects.find((p) => p.id === "p-ubs")?.name;
+  ok("V2.17 MemoryEvent context", decisionEvent?.projectName === expectedUbsName && !!expectedUbsName, "DECISION_MADE carries the real project name from the decision's own explicit projectId");
+  ok("V2.17 MemoryEvent context", decisionEvent?.ticketKey === undefined, "a decision with no relatedWorkItemIds gets no fabricated ticketKey");
+
+  const multiTicketDecisionId = commandCenterStore.confirmDecisionFromOptions({
+    projectId: "p-ubs",
+    title: "Multi-ticket decision",
+    options: [{ id: "opt-1", label: "Option A", rationale: "x", upside: "x", downside: "x", dependencies: [], risks: [], evidence: [], confidence: 0.8 }],
+    selectedOptionId: "opt-1",
+    expectedOutcome: "x",
+    relatedWorkItemIds: [commandCenterStore.getSnapshot().data.workItems[0]?.id, commandCenterStore.getSnapshot().data.workItems[1]?.id].filter((id): id is string => !!id),
+  });
+  const multiTicketEvent = [...commandCenterStore.getSnapshot().memoryEvents].reverse().find((e) => e.kind === "DECISION_MADE" && e.title.includes("Multi-ticket decision"));
+  ok("V2.17 MemoryEvent context", !!multiTicketDecisionId && multiTicketEvent?.ticketKey === undefined, "a decision touching MULTIPLE work items never picks one arbitrarily and presents it as THE ticket — same discipline as personal-focus.ts's singleWorkItem");
+
+  commandCenterStore.resetAll();
+}
+
+// ===== V2.17 Task 2 — generateDailyReport: write-once immutable snapshot, stable even after
+// live ticket/project state changes afterward. Tests for Task 2, point 1. =====
+{
+  commandCenterStore.resetAll();
+  commandCenterStore.loadDemoData();
+  const day1 = getTodayIso();
+  const seedAction = commandCenterStore.getSnapshot().data.actions.find((a) => a.relatedWorkItemId);
+  ok("V2.17 generateDailyReport", !!seedAction, "fixture precondition: demo data has at least one action linked to a work item");
+
+  if (seedAction) {
+    const linkedWorkItem = commandCenterStore.getSnapshot().data.workItems.find((w) => w.id === seedAction.relatedWorkItemId)!;
+    commandCenterStore.completeAction(seedAction.id);
+
+    const report1 = commandCenterStore.generateDailyReport(day1);
+    ok("V2.17 generateDailyReport", report1.date === day1, "the generated report is dated today");
+    ok("V2.17 generateDailyReport", report1.events.some((e) => e.kind === "ACTION_COMPLETED" && e.ticketKey === linkedWorkItem.key), "the report's events include today's ACTION_COMPLETED with its captured ticket context");
+    ok("V2.17 generateDailyReport", commandCenterStore.getSnapshot().dailyReports[day1] !== undefined, "the report is persisted in state.dailyReports, keyed by date");
+
+    // ----- Test for Task 2: a Daily Report generated on day N, viewed after a later sync
+    // changes live ticket data, still shows the ticket/client context as it was on day N. -----
+    const projectsBefore = commandCenterStore.getSnapshot().data.projects;
+    const mutatedProjects = projectsBefore.map((p) => (p.id === linkedWorkItem.projectId ? { ...p, name: "RENAMED PROJECT (simulated later sync)" } : p));
+    const mutatedWorkItems = commandCenterStore.getSnapshot().data.workItems.map((w) => (w.id === linkedWorkItem.id ? { ...w, key: "RENAMED-999", title: "Renamed ticket title" } : w));
+    // @ts-expect-error — reaching into private state for a test-only mutation simulating "a
+    // later Jira sync changed this ticket's title/key and this project's name"; there is no
+    // public store API for this because live ticket mutation isn't something this app's own
+    // code does outside of syncJira, which this test deliberately bypasses.
+    commandCenterStore["state"].data.projects = mutatedProjects;
+    // @ts-expect-error — see above.
+    commandCenterStore["state"].data.workItems = mutatedWorkItems;
+
+    const reGenerated = commandCenterStore.generateDailyReport(day1); // no force: true
+    ok(
+      "V2.17 generateDailyReport",
+      reGenerated === commandCenterStore.getSnapshot().dailyReports[day1],
+      "calling generateDailyReport again for the SAME day without force is a no-op — returns the exact already-persisted snapshot, never silently recomputed"
+    );
+    const eventAfterMutation = reGenerated.events.find((e) => e.kind === "ACTION_COMPLETED");
+    ok(
+      "V2.17 generateDailyReport",
+      eventAfterMutation?.ticketKey === linkedWorkItem.key && eventAfterMutation?.projectName !== "RENAMED PROJECT (simulated later sync)",
+      "the report's captured ticketKey/projectName reflect what was true on day N — completely unaffected by the simulated later change to live ticket/project data"
+    );
+  }
+
+  commandCenterStore.resetAll();
+}
+
+// ===== V2.17 Task 2 — daily-report.ts: pure aggregation/markdown functions. =====
+{
+  const e = (overrides: Partial<MemoryEvent>): MemoryEvent => ({ id: `e-${Math.random()}`, date: "2026-06-10", kind: "ACTION_COMPLETED", title: "x", impact: "x", evidence: [], ...overrides });
+  const snapshot: DailyReportSnapshot = {
+    date: "2026-06-10",
+    generatedAt: "2026-06-10T20:00:00.000Z",
+    events: [
+      e({ kind: "ACTION_COMPLETED", title: "Ship the thing", ticketKey: "JPMC-1", projectName: "JPMC Delivery", clientName: "JPMC" }),
+      e({ kind: "FOCUS_COMPLETED", title: "Focus: attention:x" }),
+      e({ kind: "DECISION_MADE", title: "Decided X" }),
+      e({ kind: "DECISION_OUTCOME", title: "Outcome for X" }),
+      e({ kind: "ACTION_OUTCOME", title: "Outcome recorded", outcomeNote: "Went well" }),
+      e({ kind: "drift-transition", title: "Drift changed" }),
+    ],
+  };
+  const summary = summarizeDailyReport(snapshot);
+  ok("V2.17 daily-report", summary.completed.length === 2, "ACTION_COMPLETED and FOCUS_COMPLETED both count as 'completed'");
+  ok("V2.17 daily-report", summary.decisions.length === 2, "DECISION_MADE and DECISION_OUTCOME both count as 'decisions'");
+  ok("V2.17 daily-report", summary.outcomes.length === 1, "ACTION_OUTCOME is its own bucket");
+  ok("V2.17 daily-report", summary.other.length === 1 && summary.other[0].kind === "drift-transition", "every other kind falls into 'other', never silently dropped");
+
+  const markdown = dailyReportToMarkdown(snapshot);
+  ok("V2.17 daily-report", markdown.includes("Ship the thing") && markdown.includes("JPMC-1") && markdown.includes("JPMC Delivery"), "the markdown export includes the completed item's title and its captured ticket/project context");
+  ok("V2.17 daily-report", markdown.includes("Went well"), "the markdown export includes an outcome note when the event carries one");
+
+  ok(
+    "V2.17 daily-report",
+    JSON.stringify(last7DaysEnding("2026-06-10")) === JSON.stringify(["2026-06-04", "2026-06-05", "2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10"]),
+    "last7DaysEnding returns exactly the 7 calendar dates ending on (and including) the given day, oldest first"
+  );
+
+  // ----- Test for Task 2: weekly aggregate over 7 daily snapshots produces correct totals
+  // without needing a live sync — pure aggregation over already-frozen data. -----
+  const dailyReports: Record<string, DailyReportSnapshot> = {
+    "2026-06-05": { date: "2026-06-05", generatedAt: "2026-06-05T20:00:00.000Z", events: [e({ date: "2026-06-05", kind: "ACTION_COMPLETED", projectName: "Alpha" }), e({ date: "2026-06-05", kind: "DECISION_MADE" })] },
+    "2026-06-07": { date: "2026-06-07", generatedAt: "2026-06-07T20:00:00.000Z", events: [e({ date: "2026-06-07", kind: "ACTION_COMPLETED", projectName: "Alpha" }), e({ date: "2026-06-07", kind: "ACTION_COMPLETED", projectName: "Beta" })] },
+    // 2026-06-10 deliberately has no report — a real gap, never a fabricated empty one.
+  };
+  const weekly = buildWeeklyReportSummary(last7DaysEnding("2026-06-10"), dailyReports);
+  ok("V2.17 daily-report weekly", weekly.snapshots.length === 2, "only the 2 days that actually have a persisted report are included — 2026-06-10's missing report is a real gap, not silently fabricated");
+  ok("V2.17 daily-report weekly", weekly.totalCompleted === 3 && weekly.totalDecisions === 1, "totals sum correctly across the available snapshots alone, without touching any live data");
+  ok(
+    "V2.17 daily-report weekly",
+    weekly.byProject.find((p) => p.projectName === "Alpha")?.count === 2 && weekly.byProject.find((p) => p.projectName === "Beta")?.count === 1,
+    "per-project completed counts are correct, sorted by count descending"
+  );
+  const weeklyMarkdown = weeklyReportToMarkdown(weekly);
+  ok("V2.17 daily-report weekly", weeklyMarkdown.includes("Alpha: 2") && weeklyMarkdown.includes("no report generated"), "the weekly markdown export shows per-project counts and honestly reports the missing day");
+}
+
 // ----- State safety (§10, §27, §33): changing project scope never mutates lifecycle,
 // actions, decisions, or memory — it only changes the derived view. -----
 {
@@ -5594,10 +5836,10 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
 // ----- V2.13 §1 — Personal Focus Engine (My Day) applies the same Work Relevance gate -----
 // personal-focus.ts previously never consulted Work Relevance at all: a COMPLETED/OBSERVE/
 // WAITING/EXCLUDED work item's DRIFT/RISK/DECISION/ACTION/COMMUNICATION attention item (and
-// loop-sourced candidates) could still reach DO_NOW/DO_TODAY. This closes that gap, gating
-// MENTION/ASSIGNMENT the same way as every other category (option 3b — the underlying
-// ticket's status decides personal-work eligibility regardless of which signal points at it)
-// and routing OBSERVE to WATCH instead of dropping it silently.
+// loop-sourced candidates) could still reach DO_NOW/DO_TODAY. This closes that gap, routing
+// OBSERVE to WATCH instead of dropping it silently. V2.13 originally gated MENTION/ASSIGNMENT
+// the same way ("option 3b"); V2.17 §1b reverses that for MENTION specifically (see the
+// mention tests just below) — ASSIGNMENT keeps option 3b unchanged.
 {
   const wrGateIdx = buildWorkRelevanceIndex(globalPolicy({ "Ready for UAT/Business Test": "OBSERVE", Done: "COMPLETED", "To Do": "ACTIONABLE" }));
 
@@ -5662,15 +5904,16 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   const actionableCandidate = mdcFocus.candidates.find((c) => c.sourceId === driftActionable.id);
   ok("V2.13 My Day gate", actionableCandidate !== undefined && actionableCandidate.category === "DO_NOW", "an ACTIONABLE-status ticket with the identical score is unaffected — no regression to the common case");
 
-  ok(
-    "V2.13 My Day gate",
-    mdcFocus.candidates.find((c) => c.sourceId === mentionOnCompleted.id) === undefined,
-    "option 3b: a MENTION item on an already-COMPLETED ticket produces no candidate at all — MENTION/ASSIGNMENT are gated by Work Relevance exactly like every other category, not exempted"
-  );
+  // V2.17 §1b — a MENTION always surfaces regardless of the underlying ticket's Work
+  // Relevance classification: someone is waiting on a reply, independent of the ticket's
+  // delivery state. All three tickets (COMPLETED/OBSERVE/ACTIONABLE) now classify identically,
+  // from scoring alone — the gate no longer factors in at all for this category.
+  const mentionCompletedCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnCompleted.id);
+  ok("V2.17 My Day gate bypass", mentionCompletedCandidate !== undefined && mentionCompletedCandidate.category === "DO_TODAY", "a MENTION item on an already-COMPLETED ticket still produces a real candidate — the V2.13 'option 3b' gate no longer applies to MENTION");
   const mentionObserveCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnObserve.id);
-  ok("V2.13 My Day gate", mentionObserveCandidate !== undefined && mentionObserveCandidate.category === "WATCH", "a MENTION item on an OBSERVE-status ticket is demoted to WATCH, not dropped — same OBSERVE treatment as any other category");
+  ok("V2.17 My Day gate bypass", mentionObserveCandidate !== undefined && mentionObserveCandidate.category === "DO_TODAY", "a MENTION item on an OBSERVE-status ticket is likewise unaffected by the gate — not even demoted to WATCH, since the gate never runs for MENTION at all");
   const mentionActionableCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnActionable.id);
-  ok("V2.13 My Day gate", mentionActionableCandidate !== undefined && mentionActionableCandidate.category === "DO_TODAY", "a MENTION item on an ACTIONABLE-status ticket is unaffected by the gate — reaches its natural DO_TODAY category from scoring alone");
+  ok("V2.17 My Day gate bypass", mentionActionableCandidate !== undefined && mentionActionableCandidate.category === "DO_TODAY", "a MENTION item on an ACTIONABLE-status ticket is unaffected too — all three reach the identical natural DO_TODAY category from scoring alone, proving ticket status no longer factors in for this category");
 
   // No index at all preserves pre-V2.13 behavior — never a silent change for an unmigrated caller.
   const mdcUngated = computePersonalFocus(mdcData, mdcProactive, "Alice", TODAY);
@@ -5687,12 +5930,15 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   ok("V2.13 My Day gate", loopCandidate !== undefined && loopCandidate.category === "WATCH", "a loop-sourced candidate whose linked work item is OBSERVE is demoted to WATCH too, not just attention-sourced candidates");
 }
 
-// ----- V2.13 (bug fix) — the Attention Queue itself (not just My Day) now consults the Work
-// Relevance Policy: a signal tied to a ticket already COMPLETED or EXCLUDED never lingers
-// forever as if it still needed action. Deliberately narrower than My Day's gate — WAITING
-// and UNKNOWN tickets stay visible here (this is delivery intelligence, not "is this my
-// personal work"), and the same pass resolves a real ticket link when exactly one work item
-// is related. -----
+// ----- V2.13 (bug fix), revised V2.17 §1a/§1b — the Attention Queue itself (not just My Day)
+// consults the Work Relevance Policy for RISK/DEPENDENCY/DECISION/ACTION/etc — a signal tied
+// to a ticket already COMPLETED or EXCLUDED never lingers forever as if it still needed
+// action. Deliberately narrower than My Day's gate — WAITING and UNKNOWN tickets stay visible
+// here (this is delivery intelligence, not "is this my personal work"), and the same pass
+// resolves a real ticket link when exactly one work item is related. V2.17 §1b carves out
+// MENTION from this exclusion entirely (a mention always surfaces); §1a instead auto-resolves
+// a MENTION on a COMPLETED/EXCLUDED ticket via its lifecycle (still present in the queue,
+// just RESOLVED) — see the dedicated block below this one for that behavior specifically. -----
 {
   const aqIdx = buildWorkRelevanceIndex(
     globalPolicy({ Done: "COMPLETED", "Won't Fix": "EXCLUDED", "Waiting for Client": "WAITING", "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE" })
@@ -5708,26 +5954,32 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
 
   const aqData: CommandCenterData = { ...emptyData(), workItems: aqTickets };
   const aqDerived = deriveData(aqData, null, TODAY);
-  const aqMentionEvents: MentionEvent[] = aqTickets.map((w) => ({ issueKey: w.key, excerpt: "please check this", mentionedAt: TODAY }));
+  const aqMentionEvents: MentionEvent[] = aqTickets.map((w) => ({ issueKey: w.key, commentId: `c-${w.key}`, excerpt: "please check this", mentionedAt: TODAY }));
 
   const aqProactive = computeProactiveIntelligence(aqData, aqDerived, [], null, {}, "jira", TODAY, aqIdx, aqMentionEvents);
-  const byMentionKey = (key: string) => aqProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}`);
+  const byMentionKey = (key: string, commentId: string) => aqProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}:${slug(commentId)}`);
 
-  ok("V2.13 Attention Queue gate", byMentionKey(completedTicket.key) === undefined, "a MENTION on an already-COMPLETED ticket is dropped from the Attention Queue entirely, not left lingering forever");
-  ok("V2.13 Attention Queue gate", byMentionKey(excludedTicket.key) === undefined, "a MENTION on an EXCLUDED ticket is dropped too");
-  ok("V2.13 Attention Queue gate", byMentionKey(waitingTicket.key) !== undefined, "a MENTION on a WAITING ticket stays visible — waiting-on-someone-else is exactly the kind of thing this broader delivery-intelligence surface (unlike My Day) must keep showing");
-  ok("V2.13 Attention Queue gate", byMentionKey(observeTicket.key) !== undefined, "a MENTION on an OBSERVE ticket stays visible — OBSERVE means 'visible as context', never dropped");
-  ok("V2.13 Attention Queue gate", byMentionKey(unknownTicket.key) !== undefined, "a MENTION on an UNKNOWN (never classified) status stays visible — the Attention Queue must not go quiet just because the user hasn't calibrated every status yet");
+  // V2.17 §1b — a MENTION always surfaces now, regardless of ticket status (present in the
+  // queue for every one of the six tickets, including COMPLETED/EXCLUDED).
+  for (const t of aqTickets) {
+    ok("V2.17 Attention Queue mention bypass", byMentionKey(t.key, `c-${t.key}`) !== undefined, `a MENTION on ${t.jiraStatusName} (${t.key}) is present in the Attention Queue — the Work Relevance gate no longer excludes MENTION at all`);
+  }
+  // ...but §1a auto-resolves the two that landed on a COMPLETED/EXCLUDED ticket — still
+  // present in the data (proving §1b), just correctly marked RESOLVED (proving §1a) rather
+  // than left looking like an open, unactioned signal forever.
+  ok("V2.17 Attention Queue mention auto-resolve", byMentionKey(completedTicket.key, `c-${completedTicket.key}`)?.lifecycle === "RESOLVED", "a MENTION on an already-COMPLETED ticket auto-resolves — no more action is implied by an old mention on a finished ticket");
+  ok("V2.17 Attention Queue mention auto-resolve", byMentionKey(excludedTicket.key, `c-${excludedTicket.key}`)?.lifecycle === "RESOLVED", "a MENTION on an EXCLUDED ticket auto-resolves the same way");
+  ok("V2.17 Attention Queue mention auto-resolve", byMentionKey(waitingTicket.key, `c-${waitingTicket.key}`)?.lifecycle === "NEW", "a MENTION on a WAITING ticket is NOT auto-resolved — WAITING is still live, unlike COMPLETED/EXCLUDED");
+  ok("V2.17 Attention Queue mention auto-resolve", byMentionKey(observeTicket.key, `c-${observeTicket.key}`)?.lifecycle === "NEW", "a MENTION on an OBSERVE ticket is NOT auto-resolved either");
 
-  const actionableMention = byMentionKey(actionableTicket.key);
-  ok("V2.13 Attention Queue gate", actionableMention !== undefined, "a MENTION on an ACTIONABLE ticket is unaffected by the gate");
+  const actionableMention = byMentionKey(actionableTicket.key, `c-${actionableTicket.key}`);
   ok("V2.13 Attention Queue gate (ticket link)", actionableMention?.ticketKey === actionableTicket.key, "the same pass resolves the real ticket key from the one related work item — reusing resolveAttentionEntity, not a second sourceRef -> WorkItem implementation");
   ok("V2.13 Attention Queue gate (ticket link)", actionableMention?.ticketUrl === undefined, "no sourceUrl configured on the fixture means no fabricated link — matches TicketLink's own 'never invent a link' discipline");
 
-  // Omitting the Work Relevance index entirely is a no-op — matches pre-V2.13 behavior.
+  // Omitting the Work Relevance index entirely is a no-op for the auto-resolve mechanism too.
   const aqUngated = computeProactiveIntelligence(aqData, aqDerived, [], null, {}, "jira", TODAY, undefined, aqMentionEvents);
-  const ungatedByKey = (key: string) => aqUngated.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}`);
-  ok("V2.13 Attention Queue gate", ungatedByKey(completedTicket.key) !== undefined, "omitting the Work Relevance index is a no-op — a COMPLETED ticket's mention is unaffected, matching pre-V2.13 behavior");
+  const ungatedByKey = (key: string, commentId: string) => aqUngated.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}:${slug(commentId)}`);
+  ok("V2.17 Attention Queue mention auto-resolve", ungatedByKey(completedTicket.key, `c-${completedTicket.key}`)?.lifecycle === "NEW", "omitting the Work Relevance index is a no-op — a COMPLETED ticket's mention is neither excluded nor auto-resolved without an index to classify it");
 }
 
 // ----- V2.13 (bug fix) — resolveAttentionEntity's RISK lookup previously checked only
@@ -7081,7 +7333,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   const relFollowing = jiraItem({ id: "rel-wi-following", key: "REL-3", owner: "Bob", ownerId: "acc-bob", dueDate: TODAY });
   const relData: CommandCenterData = { ...emptyData(), workItems: [relAssigned, relMentionedOnly, relFollowing] };
   const relDerived = deriveData(relData, null, TODAY);
-  const relMentionEvents: MentionEvent[] = [{ issueKey: "REL-2", excerpt: "please take a look", mentionedAt: TODAY }];
+  const relMentionEvents: MentionEvent[] = [{ issueKey: "REL-2", commentId: "rel-c1", excerpt: "please take a look", mentionedAt: TODAY }];
 
   const relProactive = computeProactiveIntelligence(relData, relDerived, [], null, {}, "jira", TODAY, undefined, relMentionEvents, "acc-alice", "Alice");
   const attnFor = (key: string) => relProactive.attentionQueue.find((i) => i.ticketKey === key);
@@ -7193,6 +7445,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     decisions: [],
     actionPlanState: { actions: [], personalPlan: [] },
     memoryEvents: [],
+    dailyReports: {},
     uiPreferences: { showAdvancedSettings: false, myActionItemsOnly: { attention: false, myDay: false, priorities: false }, jiraProjectScope: { mode: "ALL", projectKeys: [] } },
     updatedAtIso: "2026-01-01T00:00:00.000Z",
   };
@@ -7210,6 +7463,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     decisions: [{ id: "d1", projectId: "p1", title: "T", status: "made", description: "d" }],
     actionPlanState: { actions: [], personalPlan: [] },
     memoryEvents: [],
+    dailyReports: {},
     uiPreferences: { showAdvancedSettings: true, myActionItemsOnly: { attention: false, myDay: true, priorities: false }, jiraProjectScope: { mode: "ALL", projectKeys: [] } },
     updatedAtIso: "2026-01-01T00:00:00.000Z",
   };
@@ -7238,6 +7492,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
       decisions: [],
       actionPlanState: { actions: [], personalPlan: [] },
       memoryEvents: [],
+      dailyReports: {},
       uiPreferences: { showAdvancedSettings: false, myActionItemsOnly: { attention: false, myDay: false, priorities: false }, jiraProjectScope: { mode: "ALL", projectKeys: [] } },
       updatedAtIso: "2026-01-01T00:00:00.000Z",
       ...overrides,
@@ -7256,7 +7511,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     return { id, sourceType: "attention", sourceId: `src-${id}`, priority: 0, position: 0, plannedDate: "2026-01-01", status: "planned", estimatedMinutes: 15, addedAt: "2026-01-01T00:00:00.000Z" };
   }
 
-  // extractSyncedAppState — pulls exactly the seven synced fields, untouched.
+  // extractSyncedAppState — pulls exactly the synced fields, untouched.
   {
     const state = baseStoreState({
       personalIdentity: { id: "id1", displayName: "Alice" },
@@ -7265,6 +7520,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
       data: { ...emptyData(), decisions: [makeDecision("d1")], actions: [makeAction("a1")] },
       personalPlan: [makePlanItem("p1")],
       memoryEvents: [{ id: "m1", date: "2026-01-01", kind: "DECISION_MADE", title: "t", impact: "i", evidence: [] }],
+      dailyReports: { "2026-01-01": { date: "2026-01-01", generatedAt: "2026-01-01T20:00:00.000Z", events: [] } },
       showAdvancedSettings: true,
       myActionItemsOnly: { attention: true, myDay: false, priorities: true },
       jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC"] },
@@ -7278,6 +7534,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
       "actionPlanState bundles data.actions (Action Plan page) and personalPlan (Focus Session/Close Day) together"
     );
     ok("V2.15 extractSyncedAppState", extracted.memoryEvents.length === 1 && extracted.memoryEvents[0].id === "m1", "memoryEvents carried through");
+    ok("V2.17 extractSyncedAppState", Object.keys(extracted.dailyReports).length === 1 && extracted.dailyReports["2026-01-01"].date === "2026-01-01", "dailyReports carried through (Task 2 point 5 — added to the synced slice)");
     ok(
       "V2.15 extractSyncedAppState",
       extracted.uiPreferences.showAdvancedSettings === true && extracted.uiPreferences.myActionItemsOnly.attention === true && extracted.uiPreferences.jiraProjectScope.mode === "FOCUSED",
@@ -7313,6 +7570,10 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
       decisions: [makeDecision("local-only-d"), makeDecision("shared-d")],
       actionPlanState: { actions: [makeAction("local-only-a")], personalPlan: [makePlanItem("local-only-p")] },
       memoryEvents: [{ id: "local-only-m", date: "2026-01-01", kind: "DECISION_MADE", title: "local", impact: "i", evidence: [] }],
+      dailyReports: {
+        "local-only-day": { date: "local-only-day", generatedAt: "2026-01-01T20:00:00.000Z", events: [] },
+        "shared-day": { date: "shared-day", generatedAt: "2026-01-01T20:00:00.000Z", events: [] },
+      },
       updatedAtIso: "2026-01-01T00:00:00.000Z",
     });
     const server = makeSyncedState({
@@ -7325,6 +7586,10 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
       decisions: [makeDecision("server-only-d"), makeDecision("shared-d", { title: "Updated on server" })],
       actionPlanState: { actions: [makeAction("server-only-a")], personalPlan: [makePlanItem("server-only-p")] },
       memoryEvents: [{ id: "server-only-m", date: "2026-02-01", kind: "DECISION_MADE", title: "server", impact: "i", evidence: [] }],
+      dailyReports: {
+        "server-only-day": { date: "server-only-day", generatedAt: "2026-02-01T20:00:00.000Z", events: [] },
+        "shared-day": { date: "shared-day", generatedAt: "2026-02-01T20:00:00.000Z", events: [{ id: "server-e", date: "shared-day", kind: "DECISION_MADE", title: "server version", impact: "i", evidence: [] }] },
+      },
       uiPreferences: { showAdvancedSettings: true, myActionItemsOnly: { attention: true, myDay: true, priorities: true }, jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC"] } },
       updatedAtIso: "2026-02-01T00:00:00.000Z",
     });
@@ -7371,6 +7636,11 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
         .sort()
         .join(",") === "local-only-m,server-only-m",
       "memoryEvents: same id-union rule"
+    );
+    ok(
+      "V2.17 mergeSyncedAppState",
+      "local-only-day" in merged.dailyReports && "server-only-day" in merged.dailyReports && merged.dailyReports["shared-day"].events[0]?.id === "server-e",
+      "dailyReports: same union-with-server-winning-on-conflict rule as attentionState/policy map (Task 2 point 5)"
     );
     ok(
       "V2.15 mergeSyncedAppState",

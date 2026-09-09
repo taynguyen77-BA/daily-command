@@ -20,9 +20,9 @@ const STATE_ENDPOINT = "/api/command-center/state";
 
 // ===== Pure logic ===================================================================
 
-/** Extracts the seven-field synced slice from local StoreState. `updatedAtIso` is supplied by
- *  the caller (never computed here) so this stays pure and reusable for both "what would we
- *  push right now" and "what does local currently look like" comparisons. */
+/** Extracts the synced slice from local StoreState. `updatedAtIso` is supplied by the caller
+ *  (never computed here) so this stays pure and reusable for both "what would we push right
+ *  now" and "what does local currently look like" comparisons. */
 export function extractSyncedAppState(state: StoreState, updatedAtIso: string): SyncedAppState {
   return {
     personalIdentity: state.personalIdentity,
@@ -31,6 +31,7 @@ export function extractSyncedAppState(state: StoreState, updatedAtIso: string): 
     decisions: state.data.decisions,
     actionPlanState: { actions: state.data.actions, personalPlan: state.personalPlan },
     memoryEvents: state.memoryEvents,
+    dailyReports: state.dailyReports,
     uiPreferences: {
       showAdvancedSettings: state.showAdvancedSettings,
       myActionItemsOnly: state.myActionItemsOnly,
@@ -83,6 +84,13 @@ export function mergeSyncedAppState(local: SyncedAppState, server: SyncedAppStat
       personalPlan: mergeById(local.actionPlanState.personalPlan, server.actionPlanState.personalPlan),
     },
     memoryEvents: mergeMemoryEvents(local.memoryEvents, server.memoryEvents),
+    // V2.17 Task 2 point 5 — same treatment as attentionState/jiraWorkRelevancePolicy above:
+    // a Record keyed by date, unioned by key, server wins on a shared date. A date-level
+    // conflict (both devices generated a report for the same day independently) is rare and,
+    // per DailyReportSnapshot's own immutability contract, both sides' events for that day
+    // are already identical in practice (memoryEvents themselves are unioned above) — server
+    // winning is a safe, deterministic tie-break, not a real data-loss risk.
+    dailyReports: { ...local.dailyReports, ...server.dailyReports },
     uiPreferences: server.uiPreferences,
     updatedAtIso: server.updatedAtIso,
   };

@@ -54,6 +54,16 @@ export function commentMentionsAccount(body: unknown, accountId: string): boolea
   return mentionedIds.has(accountId);
 }
 
+/** V2.13 §2 / V2.17 §1a — one mentioning comment's stable identity, used both to key
+ *  MentionEvent.commentId (so store.ts/attention-queue.ts can track a mention per-comment) and
+ *  by cron-notify.ts's own dedup. Jira always returns a real `id` for a genuine comment; the
+ *  fallback (never expected to actually trigger against a real Jira instance) keeps this
+ *  deterministic rather than crashing on an unexpected shape, same "never assume the ideal
+ *  shape" discipline as this file's own ADF walker. */
+export function mentionCommentId(issueKey: string, comment: { id?: string; created?: string }): string {
+  return comment.id ?? `${issueKey}:no-id:${comment.created ?? ""}`;
+}
+
 /** One issue's raw comment list -> the MentionEvents that actually mention `accountId`.
  *  `today` is only ever used as a safe fallback when Jira omits a comment's `created`
  *  timestamp — never fabricated otherwise, same convention as jira/normalize.ts. */
@@ -68,6 +78,7 @@ export function buildMentionEvents(
     if (!commentMentionsAccount(comment.body, accountId)) continue;
     events.push({
       issueKey,
+      commentId: mentionCommentId(issueKey, comment),
       commentAuthor: comment.author?.displayName,
       excerpt: extractCommentExcerpt(comment.body),
       commentUrl: options.baseUrl ? `${options.baseUrl.replace(/\/$/, "")}/browse/${issueKey}?focusedCommentId=${comment.id ?? ""}` : undefined,

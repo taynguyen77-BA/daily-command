@@ -243,6 +243,42 @@ export function RelationBadge({ relation }: { relation: PersonalRelation | undef
   return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs tracking-wide ${RELATION_STYLES[relation]}`}>{RELATION_LABELS[relation]}</span>;
 }
 
+// ===== V2.17 Task 3 — MetaPill: the shared primitive behind every quiet, secondary label
+// this app renders (a status word, a session-state indicator, a "Pinned"/"Reopened"/"Handled"
+// flag, a decision-review note). Before this pass, ~25 call sites across the app each
+// hand-wrote their own `<span className="rounded border ... px-1.5 py-0.5 text-[10px]
+// uppercase tracking-wide ...">` — visually near-identical (the audit found no real color/
+// shape drift once compared side by side), but duplicated in ~25 places rather than shared,
+// so a future spacing/accessibility/dark-mode fix would mean hunting down every one of them
+// individually. `variant` covers the handful of colors those call sites actually used;
+// `uppercase` defaults to true (the overwhelming majority) but is escapable for the couple of
+// sentence-case exceptions (e.g. "Unchanged 5d"). See the V2.17 Task 3 audit report for the
+// full before/after list of migrated call sites. */
+export type MetaPillVariant = "neutral" | "accent" | "success" | "danger";
+const META_PILL_STYLES: Record<MetaPillVariant, string> = {
+  neutral: "border-border text-text3",
+  accent: "border-accent/30 bg-accent/10 text-accent2",
+  success: "border-green/30 bg-green/10 text-green",
+  danger: "border-red/30 bg-red/15 text-red",
+};
+export function MetaPill({
+  children,
+  variant = "neutral",
+  uppercase = true,
+  className = "",
+}: {
+  children: ReactNode;
+  variant?: MetaPillVariant;
+  uppercase?: boolean;
+  className?: string;
+}) {
+  return (
+    <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] ${uppercase ? "uppercase tracking-wide" : ""} ${META_PILL_STYLES[variant]} ${className}`}>
+      {children}
+    </span>
+  );
+}
+
 /** Shared filter-select control, same shape Attention Queue's category/severity/lifecycle
  *  filters already used locally — hoisted here so Priorities can reuse it for the V2.14 §3
  *  relation filter and the two pages stay visually consistent. */
@@ -258,6 +294,38 @@ export function Filter<T extends string>({ label, value, options, onChange, labe
         ))}
       </select>
     </label>
+  );
+}
+
+// ===== V2.17 Task 3 §3 — Filter control consolidation =====
+// Before this pass, Attention Queue and Priorities each laid out their several independent
+// filter controls (category, severity, lifecycle, relation, "My action items only") as a row
+// of separate, always-visible dropdowns/toggles — every control still present, just read as a
+// cluttered strip competing with the page's actual content for attention. FilterPanel folds
+// them behind one "Filters" disclosure control, same pattern as WhyDrawer's "Why am I seeing
+// this?" toggle elsewhere in this file — no filtering CAPABILITY is removed, only how many
+// controls are visible by default. `summary` renders next to the trigger label (e.g. an active
+// count) so a collapsed panel still tells you at a glance whether anything non-default is set.
+export function FilterPanel({ summary, children }: { summary?: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className={`rounded-md border px-3 py-1.5 text-xs font-medium ${summary ? "border-accent/40 text-accent2" : "border-border text-text2 hover:border-accent hover:text-text"}`}
+      >
+        Filters{summary ? ` · ${summary}` : ""}
+      </button>
+      {open && (
+        // right-0 (not left-0): both current call sites place this trigger at the right edge
+        // of its row, so opening toward the left keeps the panel on-screen instead of
+        // overflowing past the viewport's right edge.
+        <div className="absolute right-0 top-full z-20 mt-1 flex min-w-[260px] flex-col gap-3 rounded-md border border-border bg-surface p-3 shadow-lg">
+          {children}
+        </div>
+      )}
+    </div>
   );
 }
 

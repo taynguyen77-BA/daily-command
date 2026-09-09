@@ -3,7 +3,7 @@
 import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
-import { EmptyState, Filter, SectionHeading } from "@/components/command-center/ui";
+import { EmptyState, Filter, FilterPanel, SectionHeading } from "@/components/command-center/ui";
 import { PriorityCard } from "@/components/command-center/PriorityCard";
 import { TakeActionPanel } from "@/components/command-center/TakeActionPanel";
 import { itemForScore } from "@/lib/command-center/selectors";
@@ -74,6 +74,10 @@ function PrioritiesInner() {
     <div className="space-y-4 pb-16">
       <SectionHeading title="Priorities" subtitle="Every open work item, scored by the deterministic priority model." />
 
+      {/* V2.17 Task 3 §3 — severity tabs stay visible (the primary, most-scanned filter on
+          this page); Relation + "My action items only" — secondary, lower-traffic — fold
+          behind one "Filters" disclosure instead of sitting in the same always-visible row.
+          No filtering capability removed, same as the Attention Queue consolidation. */}
       <div className="flex flex-wrap items-center gap-1">
         {FILTERS.map((f) => (
           <button
@@ -86,19 +90,21 @@ function PrioritiesInner() {
             {f.label}
           </button>
         ))}
-        <div className="ml-2">
-          <Filter
-            label="Relation"
-            value={relationFilter}
-            options={RELATIONS}
-            onChange={setRelationFilter}
-            labels={{ ALL: "All", ASSIGNED: "Assigned to you", MENTIONED: "Mentioned you", FOLLOWING: "Following" }}
-          />
+        <div className="ml-auto">
+          <FilterPanel summary={relationFilter !== "ALL" || myActionItemsOnly ? String([relationFilter !== "ALL", myActionItemsOnly].filter(Boolean).length) : undefined}>
+            <Filter
+              label="Relation"
+              value={relationFilter}
+              options={RELATIONS}
+              onChange={setRelationFilter}
+              labels={{ ALL: "All", ASSIGNED: "Assigned to you", MENTIONED: "Mentioned you", FOLLOWING: "Following" }}
+            />
+            <label className="flex items-center gap-1.5 text-xs text-text3">
+              <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("priorities", e.target.checked)} className="h-3.5 w-3.5" />
+              My action items only
+            </label>
+          </FilterPanel>
         </div>
-        <label className="ml-auto flex items-center gap-1.5 text-xs text-text3">
-          <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("priorities", e.target.checked)} className="h-3.5 w-3.5" />
-          My action items only
-        </label>
       </div>
 
       {filtered.length === 0 ? (

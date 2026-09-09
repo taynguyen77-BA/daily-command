@@ -1,12 +1,13 @@
 "use client";
 
 import type { ChangeEvent } from "@/lib/command-center/types";
+import { MetaPill } from "./ui";
 
 export function ChangeItem({ change }: { change: ChangeEvent }) {
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-1 flex items-center gap-2 text-xs text-text3">
-        <span className="rounded border border-border px-1.5 py-0.5">{change.entityType}</span>
+        <MetaPill>{change.entityType}</MetaPill>
         <span>{change.field}</span>
       </div>
       <p className="font-display text-sm text-text">{change.entityLabel}</p>

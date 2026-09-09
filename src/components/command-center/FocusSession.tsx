@@ -13,7 +13,7 @@ import { commandCenterStore } from "@/lib/command-center/store";
 import type { ActionOutcomeStatus, FocusSessionState, PersonalFocusCandidate } from "@/lib/command-center/types";
 import { useCommandCenter } from "./use-command-center";
 import { DecisionAssistant } from "./DecisionAssistant";
-import { FocusCategoryBadge, TrustLabel } from "./ui";
+import { FocusCategoryBadge, MetaPill, TrustLabel } from "./ui";
 import { openSourceHref } from "./personal-focus-helpers";
 import { TicketLink } from "./TicketLink";
 
@@ -140,7 +140,7 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
           <TrustLabel kind="calculated" />
           <span className="text-xs uppercase tracking-wide text-text3">Focus Session</span>
           {sessionState === "IN_PROGRESS" && <span className="text-xs font-mono text-text3">{formatElapsed(elapsedMs)}</span>}
-          <span className="ml-auto rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text3">{sessionState.replace(/_/g, " ")}</span>
+          <MetaPill className="ml-auto">{sessionState.replace(/_/g, " ")}</MetaPill>
         </div>
 
         {(candidate.projectName || candidate.ticketKey) && (

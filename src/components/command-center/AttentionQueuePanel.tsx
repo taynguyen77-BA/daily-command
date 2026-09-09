@@ -7,7 +7,7 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import type { AttentionItem } from "@/lib/command-center/types";
-import { AttentionSeverityBadge, CategoryBadge, LifecycleBadge, Panel, RelationBadge, SectionHeading } from "./ui";
+import { AttentionSeverityBadge, CategoryBadge, LifecycleBadge, MetaPill, Panel, RelationBadge, SectionHeading } from "./ui";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { DecisionAssistant } from "./DecisionAssistant";
 import { AskClaudeAbout } from "./AskClaudeAbout";
@@ -15,6 +15,24 @@ import { ArtifactEditor } from "./ArtifactEditor";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
 import { TicketLink } from "./TicketLink";
+import { groupMentionItems, mentionGroupLabel } from "@/lib/command-center/mention-grouping";
+
+/** V2.17 §1a point 4 — folds several still-visible MENTION items on the same ticket into one
+ *  card (see mention-grouping.ts's own top comment for the full "why"). Purely a display
+ *  concern: grouping happens on whatever list is about to be rendered, never on the queue
+ *  itself, so lifecycle actions (Acknowledge/Snooze/Resolve) below still operate on the real,
+ *  individual underlying AttentionItem the representative card was built from. */
+export function groupMentionAttentionItems(items: AttentionItem[]): AttentionItem[] {
+  return groupMentionItems(items, {
+    isMention: (item) => item.category === "MENTION",
+    // sourceRef (set directly by attention-queue.ts) rather than ticketKey (only populated
+    // later, by proactive.ts's enrichment pass) — grouping must work even against the raw
+    // queue output, not just the fully-enriched one.
+    groupKey: (item) => (item.sourceRef?.type === "workItem" ? item.sourceRef.id : item.ticketKey),
+    recency: (item) => item.lastSeenDate,
+    relabel: (mostRecent, count) => ({ ...mostRecent, what: mentionGroupLabel(count) }),
+  });
+}
 
 export function AttentionItemCard({ item, showViewLink = false }: { item: AttentionItem; showViewLink?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -34,13 +52,15 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
   return (
     <Panel className="p-4">
       <div className="mb-1 flex flex-wrap items-center gap-2">
-        <CategoryBadge category={item.category} />
+        {/* V2.17 Task 3 §2 — relation ("is this mine?") leads, then category/severity; the
+            ticket link and lifecycle recede into the quieter tail of the row. */}
         <RelationBadge relation={item.relation} />
+        <CategoryBadge category={item.category} />
         <AttentionSeverityBadge severity={item.severity} />
-        <LifecycleBadge lifecycle={item.lifecycle} />
+        {item.relatedDecisionId && <MetaPill variant="accent">Decision needed</MetaPill>}
         {item.lifecycle === "REOPENED" && <span className="text-xs text-red">Reopened — previously resolved</span>}
         {item.lifecycle === "RE_ESCALATED" && <span className="text-xs text-red">Re-escalated — severity increased</span>}
-        {item.relatedDecisionId && <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent2">Decision needed</span>}
+        <LifecycleBadge lifecycle={item.lifecycle} />
         {item.ticketKey && <TicketLink ticketKey={item.ticketKey} url={item.ticketUrl} className="text-xs text-text3" />}
       </div>
       <p className="font-display text-sm text-text">{item.what}</p>
@@ -121,7 +141,7 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
 }
 
 export function AttentionQueuePanel({ items, limit = 6 }: { items: AttentionItem[]; limit?: number }) {
-  const visible = items.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED").slice(0, limit);
+  const visible = groupMentionAttentionItems(items.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED")).slice(0, limit);
 
   return (
     <section>

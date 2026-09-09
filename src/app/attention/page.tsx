@@ -6,8 +6,8 @@
 
 import { useState } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
-import { AttentionItemCard } from "@/components/command-center/AttentionQueuePanel";
-import { EmptyState, Filter, Panel, SectionHeading } from "@/components/command-center/ui";
+import { AttentionItemCard, groupMentionAttentionItems } from "@/components/command-center/AttentionQueuePanel";
+import { EmptyState, Filter, FilterPanel, Panel, SectionHeading } from "@/components/command-center/ui";
 import { isMyActionItem } from "@/lib/command-center/personal-relation";
 import type { AttentionCategory, AttentionLifecycle, AttentionSeverity, PersonalRelation } from "@/lib/command-center/types";
 
@@ -44,7 +44,7 @@ export default function AttentionPage() {
     return <EmptyState title="No data yet" description="Load the demo dataset to see the Attention Queue in action." onLoadDemo={() => store.loadDemoData()} />;
   }
 
-  const items = (proactive?.attentionQueue ?? []).filter((i) => {
+  const filteredItems = (proactive?.attentionQueue ?? []).filter((i) => {
     if (category !== "ALL" && i.category !== category) return false;
     if (severity !== "ALL" && i.severity !== severity) return false;
     if (lifecycle === "ACTIVE_DEFAULT") {
@@ -55,33 +55,44 @@ export default function AttentionPage() {
     if (myActionItemsOnly && !isMyActionItem(i.relation)) return false;
     return true;
   });
+  // V2.17 §1a point 4 — several still-visible MENTION items on the same ticket fold into one
+  // card here, purely a display concern (see groupMentionAttentionItems's own comment).
+  const items = groupMentionAttentionItems(filteredItems);
+
+  // V2.17 Task 3 §3 — before this pass, category/severity/lifecycle/relation/"My action items
+  // only" were five always-visible controls in one row. All five capabilities are unchanged;
+  // they're just folded behind one "Filters" disclosure now (FilterPanel), with an active
+  // count next to the trigger so a collapsed panel still says whether anything is narrowed.
+  const activeFilterCount = [category !== "ALL", severity !== "ALL", lifecycle !== "ACTIVE_DEFAULT", relation !== "ALL", myActionItemsOnly].filter(Boolean).length;
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading title="Attention Queue" subtitle="Every proactive signal, deduplicated and priority-ordered — see the main dashboard for the condensed view." />
-
-      <Panel className="flex flex-wrap items-center gap-4 p-4">
-        <Filter
-          label="Category"
-          value={category}
-          options={CATEGORIES}
-          onChange={(v) => setCategory(v as AttentionCategory | "ALL")}
-          labels={{ MENTION: "Mentioned me", ASSIGNMENT: "Assigned to me" }}
-        />
-        <Filter label="Severity" value={severity} options={SEVERITIES} onChange={(v) => setSeverity(v as AttentionSeverity | "ALL")} />
-        <Filter label="Lifecycle" value={lifecycle} options={LIFECYCLES} onChange={setLifecycle} labels={{ ACTIVE_DEFAULT: "Active (default)" }} />
-        <Filter
-          label="Relation"
-          value={relation}
-          options={RELATIONS}
-          onChange={setRelation}
-          labels={{ ALL: "All", ASSIGNED: "Assigned to you", MENTIONED: "Mentioned you", FOLLOWING: "Following" }}
-        />
-        <label className="ml-auto flex items-center gap-1.5 text-xs text-text3">
-          <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("attention", e.target.checked)} className="h-3.5 w-3.5" />
-          My action items only
-        </label>
-      </Panel>
+      <SectionHeading
+        title="Attention Queue"
+        subtitle="Every proactive signal, deduplicated and priority-ordered — see the main dashboard for the condensed view."
+        action={<FilterPanel summary={activeFilterCount > 0 ? String(activeFilterCount) : undefined}>
+          <Filter
+            label="Category"
+            value={category}
+            options={CATEGORIES}
+            onChange={(v) => setCategory(v as AttentionCategory | "ALL")}
+            labels={{ MENTION: "Mentioned me", ASSIGNMENT: "Assigned to me" }}
+          />
+          <Filter label="Severity" value={severity} options={SEVERITIES} onChange={(v) => setSeverity(v as AttentionSeverity | "ALL")} />
+          <Filter label="Lifecycle" value={lifecycle} options={LIFECYCLES} onChange={setLifecycle} labels={{ ACTIVE_DEFAULT: "Active (default)" }} />
+          <Filter
+            label="Relation"
+            value={relation}
+            options={RELATIONS}
+            onChange={setRelation}
+            labels={{ ALL: "All", ASSIGNED: "Assigned to you", MENTIONED: "Mentioned you", FOLLOWING: "Following" }}
+          />
+          <label className="flex items-center gap-1.5 text-xs text-text3">
+            <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("attention", e.target.checked)} className="h-3.5 w-3.5" />
+            My action items only
+          </label>
+        </FilterPanel>}
+      />
 
       {items.length === 0 ? (
         <Panel className="p-6 text-sm text-text3">No attention items match these filters.</Panel>
