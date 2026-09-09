@@ -173,7 +173,7 @@ import { computeActionableSignals } from "../src/lib/command-center/jira/work-re
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "../src/lib/command-center/jira/work-relevance-history";
 import type { WorkRelevance, DeliveryLoop } from "../src/lib/command-center/types";
 // V2.10 — Real-time mention/assignment tracking
-import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt } from "../src/lib/command-center/jira/mentions";
+import { buildMentionEvents, commentMentionsAccount, extractCommentExcerpt, selectRecentMentionCandidates } from "../src/lib/command-center/jira/mentions";
 import { detectNewAssignments } from "../src/lib/command-center/assignment-detection";
 import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "../src/lib/command-center/notify";
 import { fetchMentionedIssuesWith, fetchIssueCommentsWith } from "../src/lib/command-center/jira/http";
@@ -1487,6 +1487,31 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const prevSnapshotAlreadyMine = toSnapshot({ ...emptyData(), workItems: [{ ...mentionWorkItem, ownerId: "acc-me" }] }, "2026-06-14");
   ok("V2.10 Assignment", detectNewAssignments(nowAssignedToMe, prevSnapshotAlreadyMine, "acc-me").length === 0, "a work item already assigned to the configured account as of the last snapshot is NOT a new assignment");
   ok("V2.10 Assignment", detectNewAssignments(nowAssignedToMe, null, "acc-me").length === 0, "with no previous snapshot at all (first-ever sync), new-assignment detection never guesses — nothing was 'before'");
+
+  // --- V2.17 §1 — selectRecentMentionCandidates: recency fallback for the JQL search index's
+  // real indexing lag on brand-new comments (reproduces the exact real-incident shape: a
+  // ~1-day-old mention the JQL search hadn't indexed yet, verified directly against a real
+  // Jira instance during the investigation this fix came from). ---
+  const NOW_MS = new Date("2026-09-09T12:00:00.000Z").getTime();
+  const recentIssue = makeJiraIssue({ key: "WF-1083", updated: "2026-09-08T18:40:00.000Z" }); // ~17h before NOW_MS
+  const staleIssue = makeJiraIssue({ key: "HSWB-900", updated: "2026-08-01T00:00:00.000Z" }); // weeks before NOW_MS
+  const alreadyCoveredIssue = makeJiraIssue({ key: "ECW-243", updated: "2026-09-09T00:00:00.000Z" }); // recent but already found via JQL
+  const noUpdatedIssue = makeJiraIssue({ key: "NOU-1", updated: undefined });
+
+  const candidates = selectRecentMentionCandidates([recentIssue, staleIssue, alreadyCoveredIssue, noUpdatedIssue], new Set(["ECW-243"]), NOW_MS);
+  ok("V2.17 Recent mention candidates", candidates.some((i) => i.key === "WF-1083"), "an issue updated within the lookback window (the exact WF-1083 real-incident shape: mentioned ~17h before this sync) is selected as a candidate");
+  ok("V2.17 Recent mention candidates", !candidates.some((i) => i.key === "HSWB-900"), "an issue updated weeks ago is never selected — the lookback window is real, not a rubber stamp");
+  ok("V2.17 Recent mention candidates", !candidates.some((i) => i.key === "ECW-243"), "an issue already covered by the JQL search result (excludeKeys) is never re-checked, even though it's recent — no duplicate comment fetch");
+  ok("V2.17 Recent mention candidates", !candidates.some((i) => i.key === "NOU-1"), "an issue with no `updated` timestamp at all is never selected — recency can't be claimed for it, so it's excluded rather than guessed as recent");
+
+  const manyRecentIssues = Array.from({ length: 30 }, (_, i) => makeJiraIssue({ key: `CAP-${i}`, updated: new Date(NOW_MS - i * 60_000).toISOString() }));
+  const capped = selectRecentMentionCandidates(manyRecentIssues, new Set(), NOW_MS);
+  ok("V2.17 Recent mention candidates", capped.length === 20, "the candidate set is hard-capped at 20 (matching jira/scope-drift.ts's own selectPrioritizedIssueKeys precedent) even when far more issues qualify by recency alone — this can never become 'check comments on every issue'");
+  ok("V2.17 Recent mention candidates", capped[0].key === "CAP-0", "when more candidates qualify than the cap allows, the most recently updated ones win — never an arbitrary/input-order truncation");
+
+  const outOfOrderIssues = [makeJiraIssue({ key: "OLDER", updated: "2026-09-08T00:00:00.000Z" }), makeJiraIssue({ key: "NEWER", updated: "2026-09-09T06:00:00.000Z" })];
+  const orderedCandidates = selectRecentMentionCandidates(outOfOrderIssues, new Set(), NOW_MS);
+  ok("V2.17 Recent mention candidates", orderedCandidates[0].key === "NEWER", "candidates are sorted most-recently-updated-first regardless of input order — never trusts the caller's ordering blindly, per the function's own documented defensiveness");
 }
 
 // ===== V2.10 §3 — computeNewPersonalSignals (real-time Slack delivery gate) =====
@@ -7543,6 +7568,21 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     /catch \{\s*\/\/ Migration write failed/.test(storeSrc),
     "a failed migration write leaves the legacy localStorage copy in place (not cleared) — a genuinely lost write here would look exactly like the original bug, so the migration itself must be safe on partial failure"
   );
+}
+
+// --- V2.17 — a third, independent finding, surfaced when asked to check why mentionEvents
+// was coming back empty even after the V2.16 fixes: HSWB-1298/WF-1083's original mention on
+// WF-1083 STILL wouldn't have been found by the JQL search alone, because Jira's own comment
+// full-text search index has a real indexing lag — confirmed directly against the real
+// instance (see selectRecentMentionCandidates's own comment for the exact evidence). The pure
+// selection logic itself is fully unit-tested above; this verifies the sync route actually
+// wires it in, rather than leaving the fix stranded as dead code only the test file exercises. ---
+{
+  const repoRoot = path.resolve(process.cwd());
+  const syncRouteSrc2 = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
+  ok("V2.17 Sync route wiring", /import \{ buildMentionEvents, selectRecentMentionCandidates \}/.test(syncRouteSrc2), "the route imports the shared, directly-tested selectRecentMentionCandidates rather than a second inline implementation");
+  ok("V2.17 Sync route wiring", /selectRecentMentionCandidates\(issuesResult\.data, checkedKeys, Date\.now\(\)\)/.test(syncRouteSrc2), "the recency fallback runs over this sync's own already-fetched issue batch (never a second Jira fetch) and excludes issues the JQL search already covered");
+  ok("V2.17 Sync route wiring", (syncRouteSrc2.match(/buildMentionEvents\(issue\.key, commentsResult\.data, accountId/g) ?? []).length === 2, "both the JQL-search pass and the recency-fallback pass call the exact same buildMentionEvents/commentMentionsAccount verification — no second, divergent detection rule for the fallback path");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

@@ -21,7 +21,7 @@ import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
 import { isSyncRequestAuthorized } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
-import { buildMentionEvents } from "@/lib/command-center/jira/mentions";
+import { buildMentionEvents, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
 import { buildIncrementalSinceParam, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
@@ -174,8 +174,10 @@ export async function POST(req: Request) {
       const mentionedResult = await fetchMentionedIssues(config, accountId, jqlSinceIso);
       if (mentionedResult.ok) {
         const events: MentionEvent[] = [];
+        const checkedKeys = new Set<string>();
         await Promise.all(
           mentionedResult.data.map(async (issue) => {
+            checkedKeys.add(issue.key);
             try {
               const commentsResult = await fetchIssueComments(config, issue.key);
               if (commentsResult.ok) {
@@ -186,6 +188,25 @@ export async function POST(req: Request) {
             }
           })
         );
+
+        // V2.17 — recency fallback: Jira's comment-search JQL above has a real indexing lag
+        // for brand-new comments, so a very recent mention can be undiscoverable through it
+        // for a while — see selectRecentMentionCandidates's own comment for the full
+        // reasoning and the real-instance evidence behind it.
+        const recentCandidates = selectRecentMentionCandidates(issuesResult.data, checkedKeys, Date.now());
+        await Promise.all(
+          recentCandidates.map(async (issue) => {
+            try {
+              const commentsResult = await fetchIssueComments(config, issue.key);
+              if (commentsResult.ok) {
+                events.push(...buildMentionEvents(issue.key, commentsResult.data, accountId, { baseUrl: config.baseUrl, today }));
+              }
+            } catch {
+              // best-effort — a single issue's comment fetch failure never fails the sync
+            }
+          })
+        );
+
         mentionEvents = events;
       }
     } catch {

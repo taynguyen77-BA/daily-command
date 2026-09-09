@@ -2,10 +2,12 @@
 // data (see ./http.ts fetchMentionedIssuesWith/fetchIssueCommentsWith) — no network calls
 // here, matching normalize.ts's own "pure Jira -> domain-model" discipline.
 
-import type { JiraComment } from "./types";
+import type { JiraComment, JiraIssue } from "./types";
 import type { MentionEvent } from "../types";
 
 const EXCERPT_MAX_LENGTH = 200;
+const DEFAULT_RECENT_LOOKBACK_HOURS = 48;
+const DEFAULT_RECENT_CANDIDATE_CAP = 20;
 
 /** Jira's v3 API returns a comment body as Atlassian Document Format (a nested node tree);
  *  some instances/API paths return a plain string instead. Never assumed to be one or the
@@ -73,4 +75,43 @@ export function buildMentionEvents(
     });
   }
   return events;
+}
+
+/**
+ * V2.17 — recency fallback for mention discovery. Jira's `comment ~ "accountid:X"` JQL search
+ * (fetchMentionedIssuesWith) depends entirely on Jira's own full-text search index, which has
+ * a real indexing lag for brand-new comments — confirmed directly against a real instance: a
+ * mention posted ~1 day earlier was NOT yet findable via that JQL, while a ~2-month-old
+ * mention on the same site was. So a mention from "last night" (the exact case mention
+ * detection exists for) can be genuinely undiscoverable through the JQL alone for a while,
+ * even though the comment itself already exists and commentMentionsAccount above would
+ * correctly recognize it. This selects a small, bounded set of candidate issues to check
+ * comments on directly instead — sidestepping the lagging index rather than depending on it —
+ * from an already-fetched issue batch (never a second Jira fetch of its own): issues updated
+ * within `lookbackHours`, excluding any already covered by the JQL search result
+ * (`excludeKeys`), capped at `cap` so this can never become "check comments on every issue"
+ * (see fetchMentionedIssuesWith's own comment on why bulk comment fetching is the one mistake
+ * this app avoids). Callers are expected to pass an issue batch already ordered
+ * most-recently-updated-first (buildIssuesJql's `order by updated desc`), so the cap keeps
+ * the most relevant candidates — but this function sorts defensively rather than trusting
+ * that ordering, since a wrongly-ordered cap would silently favor the wrong issues.
+ */
+export function selectRecentMentionCandidates(
+  issues: JiraIssue[],
+  excludeKeys: ReadonlySet<string>,
+  nowMs: number,
+  lookbackHours: number = DEFAULT_RECENT_LOOKBACK_HOURS,
+  cap: number = DEFAULT_RECENT_CANDIDATE_CAP
+): JiraIssue[] {
+  const cutoffMs = nowMs - lookbackHours * 60 * 60 * 1000;
+  return issues
+    .filter((issue) => {
+      if (excludeKeys.has(issue.key)) return false;
+      const updated = issue.fields.updated;
+      if (!updated) return false;
+      const updatedMs = new Date(updated).getTime();
+      return Number.isFinite(updatedMs) && updatedMs >= cutoffMs;
+    })
+    .sort((a, b) => (b.fields.updated ?? "").localeCompare(a.fields.updated ?? ""))
+    .slice(0, cap);
 }
