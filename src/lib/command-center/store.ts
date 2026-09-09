@@ -1,8 +1,14 @@
 // Local persistence layer (BUILD REQUEST §15 local persistence, §10 session learning;
 // extended in V1.2 §2 for inspectable, deletable project memory; extended in V1.3 for
-// Jira as a data source). No backend, no auth — a plain external store backed by
-// localStorage, consumed via React's useSyncExternalStore
-// (see components/command-center/use-command-center.ts).
+// Jira as a data source). No backend, no auth — a plain external store, consumed via React's
+// useSyncExternalStore (see components/command-center/use-command-center.ts).
+//
+// V2.16 — backed by IndexedDB (see local-db.ts), not localStorage: a real Jira-scale dataset
+// can exceed localStorage's ~5-10MB per-origin quota, which silently stopped every sync from
+// persisting once crossed. Falls back to the original synchronous localStorage behavior when
+// IndexedDB genuinely isn't available (old browsers, some private-browsing modes, this app's
+// own Node test environment) — see hydrate()/persist() below — and migrates any existing
+// localStorage data into IndexedDB once, the first time a device with IndexedDB loads.
 
 import { buildDemoData } from "./demo-data";
 import { detectChanges, toSnapshot } from "./change-detection";
@@ -10,6 +16,7 @@ import { getAIProvider } from "./ai";
 import { todayLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
+import { idbGet, idbSet } from "./local-db";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
 import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "./jira/work-relevance-history";
@@ -330,22 +337,83 @@ export class CommandCenterStore {
   private hydrate() {
     if (this.hydrated || typeof window === "undefined") return;
     this.hydrated = true;
+    if (typeof indexedDB === "undefined") {
+      // No IndexedDB available (old browser, some locked-down private-browsing modes, or
+      // this app's own Node-based offline test environment) — the original, fully
+      // synchronous localStorage path, unchanged.
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        if (raw) this.state = parseStoredState(raw);
+      } catch {
+        // localStorage inaccessible (e.g. private browsing) — fall back to pristine state.
+        this.state = initialState();
+      }
+      return;
+    }
+    // V2.16 — IndexedDB reads are inherently async, but getSnapshot() must return
+    // synchronously for useSyncExternalStore — this kicks off the read in the background;
+    // once it resolves, set() notifies every subscribed component, same as any other state
+    // change. Until then, callers see the pristine initialState(), an unavoidable, brief
+    // first-paint gap — the same one this app already accepts for getServerSnapshot()
+    // (also always pristine).
+    void this.hydrateFromIndexedDb();
+  }
+
+  /** V2.16 — one-time migration: a device that already has real data in the OLD localStorage
+   *  key (every install from before this pass) must not appear to have "lost" it just
+   *  because IndexedDB is empty on its first-ever read here. The legacy key is only cleared
+   *  once its content has actually been confirmed written to IndexedDB — a failed migration
+   *  write leaves the old copy in place so the next reload simply retries. */
+  private async hydrateFromIndexedDb() {
     try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) this.state = parseStoredState(raw);
+      const fromIdb = await idbGet(STORAGE_KEY);
+      if (fromIdb) {
+        this.set(parseStoredState(fromIdb));
+        return;
+      }
     } catch {
-      // localStorage inaccessible (e.g. private browsing) — fall back to pristine state.
-      this.state = initialState();
+      // IndexedDB read failed — fall through to the legacy-migration/pristine path below.
+    }
+
+    let legacyRaw: string | null = null;
+    try {
+      legacyRaw = window.localStorage.getItem(STORAGE_KEY);
+    } catch {
+      // localStorage inaccessible too — nothing to migrate from; stay pristine.
+    }
+    if (!legacyRaw) return; // genuinely nothing persisted anywhere yet
+
+    const migrated = parseStoredState(legacyRaw);
+    this.set(migrated);
+    try {
+      await idbSet(STORAGE_KEY, JSON.stringify(migrated));
+      window.localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Migration write failed — legacy copy stays in place; persist() below will keep
+      // retrying the IndexedDB write on every subsequent mutation regardless.
     }
   }
 
   private persist() {
     if (typeof window === "undefined") return;
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
-    } catch {
-      // Storage full/unavailable — keep working in-memory for this session.
+    if (typeof indexedDB === "undefined") {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
+      } catch {
+        // Storage full/unavailable — keep working in-memory for this session.
+      }
+      return;
     }
+    // V2.16 — fire-and-forget, same as the localStorage write it replaces: persistence must
+    // never block a UI update. IndexedDB's much larger quota makes hitting it a genuinely
+    // rare condition (unlike localStorage's ~5-10MB ceiling this replaces) — still never
+    // thrown past this module (the same "keep working in-memory" contract as every other
+    // storage failure here), but logged rather than fully swallowed, since a failure here is
+    // unusual enough to be worth a trace if someone's debugging "my changes don't survive a
+    // reload".
+    void idbSet(STORAGE_KEY, JSON.stringify(this.state)).catch((err) => {
+      console.error("CommandCenterStore: failed to persist to IndexedDB", err);
+    });
   }
 
   private set(next: StoreState) {

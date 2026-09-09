@@ -7497,5 +7497,53 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.16 known pre-existing behavior", /jiraSync\.lastSyncStatus === "success" &&/.test(pageSrc), "documents that 'Before You Trust This Data' still only renders on a successful sync today — the new Header banner is what now covers the failed-sync case on every page instead");
 }
 
+// --- V2.16 (part 2) — a second, independent finding surfaced while verifying the sync-auth
+// fix above on a real device: even after pairing fixed the auth failure, a real sync's result
+// never survived a reload. The actual dataset (thousands of work items plus history) produced
+// a ~7.8MB JSON blob; localStorage's per-origin quota (~5-8MB in the browser this was found
+// in) rejected the write with QuotaExceededError, and the old persist() swallowed it in a bare
+// try/catch — the UI showed "Connected" (the in-memory state update always succeeds), but
+// nothing was ever written to disk, so the next reload silently reverted to whatever last fit.
+//
+// Fix: local persistence moved to IndexedDB (src/lib/command-center/local-db.ts), whose quota
+// is a large fraction of available disk space rather than a fixed ~5-10MB ceiling. Real
+// IndexedDB read/write round-trips can't be exercised in this Node-based offline suite (no
+// `indexedDB` global, and this app deliberately doesn't shim one — see local-db.ts's own
+// comment), so — matching this suite's existing precedent for other browser-only wiring it
+// can't execute directly (e.g. the V2.15 secret-hygiene checks above) — this verifies the
+// actual source: that store.ts only ever takes the new IndexedDB path when `indexedDB` exists,
+// and falls back to the EXACT original synchronous localStorage code otherwise (old browsers,
+// some private-browsing modes, and — provably, since every test above this point just passed
+// unmodified — this suite's own Node environment, which has no indexedDB global at all). ---
+{
+  const repoRoot = path.resolve(process.cwd());
+  const localDbSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/local-db.ts"), "utf8");
+  ok("V2.16 IndexedDB backend", /indexedDB\.open\(/.test(localDbSrc), "local-db.ts opens a real IndexedDB database — not a second in-memory/localStorage implementation wearing an IndexedDB name");
+  ok("V2.16 IndexedDB backend", /export async function idbGet/.test(localDbSrc) && /export async function idbSet/.test(localDbSrc), "exposes a minimal get/set pair, matching the single-blob shape store.ts already persists");
+
+  const storeSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/store.ts"), "utf8");
+  ok("V2.16 IndexedDB wiring", /import \{ idbGet, idbSet \} from "\.\/local-db"/.test(storeSrc), "store.ts uses the shared IndexedDB adapter, not a duplicated implementation");
+  ok(
+    "V2.16 IndexedDB wiring",
+    (storeSrc.match(/typeof indexedDB === "undefined"/g) ?? []).length === 2,
+    "both hydrate() and persist() explicitly check IndexedDB availability before using it — exactly once each, so the fallback path is a deliberate branch, not an accidental gap"
+  );
+  ok(
+    "V2.16 IndexedDB wiring",
+    /window\.localStorage\.setItem\(STORAGE_KEY, JSON\.stringify\(this\.state\)\)/.test(storeSrc),
+    "persist()'s fallback-when-no-IndexedDB branch is the exact original localStorage write — never removed, so every existing (Node-based, indexedDB-less) test above continues to exercise the real fallback code path unmodified"
+  );
+  ok(
+    "V2.16 IndexedDB wiring",
+    /idbSet\(STORAGE_KEY, JSON\.stringify\(migrated\)\)/.test(storeSrc) && /window\.localStorage\.removeItem\(STORAGE_KEY\)/.test(storeSrc),
+    "the legacy-localStorage migration writes the existing data into IndexedDB and only then clears the old key — a device that already has real local data (every install from before this pass) is migrated, never silently reset to pristine"
+  );
+  ok(
+    "V2.16 IndexedDB wiring",
+    /catch \{\s*\/\/ Migration write failed/.test(storeSrc),
+    "a failed migration write leaves the legacy localStorage copy in place (not cleared) — a genuinely lost write here would look exactly like the original bug, so the migration itself must be safe on partial failure"
+  );
+}
+
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
 process.exit(failures === 0 ? 0 : 1);
