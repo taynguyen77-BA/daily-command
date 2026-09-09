@@ -48,6 +48,23 @@ export interface Requirement {
   testCoveragePct?: number; // 0-100, undefined = no coverage tracked
 }
 
+// V2.18 §7 — discriminates which of risk-detection.ts's rules produced an auto-detected
+// risk. Absent on manually-logged/imported risks. This is the "rule/type" identity component
+// a stable fingerprint needs — title text alone is neither reliably stable (R6's title embeds
+// an age-in-days that changes daily even though the underlying condition hasn't) nor
+// project-distinguishing (R6/R7/R10's titles carry no project/client token at all).
+export type RiskRuleId =
+  | "deadline-risk" // R1
+  | "blocked-dependency" // R2
+  | "no-owner" // R3
+  | "stalled" // R4
+  | "scope-unstable" // R5
+  | "dependency-unresolved" // R6
+  | "weak-test-coverage" // R7
+  | "release-readiness" // R8
+  | "production-no-followup" // R9
+  | "owner-overload"; // R10
+
 export interface Risk {
   id: string;
   projectId: string;
@@ -62,6 +79,16 @@ export interface Risk {
   detectedAt: string; // ISO date
   sourceWorkItemIds: string[];
   auto?: boolean; // true = detected by the deterministic risk engine, not manually logged
+  /** V2.18 §7 — which rule fired (auto risks only). Paired with identityKey below to build a
+   *  stable cross-project/cross-day fingerprint (see risk-detection.ts's riskFingerprint) —
+   *  never used for display. */
+  ruleId?: RiskRuleId;
+  /** V2.18 §7 — a rule-scoped stable natural key: whichever real-world thing (a WorkItem,
+   *  Dependency, Requirement, Project id, or owner name) is genuinely the SAME thing across
+   *  days for that rule. Distinct from sourceWorkItemIds, which stays a display/evidence
+   *  field and can legitimately change membership day to day (e.g. R8/R10's item sets)
+   *  without the underlying risk being "different". Never shown in the UI. Auto risks only. */
+  identityKey?: string;
 }
 
 // V1.2 widens Decision status to a richer memory-tracking set while keeping the original
@@ -429,7 +456,11 @@ export type JiraErrorKind =
 export interface JiraSyncState {
   lastSyncStartedAt?: string;
   lastSyncCompletedAt?: string;
-  lastSyncStatus: "never" | "success" | "failed";
+  // V2.18 §5 — "partial" is a confirmed-real, distinct state (not just a warnings[] string):
+  // the sync reached JIRA_MAX_ISSUES before it reached the real end of matching issues.
+  // Every existing `=== "success"` / `=== "failed"` check keeps compiling and behaving
+  // identically — this is a purely additive third state.
+  lastSyncStatus: "never" | "success" | "partial" | "failed";
   lastSyncError?: string;
   lastSyncErrorKind?: JiraErrorKind;
   recordsFetched?: number;

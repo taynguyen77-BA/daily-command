@@ -5,6 +5,7 @@
 
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import {
   aiRequestSchema,
   assessmentResponseSchema,
@@ -57,6 +58,13 @@ function extractJson(text: string): unknown {
 }
 
 export async function POST(req: Request) {
+  // V2.18 §4 — this route spends the account owner's Anthropic budget on every call; it had
+  // no auth at all before this pass. Same gate/contract as jira/sync (see sync-auth.ts).
+  const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return NextResponse.json({ ok: false, error: "AI provider unavailable: no API key configured on the server." }, { status: 503 });

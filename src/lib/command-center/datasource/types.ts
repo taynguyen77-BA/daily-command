@@ -27,6 +27,12 @@ export interface DataSourceSyncResult {
   // V2.10 §2 — "who mentioned me in a comment?", additive/optional: only ever populated when
   // the sync request carried a configured accountId (see DataSourceProvider.sync below).
   mentionEvents?: MentionEvent[];
+  // V2.18 §5 — true when this sync stopped at the JIRA_MAX_ISSUES safety cap before reaching
+  // the real end of matching issues; resumeSinceIso is the boundary the NEXT sync must ask
+  // for (see jira/http.ts's computeResumeCursor and store.ts's syncJira, which advances its
+  // incremental cursor to this instead of syncedAt whenever a sync is partial).
+  truncated?: boolean;
+  resumeSinceIso?: string;
 }
 
 export interface DataSourceProvider {

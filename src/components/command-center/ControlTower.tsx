@@ -65,7 +65,12 @@ export function ControlTower({
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
         <Tile label="Delivery confidence">
           <span className="font-display text-2xl text-text">
-            {deliveryConfidence}%{" "}
+            {/* V2.18 §11 — used to render this score with a trailing percent sign, implying
+                a statistical probability. This is a deterministic 0-100 heuristic score
+                (executive.ts's own comment: "not an AI opinion"), never a probability —
+                "/100" is the honest framing ExecutiveView.tsx already uses correctly for the
+                same number. */}
+            {deliveryConfidence}/100{" "}
             {confidenceDelta !== undefined && confidenceDelta !== 0 && (
               <span className={confidenceDelta > 0 ? "text-green text-sm" : "text-red text-sm"}>
                 {confidenceDelta > 0 ? "↑" : "↓"} {Math.abs(confidenceDelta)}
@@ -92,7 +97,20 @@ export function ControlTower({
           {topDecision ? <p className="text-sm text-text2">{topDecision.decision.title}</p> : <p className="text-sm text-text3">None</p>}
         </Tile>
         <Tile label="Action">
-          {topIneffectiveAction ? <p className="text-sm text-text2">{topIneffectiveAction.what}</p> : <p className="text-sm text-text3">All effective</p>}
+          {/* V2.18 §11 — confirmed real bug: topIneffectiveAction is undefined in two
+              indistinguishable cases — (a) many actions exist and all are effective, or
+              (b) zero actions have EVER been logged/completed at all. This used to render
+              "All effective" for both, a false-confidence signal implying evaluated, positive
+              outcomes when case (b) has nothing measured at all. proactive.actionEffectiveness
+              (already computed, full-history) distinguishes the two without any new
+              computation. */}
+          {topIneffectiveAction ? (
+            <p className="text-sm text-text2">{topIneffectiveAction.what}</p>
+          ) : proactive.actionEffectiveness.length === 0 ? (
+            <p className="text-sm text-text3">No action outcomes yet</p>
+          ) : (
+            <p className="text-sm text-text3">All effective</p>
+          )}
         </Tile>
         <Tile label="Data confidence">
           <p className="text-sm text-text2">

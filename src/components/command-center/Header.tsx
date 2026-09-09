@@ -28,7 +28,14 @@ function DataSourceBadge() {
   const time = state.jiraSync.lastSyncCompletedAt
     ? new Date(state.jiraSync.lastSyncCompletedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
     : "never";
-  const statusLabel = state.jiraSync.lastSyncStatus === "success" ? "Connected" : state.jiraSync.lastSyncStatus === "failed" ? "Sync failed" : "Not synced";
+  const statusLabel =
+    state.jiraSync.lastSyncStatus === "success"
+      ? "Connected"
+      : state.jiraSync.lastSyncStatus === "partial"
+      ? "Partially synced"
+      : state.jiraSync.lastSyncStatus === "failed"
+      ? "Sync failed"
+      : "Not synced";
   return (
     <span className="flex items-center gap-2 rounded border border-border px-2 py-0.5 text-[11px] text-text3">
       <span>Data source: {label}</span>

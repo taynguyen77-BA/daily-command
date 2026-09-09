@@ -2,7 +2,7 @@
 // Every rule here is an explicit, reproducible combination of fields — no model call.
 
 import { daysBetween } from "./scoring";
-import type { CommandCenterData, Risk, WorkItem } from "./types";
+import type { CommandCenterData, Risk, RiskRuleId, WorkItem } from "./types";
 
 let counter = 0;
 function riskId(prefix: string) {
@@ -10,15 +10,34 @@ function riskId(prefix: string) {
   return `auto-risk-${prefix}-${counter}`;
 }
 
+/** V2.18 §7 — the single canonical identity function, reused by dedupeRisks (selectors.ts)
+ *  and computeRiskEscalations (risk-escalation.ts) instead of each inventing its own key.
+ *  Auto risks are identified by rule + project + a rule-scoped stable natural key — NEVER by
+ *  title (title text is free-form and, for at least R6, changes daily even when the
+ *  underlying condition is unchanged) and never by `id` (regenerated non-deterministically on
+ *  every detectRisks() call — see the module-level counter above). Manually-logged/imported
+ *  risks have no ruleId/identityKey; their own `id` is already a stable identity (import's
+ *  mergeById already relies on it), so they fall back to that. */
+export function riskFingerprint(risk: Risk): string {
+  if (risk.auto && risk.ruleId && risk.identityKey) {
+    return `auto:${risk.ruleId}:${risk.projectId}:${risk.identityKey}`;
+  }
+  return `manual:${risk.id}`;
+}
+
 function clientName(data: CommandCenterData, clientId: string) {
   return data.clients.find((c) => c.id === clientId)?.name ?? clientId;
 }
 
-/** Returns freshly-detected risks. Does not mutate stored risks — callers merge/dedupe by title. */
+type AutoRiskInput = Omit<Risk, "id" | "detectedAt" | "status" | "auto"> & { ruleId: RiskRuleId; identityKey: string };
+
+/** Returns freshly-detected risks. Does not mutate stored risks — callers merge/dedupe via
+ *  dedupeRisks (selectors.ts), which uses riskFingerprint above, not title. */
 export function detectRisks(data: CommandCenterData, today: string): Risk[] {
   const out: Risk[] = [];
-  const push = (r: Omit<Risk, "id" | "detectedAt" | "status" | "auto">) =>
-    out.push({ ...r, id: riskId(out.length.toString()), detectedAt: today, status: "open", auto: true });
+  // V2.18 §7 — ruleId/identityKey are now part of AutoRiskInput, so every call site below is
+  // compile-time required to stamp a real identity, not just documented to do so.
+  const push = (r: AutoRiskInput) => out.push({ ...r, id: riskId(out.length.toString()), detectedAt: today, status: "open", auto: true });
 
   for (const item of data.workItems) {
     if (item.status === "Done") continue;
@@ -37,6 +56,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Confirm remaining scope and pull in help if needed today.",
         confidence: 0.85,
         sourceWorkItemIds: [item.id],
+        ruleId: "deadline-risk",
+        identityKey: item.id,
       });
     }
 
@@ -56,6 +77,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: `Escalate to ${unresolvedDeps[0].dependsOnTeam} today for a resolution date.`,
         confidence: 0.9,
         sourceWorkItemIds: [item.id],
+        ruleId: "blocked-dependency",
+        identityKey: item.id,
       });
     }
 
@@ -71,6 +94,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Assign an owner before end of day.",
         confidence: 0.9,
         sourceWorkItemIds: [item.id],
+        ruleId: "no-owner",
+        identityKey: item.id,
       });
     }
 
@@ -87,6 +112,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Ping the owner for a status update today.",
         confidence: 0.75,
         sourceWorkItemIds: [item.id],
+        ruleId: "stalled",
+        identityKey: item.id,
       });
     }
 
@@ -102,6 +129,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Re-baseline scope and confirm with the requestor before continuing.",
         confidence: 0.7,
         sourceWorkItemIds: [item.id],
+        ruleId: "scope-unstable",
+        identityKey: item.id,
       });
     }
 
@@ -119,6 +148,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
           mitigation: "Create a follow-up action and assign an owner now.",
           confidence: 0.85,
           sourceWorkItemIds: [item.id],
+          ruleId: "production-no-followup",
+          identityKey: item.id,
         });
       }
     }
@@ -140,6 +171,13 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: `Escalate to ${dep.dependsOnTeam} lead today.`,
         confidence: 0.8,
         sourceWorkItemIds: item ? [item.id] : [],
+        // V2.18 §7 — identityKey is the DEPENDENCY's own id, not the (possibly-absent, and
+        // title-embedded-age-unstable) referencing item — this is what makes the same
+        // dependency recognizable day-to-day even as `age` in the title text increments, and
+        // what distinguishes two different projects' dependencies on the same team (the
+        // exact cross-project collision this rule's title alone would otherwise produce).
+        ruleId: "dependency-unresolved",
+        identityKey: dep.id,
       });
     }
   }
@@ -157,6 +195,8 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Prioritize test coverage for this requirement before release.",
         confidence: 0.8,
         sourceWorkItemIds: [],
+        ruleId: "weak-test-coverage",
+        identityKey: req.id,
       });
     }
   }
@@ -180,6 +220,11 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Assign a validation owner today and confirm remaining UAT scope with QA.",
         confidence: 0.85,
         sourceWorkItemIds: releaseItems.map((w) => w.id),
+        // V2.18 §7 — identityKey is the project's own id, not the releaseItems set (which
+        // legitimately changes membership day to day as items gain/lose uatCompletionPct
+        // without the underlying "this release's readiness is at risk" condition changing).
+        ruleId: "release-readiness",
+        identityKey: project.id,
       });
     }
   }
@@ -203,6 +248,11 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
         mitigation: "Rebalance ownership across the team.",
         confidence: 0.7,
         sourceWorkItemIds: items.map((i: WorkItem) => i.id),
+        // V2.18 §7 — identityKey is the owner's name, not the concentrated item set (which
+        // legitimately changes membership day to day as P1/P2 items are added/removed for
+        // that owner without the underlying overload condition changing).
+        ruleId: "owner-overload",
+        identityKey: owner,
       });
     }
   });

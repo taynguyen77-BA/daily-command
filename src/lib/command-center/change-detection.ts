@@ -1,7 +1,8 @@
 // Deterministic diff engine (BUILD REQUEST §8 "WHAT CHANGED?").
 // Compares current data against the last DailySnapshot and emits only meaningful changes.
 
-import type { CommandCenterData, ChangeEvent, DailySnapshot } from "./types";
+import { riskFingerprint } from "./risk-detection";
+import type { CommandCenterData, ChangeEvent, DailySnapshot, Risk } from "./types";
 
 let counter = 0;
 function changeId() {
@@ -9,7 +10,12 @@ function changeId() {
   return `change-${counter}`;
 }
 
-export function detectChanges(previous: DailySnapshot | null, current: CommandCenterData, today: string): ChangeEvent[] {
+/** V2.18 §7 — currentRisks defaults to current.risks (manual-only), unchanged behavior for
+ *  any existing caller. store.ts's snapshot-producing call sites now pass the same
+ *  dedupeRisks(data.risks, detectRisks(data, today)) set that gets persisted into
+ *  DailySnapshot.risks (see toSnapshot's own risksOverride below) — so this stays in sync
+ *  with whatever `previous.risks` actually contains once auto risks are included in it. */
+export function detectChanges(previous: DailySnapshot | null, current: CommandCenterData, today: string, currentRisks: Risk[] = current.risks): ChangeEvent[] {
   if (!previous) return [];
   const out: ChangeEvent[] = [];
   const push = (e: Omit<ChangeEvent, "id" | "detectedAt">) => out.push({ ...e, id: changeId(), detectedAt: today });
@@ -74,9 +80,15 @@ export function detectChanges(previous: DailySnapshot | null, current: CommandCe
     }
   }
 
-  const prevRisks = new Map(previous.risks.map((r) => [r.id, r]));
-  for (const risk of current.risks) {
-    const prev = prevRisks.get(risk.id);
+  // V2.18 §7 — matched by riskFingerprint, not id: an auto risk's id is regenerated
+  // non-deterministically on every detectRisks() call (see risk-detection.ts's module-level
+  // counter), so id-matching would report every single auto risk as "closed" and
+  // "newly identified" again on every sync/close-day, once auto risks are included in
+  // previous.risks (see toSnapshot's risksOverride).
+  const prevRisksByFp = new Map(previous.risks.map((r) => [riskFingerprint(r), r]));
+  for (const risk of currentRisks) {
+    const fp = riskFingerprint(risk);
+    const prev = prevRisksByFp.get(fp);
     if (!prev) {
       push({
         entityType: "Risk", entityId: risk.id, entityLabel: risk.title, field: "new risk",
@@ -92,7 +104,7 @@ export function detectChanges(previous: DailySnapshot | null, current: CommandCe
     }
   }
   for (const prev of previous.risks) {
-    if (!current.risks.find((r) => r.id === prev.id) && prev.status === "open") {
+    if (!currentRisks.some((r) => riskFingerprint(r) === riskFingerprint(prev)) && prev.status === "open") {
       push({
         entityType: "Risk", entityId: prev.id, entityLabel: prev.title, field: "closed risk",
         before: "open", after: "closed", impact: "Risk no longer present in current data.",
@@ -133,11 +145,19 @@ export function detectChanges(previous: DailySnapshot | null, current: CommandCe
   return out;
 }
 
-export function toSnapshot(data: CommandCenterData, date: string): DailySnapshot {
+/** V2.18 §7 — risksOverride defaults to data.risks (manual-only), unchanged behavior for any
+ *  existing caller. Confirmed real gap this fixes: auto-detected risks were never persisted
+ *  into snapshotHistory at all (nothing in the live app writes to data.risks in normal use),
+ *  so the day-over-day "worsening/days open" trajectory logic (risk-escalation.ts) could
+ *  never find history to match against for essentially every risk the product actually shows.
+ *  Callers now pass the SAME dedupeRisks(data.risks, detectRisks(data, today)) result the
+ *  rest of the app already computes and displays live — this only makes it persist too, never
+ *  a second/different risk computation. */
+export function toSnapshot(data: CommandCenterData, date: string, risksOverride?: Risk[]): DailySnapshot {
   return {
     date,
     workItems: data.workItems,
-    risks: data.risks,
+    risks: risksOverride ?? data.risks,
     requirements: data.requirements,
     dependencies: data.dependencies,
     projects: data.projects,

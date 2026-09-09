@@ -5,14 +5,17 @@
 import { toSnapshot } from "./change-detection";
 import { computeDeliveryConfidence } from "./executive";
 import { detectRisks, RISK_LEVEL_ORDER } from "./risk-detection";
+import { dedupeRisks } from "./selectors";
 import { isOverdue, scoreAllWorkItems } from "./scoring";
-import type { CommandCenterData, DailySnapshot, HealthTrend, MetricDelta, SnapshotMetrics, TrendDirection } from "./types";
+import type { CommandCenterData, DailySnapshot, HealthTrend, MetricDelta, Risk, SnapshotMetrics, TrendDirection } from "./types";
 
-export function buildSnapshotMetrics(data: CommandCenterData, today: string, meaningfulChangeCount: number): SnapshotMetrics {
+/** V2.18 §7 — risksOverride, when passed, is used as-is instead of recomputing
+ *  dedupeRisks(data.risks, detectRisks(data, today)) here — this used to have its own
+ *  separate, title-only dedupe (a second, drifted implementation of the same concern
+ *  selectors.ts's dedupeRisks already owns); now reuses that single source of truth. */
+export function buildSnapshotMetrics(data: CommandCenterData, today: string, meaningfulChangeCount: number, risksOverride?: Risk[]): SnapshotMetrics {
   const scores = scoreAllWorkItems(data, today);
-  const risks = [...data.risks.filter((r) => r.status === "open"), ...detectRisks(data, today)];
-  const seenTitles = new Set<string>();
-  const dedupedRisks = risks.filter((r) => (seenTitles.has(r.title) ? false : (seenTitles.add(r.title), true)));
+  const dedupedRisks = risksOverride ?? dedupeRisks(data.risks, detectRisks(data, today));
   const highRisks = dedupedRisks.filter((r) => r.level === "HIGH").sort((a, b) => RISK_LEVEL_ORDER[a.level] - RISK_LEVEL_ORDER[b.level]);
   const openItems = data.workItems.filter((w) => w.status !== "Done");
   const unresolvedDeps = data.dependencies.filter((d) => d.status === "unresolved");
@@ -33,9 +36,40 @@ export function buildSnapshotMetrics(data: CommandCenterData, today: string, mea
 }
 
 /** Builds the full, persistable DailySnapshot: raw data (reusing toSnapshot from
- *  change-detection.ts — never duplicated) plus computed metrics. */
-export function buildDailySnapshot(data: CommandCenterData, today: string, meaningfulChangeCount: number): DailySnapshot {
-  return { ...toSnapshot(data, today), metrics: buildSnapshotMetrics(data, today, meaningfulChangeCount) };
+ *  change-detection.ts — never duplicated) plus computed metrics. risksOverride, when
+ *  passed, flows into both — the persisted snapshot's `.risks` and its `.metrics` stay
+ *  consistent with each other, never computed from two different risk sets. */
+export function buildDailySnapshot(data: CommandCenterData, today: string, meaningfulChangeCount: number, risksOverride?: Risk[]): DailySnapshot {
+  return { ...toSnapshot(data, today, risksOverride), metrics: buildSnapshotMetrics(data, today, meaningfulChangeCount, risksOverride) };
+}
+
+/** V2.18 §10 — confirmed real gap: snapshotHistory is appended to on EVERY sync/import/
+ *  closeDay with no same-calendar-day guard (store.ts's three snapshot-producing call sites
+ *  all just append), so a user who clicks "Sync Now" repeatedly in one sitting (or a
+ *  deployment syncing more than once a day) accumulates multiple same-day entries. Trend/
+ *  drift/weekly-review math (delivery-drift.ts, weekly-review.ts) read straight from that raw
+ *  list, so a same-day noise delta could be reported as if it were a real day-over-day trend.
+ *
+ *  This does NOT change how snapshotHistory itself is stored — that stays the full
+ *  operational record (useful for change detection at whatever granularity syncs actually
+ *  happen), matching closeDay()'s own "snapshotHistory is the whole operational record over
+ *  time, not a scoped view" comment. It's a pure, read-time derivation: collapse to the LAST
+ *  entry per calendar date, preserving chronological order. Callers that need genuine
+ *  day-over-day comparison (computeDeliveryDrift, computeTrajectory, computeRiskEscalations,
+ *  buildWeeklyReviewFacts) call this once at their own top instead of taking the raw list —
+ *  see proactive.ts and weekly-review.ts. */
+export function dailyCanonicalSnapshots(history: DailySnapshot[]): DailySnapshot[] {
+  const lastByDate = new Map<string, DailySnapshot>();
+  for (const snapshot of history) lastByDate.set(snapshot.date, snapshot);
+  const orderOfFirstAppearance: string[] = [];
+  const seen = new Set<string>();
+  for (const snapshot of history) {
+    if (!seen.has(snapshot.date)) {
+      seen.add(snapshot.date);
+      orderOfFirstAppearance.push(snapshot.date);
+    }
+  }
+  return orderOfFirstAppearance.map((date) => lastByDate.get(date)!);
 }
 
 function direction(before: number, after: number, higherIsBetter: boolean): TrendDirection {

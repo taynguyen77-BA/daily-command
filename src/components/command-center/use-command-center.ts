@@ -4,23 +4,32 @@ import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { commandCenterStore, getTodayIso, previousSnapshotOf, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
 import { applyFilters } from "@/lib/command-center/filters";
-import { applyProjectScope } from "@/lib/command-center/jira/project-scope";
+import { applyProjectScope, scopeMentionEvents } from "@/lib/command-center/jira/project-scope";
 import { buildWorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { computeProactiveIntelligence } from "@/lib/command-center/proactive";
 import { computePersonalFocus } from "@/lib/command-center/personal-focus";
 import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "@/lib/command-center/notify";
 import { getServerSideNotifyActiveCached } from "@/lib/command-center/notify-client";
-import type { AttentionItem, AttentionItemState, CommandCenterData } from "@/lib/command-center/types";
+import { pairedAuthHeader } from "@/lib/command-center/device-pairing";
+import type { AttentionItem, AttentionItemState, CommandCenterData, JiraProjectScope } from "@/lib/command-center/types";
 
 const NOTIFY_ENDPOINT = "/api/command-center/notify";
 
 /** V2.10 §3 — fire-and-forget: a Slack delivery failure (or SLACK_WEBHOOK_URL simply not
- *  being configured, the common case) must never surface as an app error or block the UI. */
+ *  being configured, the common case) must never surface as an app error or block the UI.
+ *  V2.18 §4 — /api/command-center/notify now requires the same paired-device secret as Sync
+ *  Now; a device that hasn't paired (no APP_STATE_SECRET configured on the deployment, or the
+ *  browser never paired) simply gets a 401 here, which is swallowed the same way any other
+ *  delivery failure already is — no new failure mode for the caller. */
 function sendSlackNotifications(data: CommandCenterData, previousAttentionState: Record<string, AttentionItemState>, attentionQueue: AttentionItem[]) {
   const signals = computeNewPersonalSignals(previousAttentionState, attentionQueue);
   if (signals.length === 0) return;
   const payloads = buildSlackNotifyPayloads(signals, data);
-  fetch(NOTIFY_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ signals: payloads }) }).catch(() => {
+  fetch(NOTIFY_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
+    body: JSON.stringify({ signals: payloads }),
+  }).catch(() => {
     // best-effort — never surfaces as an app error
   });
 }
@@ -61,6 +70,18 @@ export function useCommandCenter() {
     [state.data, state.jiraProjectScope]
   );
 
+  // V2.18 §6 — MentionEvent isn't a field of CommandCenterData (it's a sibling top-level
+  // array on the store — see store.ts), so applyProjectScope above never scopes it on its
+  // own; this is the display-time half of the fix (scopeMentionEvents' own comment has the
+  // fetch-time half and the full reasoning). Computed right after scopedData so every
+  // downstream engine gets a mention list that's already consistent with Focus Project Scope,
+  // same "enforce scope at the data boundary" discipline scopedData itself follows.
+  const scopedMentionEvents = useMemo(
+    () => scopeMentionEvents(state.mentionEvents, scopedData.workItems, state.jiraProjectScope),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.mentionEvents, scopedData.workItems, state.jiraProjectScope]
+  );
+
   // V1.3 §9 — the global filter is applied once here; every screen built on `derived`
   // (and `filteredData`, for anything that needs the raw filtered records) automatically
   // inherits it without configuring its own filter UI.
@@ -99,13 +120,13 @@ export function useCommandCenter() {
             sourceType,
             today,
             workRelevanceIndex,
-            state.mentionEvents,
+            scopedMentionEvents,
             state.personalIdentity?.accountId,
             state.ownerName
           )
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, state.mentionEvents, state.personalIdentity?.accountId, state.ownerName]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -149,9 +170,9 @@ export function useCommandCenter() {
   // V1.6 — deterministic Personal Focus Engine, composed the same way `proactive` is
   // composed above. No AI calls; recomputed fresh every render from live project state.
   const personalFocus = useMemo(
-    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, state.mentionEvents) : null),
+    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents) : null),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, state.mentionEvents]
+    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents]
   );
 
   // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
@@ -170,7 +191,13 @@ export function useCommandCenter() {
  *  selection does NOT change"). No new intelligence — every function called here is the
  *  same one the hook above already uses. */
 export function buildProjectOverrideView(state: StoreState, today: string, projectKey: string) {
-  const scopedData = applyProjectScope(state.data, { mode: "FOCUSED", projectKeys: [projectKey] });
+  const overrideScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: [projectKey] };
+  const scopedData = applyProjectScope(state.data, overrideScope);
+  // V2.18 §6 — same display-time mention scoping the main hook applies, scoped to this
+  // one-off override (never the persisted state.jiraProjectScope) — §20's own "the global
+  // application selection does NOT change" guarantee applies here too: this only affects
+  // what this call's own return value sees, nothing global.
+  const scopedMentionEvents = scopeMentionEvents(state.mentionEvents, scopedData.workItems, overrideScope);
   const filteredData = applyFilters(scopedData, state.filters, today);
   const previousSnapshot = previousSnapshotOf(state);
   const derived = deriveData(filteredData, previousSnapshot, today);
@@ -186,11 +213,11 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         sourceType,
         today,
         workRelevanceIndex,
-        state.mentionEvents,
+        scopedMentionEvents,
         state.personalIdentity?.accountId,
         state.ownerName
       )
     : null;
-  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, state.mentionEvents) : null;
+  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents) : null;
   return { filteredData, derived, proactive, personalFocus, workRelevanceIndex };
 }

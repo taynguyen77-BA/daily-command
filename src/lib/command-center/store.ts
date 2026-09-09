@@ -537,7 +537,12 @@ export class CommandCenterStore {
    *  the pre-import state so "What Changed" reflects the delta this import introduced. */
   importData(result: ImportResult) {
     if (!result.ok) return;
-    const prevSnapshot = toSnapshot(this.state.data, getTodayIso());
+    // V2.18 §7 — same deduped manual+auto risk set every other snapshot-producing call site
+    // now persists (see syncJira/closeDay's own comments) — the pre-import snapshot's risks
+    // must also match what detectRisks live-computes, so day-over-day risk history stays
+    // consistent regardless of which action (sync, import, close day) produced a given entry.
+    const today = getTodayIso();
+    const prevSnapshot = toSnapshot(this.state.data, today, dedupeRisks(this.state.data.risks, detectRisks(this.state.data, today)));
     const merged: CommandCenterData = { ...this.state.data };
     (Object.keys(result.data) as (keyof CommandCenterData)[]).forEach((key) => {
       const incoming = result.data[key] as { id: string }[];
@@ -808,6 +813,12 @@ export class CommandCenterStore {
     }
 
     const incoming = result.data;
+    // V2.18 §5 — a sync that hit the JIRA_MAX_ISSUES safety cap before reaching the real end
+    // of matching issues is "partial", not "success": it must never destructively replace an
+    // existing complete local dataset (see the isFullSync gating below), and its incremental
+    // cursor must resume from where it stopped, not silently skip past whatever it didn't
+    // fetch (see lastSyncCompletedAt below).
+    const truncated = result.truncated === true;
     const prevWorkItemsById = new Map(this.state.data.workItems.map((w) => [w.id, w]));
     let created = 0;
     let updated = 0;
@@ -819,7 +830,13 @@ export class CommandCenterStore {
       else unchanged++;
     }
 
-    const prevSnapshot = this.state.loaded ? toSnapshot(this.state.data, getTodayIso()) : null;
+    // V2.18 §7 — same deduped manual+auto risk set every other snapshot-producing call site
+    // now persists (see importData/closeDay's own comments) — closes the confirmed gap where
+    // auto-detected risks were never in snapshotHistory at all, so risk-escalation.ts's
+    // day-over-day "worsening/days open" logic could never find history to match against.
+    const prevSnapshot = this.state.loaded
+      ? toSnapshot(this.state.data, getTodayIso(), dedupeRisks(this.state.data.risks, detectRisks(this.state.data, getTodayIso())))
+      : null;
     const isFullSync = sinceIso === undefined;
 
     // V2.3 §10 — a full re-sync's pre-existing "drop all old Jira data, replace with the
@@ -834,12 +851,19 @@ export class CommandCenterStore {
     const focusedProjectIds = scope.mode === "FOCUSED" ? new Set(scope.projectKeys.map((k) => `jira-project-${k}`)) : null;
     const staysUntouched = (projectId: string) => focusedProjectIds !== null && !focusedProjectIds.has(projectId);
 
+    // V2.18 §5 — a truncated full sync must never destructively replace the existing complete
+    // local dataset with only the (incomplete) subset it managed to fetch before hitting the
+    // cap — it now behaves like an incremental merge instead, exactly the same non-destructive
+    // treatment FOCUSED mode already gets for dependencies below. Nothing already-synced is
+    // ever dropped by a partial sync; the next sync's resumed cursor (see lastSyncCompletedAt
+    // below) fills in the rest.
+    const replaceFullDataset = isFullSync && !truncated;
     const merged: CommandCenterData = {
       clients: mergeById(this.state.data.clients, incoming.clients),
-      projects: isFullSync
+      projects: replaceFullDataset
         ? [...this.state.data.projects.filter((p) => p.sourceType !== "jira" || staysUntouched(p.id)), ...incoming.projects]
         : mergeById(this.state.data.projects, incoming.projects),
-      workItems: isFullSync
+      workItems: replaceFullDataset
         ? [...this.state.data.workItems.filter((w) => w.sourceType !== "jira" || staysUntouched(w.projectId)), ...incoming.workItems]
         : mergeById(this.state.data.workItems, incoming.workItems),
       requirements: this.state.data.requirements, // Jira does not feed requirements (§6 — only ingest fields required for intelligence)
@@ -851,7 +875,7 @@ export class CommandCenterStore {
       // dependency Jira has since resolved for an IN-scope project may not get cleaned up
       // until scope returns to ALL, but nothing is ever silently deleted.
       dependencies:
-        isFullSync && scope.mode !== "FOCUSED"
+        replaceFullDataset && scope.mode !== "FOCUSED"
           ? [...this.state.data.dependencies.filter((d) => !d.id.startsWith("jira-dep-")), ...incoming.dependencies]
           : mergeById(this.state.data.dependencies, incoming.dependencies),
       decisions: this.state.data.decisions,
@@ -897,8 +921,15 @@ export class CommandCenterStore {
       workItemCalibrationHistory,
       jiraSync: {
         lastSyncStartedAt: startedAt,
-        lastSyncCompletedAt: result.syncedAt ?? new Date().toISOString(),
-        lastSyncStatus: "success",
+        // V2.18 §5 — on a partial sync, the incremental cursor advances only to the resume
+        // boundary (the last-fetched issue's `updated`), never to "now" — so the NEXT sync's
+        // `sinceIso` (read at the top of this method) naturally re-requests exactly the
+        // window this sync didn't finish, through the existing incremental-sync path. If no
+        // resume boundary was resolvable (e.g. every fetched issue was missing `updated`),
+        // the cursor is left exactly where it was rather than guessing — never advanced past
+        // data that was never actually fetched.
+        lastSyncCompletedAt: truncated ? (result.resumeSinceIso ?? this.state.jiraSync.lastSyncCompletedAt) : (result.syncedAt ?? new Date().toISOString()),
+        lastSyncStatus: truncated ? "partial" : "success",
         lastSyncError: undefined,
         lastSyncErrorKind: undefined,
         recordsFetched: result.recordsFetched,
@@ -1435,12 +1466,24 @@ export class CommandCenterStore {
     const completed = scopedForAi.actions.filter((a) => a.status === "completed" && a.completedAt === today);
     const deferred = scopedForAi.actions.filter((a) => a.status === "deferred");
     const blocked = scopedForAi.actions.filter((a) => a.status === "blocked");
-    const newRisks = scopedForAi.risks.filter((r) => r.status === "open" && r.detectedAt === today);
+    // V2.18 §7 — was scopedForAi.risks (manual-only — data.risks stays empty in normal Jira/
+    // demo usage, so "new risks today" was effectively dead for auto-detected risks, the
+    // overwhelming majority of what the product actually shows). Now the same deduped
+    // manual+auto set every other surface already displays live, scoped the same way
+    // completed/deferred/blocked already are above.
+    const scopedOpenRisks = dedupeRisks(scopedForAi.risks, detectRisks(scopedForAi, today));
+    const newRisks = scopedOpenRisks.filter((r) => r.status === "open" && r.detectedAt === today);
     const summary = await getAIProvider().generateEndOfDaySummary(completed, deferred, blocked, newRisks);
     const entry: EodEntry = { date: today, summary };
 
-    const meaningfulChangeCount = detectChanges(previous, data, today).length;
-    const todaySnapshot = buildDailySnapshot(data, today, meaningfulChangeCount);
+    // V2.18 §7 — unscoped (matches this snapshot's own "whole operational record, not a
+    // scoped view" contract above) deduped manual+auto risk set, persisted into both the
+    // diff (detectChanges) and the archival snapshot (buildDailySnapshot) so day-over-day
+    // risk history actually contains what detectRisks live-computes — see change-detection.ts
+    // and memory.ts's own comments for the persistence gap this closes.
+    const unscopedOpenRisks = dedupeRisks(data.risks, detectRisks(data, today));
+    const meaningfulChangeCount = detectChanges(previous, data, today, unscopedOpenRisks).length;
+    const todaySnapshot = buildDailySnapshot(data, today, meaningfulChangeCount, unscopedOpenRisks);
     const newMemoryEvents = this.computeMemoryEvents(data, snapshotHistory, today);
 
     this.set({

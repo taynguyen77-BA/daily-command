@@ -80,8 +80,8 @@ export async function fetchJiraIssueChangelog(config: JiraConnectionConfig, issu
 }
 
 /** V2.10 §2 — "which issues have a comment mentioning this account?" */
-export async function fetchMentionedIssues(config: JiraConnectionConfig, accountId: string, sinceIso?: string): Promise<JiraFetchResult<JiraIssue[]>> {
-  return fetchMentionedIssuesWith(fetch, config, accountId, sinceIso);
+export async function fetchMentionedIssues(config: JiraConnectionConfig, accountId: string, sinceIso?: string, projectKeys?: string[]): Promise<JiraFetchResult<JiraIssue[]>> {
+  return fetchMentionedIssuesWith(fetch, config, accountId, sinceIso, projectKeys);
 }
 
 /** V2.10 §2 — best-effort, called only for the small set of issue keys fetchMentionedIssues returned. */

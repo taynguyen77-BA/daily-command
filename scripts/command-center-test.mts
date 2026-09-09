@@ -6,7 +6,7 @@
 // demo dataset. No AI provider calls — everything under test is deterministic.
 
 import { scoreWorkItem, isOverdue, daysBetween, classify, eligibilityScore } from "../src/lib/command-center/scoring";
-import { detectRisks } from "../src/lib/command-center/risk-detection";
+import { detectRisks, riskFingerprint } from "../src/lib/command-center/risk-detection";
 import { detectChanges, toSnapshot } from "../src/lib/command-center/change-detection";
 import { buildCandidates, buildPlan } from "../src/lib/command-center/action-plan";
 import { importFromJson, importFromCsv, importFromText } from "../src/lib/command-center/import";
@@ -18,7 +18,7 @@ import { computeDeliveryConfidence, buildExecutiveView } from "../src/lib/comman
 import { reasoningResponseSchema, textResponseSchema, aiRequestSchema, trendResponseSchema, assessmentResponseSchema } from "../src/lib/command-center/ai/schemas";
 import { MockAIProvider } from "../src/lib/command-center/ai/provider";
 import { ClaudeProvider, checkClaudeAvailability } from "../src/lib/command-center/ai/claude-provider";
-import { buildDailySnapshot, buildSnapshotMetrics, compareSnapshots } from "../src/lib/command-center/memory";
+import { buildDailySnapshot, buildSnapshotMetrics, compareSnapshots, dailyCanonicalSnapshots } from "../src/lib/command-center/memory";
 import { detectDecisionConflictCandidates } from "../src/lib/command-center/decision-conflicts";
 import { detectRecurringPatterns } from "../src/lib/command-center/pattern-detection";
 import { buildWeeklyReviewFacts } from "../src/lib/command-center/weekly-review";
@@ -37,7 +37,7 @@ import { computeReleaseHealth, computeAllReleaseHealth } from "../src/lib/comman
 import { buildAIContext } from "../src/lib/command-center/ai-context";
 import { classifyQuery, answerFromRoute, familyForIntent } from "../src/lib/command-center/query-router";
 import { JiraDataSource } from "../src/lib/command-center/datasource/jira-source";
-import { deriveData } from "../src/lib/command-center/selectors";
+import { deriveData, dedupeRisks } from "../src/lib/command-center/selectors";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -85,7 +85,7 @@ import type { JiraConnectionConfig } from "../src/lib/command-center/jira/types"
 import type { PersonalFocusCandidate } from "../src/lib/command-center/types";
 
 // V1.8 — Production Trust & Operational Readiness
-import { detectJiraSearchCapability, JIRA_MAX_ISSUES } from "../src/lib/command-center/jira/http";
+import { detectJiraSearchCapability, JIRA_MAX_ISSUES, computeResumeCursor } from "../src/lib/command-center/jira/http";
 import { evaluateJiraDataContract } from "../src/lib/command-center/jira/data-contract";
 import { computeTrustDiagnostic } from "../src/lib/command-center/trust-diagnostic";
 
@@ -127,7 +127,7 @@ import type { WhyShouldICareContent } from "../src/lib/command-center/why-should
 import type { DecisionOptionsResult, Project } from "../src/lib/command-center/types";
 
 // V2.3 — Focus Project Scope & Jira Ingestion Guard
-import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, detectExplicitProjectMention, findOutOfScopeMention, formatScopeLabel, knownJiraProjects, parseJiraProjectScope, resolveEffectiveProjectKeys } from "../src/lib/command-center/jira/project-scope";
+import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, detectExplicitProjectMention, findOutOfScopeMention, formatScopeLabel, knownJiraProjects, parseJiraProjectScope, resolveEffectiveProjectKeys, scopeMentionEvents } from "../src/lib/command-center/jira/project-scope";
 import { buildProjectOverrideView } from "../src/components/command-center/use-command-center";
 import type { JiraProjectScope } from "../src/lib/command-center/types";
 
@@ -201,7 +201,7 @@ import { classifyPersonalRelation, isMyActionItem, matchesIdentity } from "../sr
 import { RelationBadge } from "../src/components/command-center/ui";
 
 // V2.15 — Cross-Device Sync
-import { isSyncRequestAuthorized } from "../src/lib/command-center/jira/sync-auth";
+import { checkSyncRequestAuth } from "../src/lib/command-center/jira/sync-auth";
 import { checkAppStateAuth, createInMemoryAppStateStore, isAppStateStoreConfigured, syncedAppStateSchema, type SyncedAppState } from "../src/lib/command-center/app-state";
 import { decideInitialSync, extractSyncedAppState, looksUnused, mergeSyncedAppState } from "../src/lib/command-center/app-state-sync";
 
@@ -647,6 +647,33 @@ const yesterdayMetrics: SnapshotMetrics = {
   ok("AI schema validation", !trendResponseSchema.safeParse({ whatChanged: "a" }).success, "a trend response missing required fields is rejected");
 }
 
+// ===== V2.18 §10 — dailyCanonicalSnapshots: one entry per calendar date, last-wins, order
+// preserved. Confirmed real gap: snapshotHistory is appended to on every sync/import/close-day
+// with no same-day guard, so repeated manual syncs (or a >1x/day deployment) accumulate
+// multiple same-day entries that trend/drift/weekly-review math would otherwise read raw. =====
+{
+  const mk = (date: string, deliveryConfidence: number): DailySnapshot => ({ date, workItems: [], risks: [], requirements: [], dependencies: [], projects: [], metrics: { ...yesterdayMetrics, deliveryConfidence } });
+
+  ok("V2.18 dailyCanonicalSnapshots", dailyCanonicalSnapshots([]).length === 0, "empty history -> empty result, never a crash");
+
+  const singlePerDay = [mk("2026-06-10", 70), mk("2026-06-11", 72), mk("2026-06-12", 75)];
+  ok("V2.18 dailyCanonicalSnapshots", dailyCanonicalSnapshots(singlePerDay).length === 3, "one entry per day already -> unchanged, nothing collapsed");
+
+  // Three syncs on the same day (08:00/12:00/16:00 all persisted with date "2026-06-12"),
+  // then one entry the next day.
+  const multiplePerDay = [mk("2026-06-12", 70), mk("2026-06-12", 68), mk("2026-06-12", 65), mk("2026-06-13", 80)];
+  const canonical = dailyCanonicalSnapshots(multiplePerDay);
+  ok("V2.18 dailyCanonicalSnapshots", canonical.length === 2, "three same-day entries collapse to one — the operational list's per-sync granularity is not what a 'day' means for trend math");
+  ok("V2.18 dailyCanonicalSnapshots", canonical[0].date === "2026-06-12" && canonical[0].metrics!.deliveryConfidence === 65, "the LAST same-day entry wins (most recent recompute of that day), not the first");
+  ok("V2.18 dailyCanonicalSnapshots", canonical[1].date === "2026-06-13", "chronological order is preserved across the collapsed and uncollapsed entries");
+
+  // The raw snapshotHistory list itself is never mutated — this is a pure, read-time
+  // derivation, not a storage-format change.
+  const beforeLength = multiplePerDay.length;
+  dailyCanonicalSnapshots(multiplePerDay);
+  ok("V2.18 dailyCanonicalSnapshots", multiplePerDay.length === beforeLength, "calling this never mutates the raw operational history array passed in");
+}
+
 // ===== Decision status + Decision conflict preconditions =====
 {
   const oldStyle: Decision = { id: "d1", projectId: "p1", title: "x", status: "pending", description: "y" };
@@ -922,7 +949,7 @@ function makeJiraIssue(overrides: Partial<JiraIssue["fields"]> & { key?: string 
   // Incremental sync JQL
   ok("Incremental sync", buildIssuesJql({ sinceIso: "2026-08-01" }).includes('updated >= "2026-08-01"'), "sinceIso produces an 'updated >=' JQL clause");
   ok("Incremental sync", buildIssuesJql({ projectKeys: ["JPMC", "WF"] }).includes('project in ("JPMC","WF")'), "projectKeys produces a 'project in (...)' JQL clause");
-  ok("Incremental sync", buildIssuesJql({}) === "project is not EMPTY order by updated desc", "no options -> a full, unscoped sync JQL that still satisfies Jira's bounded-query requirement (see V2.2.4)");
+  ok("Incremental sync", buildIssuesJql({}) === "project is not EMPTY order by updated asc", "no options -> a full, unscoped sync JQL that still satisfies Jira's bounded-query requirement (see V2.2.4)");
 
   // Rate limiting / error classification
   const rateLimited: FetchLike = async () => ({ ok: false, status: 429, json: async () => ({}) });
@@ -1239,6 +1266,94 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   ok("Reopened intelligence", !!reopenedEsc[0].escalationReason, "a reopened risk always carries a human-readable reason");
 
   ok("Risk escalation", computeRiskEscalations([], [], TODAY).length === 0, "no open risks produces no escalation records");
+}
+
+// ===== V2.18 §7 — Risk fingerprint: cross-project dedup + stable cross-day identity =====
+// Confirmed real bugs this fixes: dedupeRisks/computeRiskEscalations used to match by
+// r.title alone. R6 (dependency-unresolved) generates a title with NO project/client token
+// at all (`Dependency on ${team} unresolved for ${age} days`), so two different projects
+// both blocked on the same team for the same number of days produced byte-identical titles
+// and silently collided; R6's title also embeds the age itself, so even a single risk's
+// title changes text every day, breaking day-to-day matching outright regardless of the
+// cross-project issue.
+{
+  const day1 = "2026-06-13";
+  const day2 = "2026-06-14";
+  const day3 = "2026-06-15";
+
+  // --- Real R6 reproduction: two projects, same team, same age -> identical title text ---
+  const jpmcItem = makeItem({ id: "wi-jpmc", projectId: "p-jpmc", dependencyIds: ["dep-jpmc"] });
+  const ubsItem = makeItem({ id: "wi-ubs", projectId: "p-ubs", dependencyIds: ["dep-ubs"] });
+  const jpmcDep = makeDependency({ id: "dep-jpmc", dependsOnTeam: "Platform Team", raisedDate: "2026-06-10" }); // age 5 at day3
+  const ubsDep = makeDependency({ id: "dep-ubs", dependsOnTeam: "Platform Team", raisedDate: "2026-06-10" });
+  const crossProjectData: CommandCenterData = { ...emptyData(), workItems: [jpmcItem, ubsItem], dependencies: [jpmcDep, ubsDep] };
+  const crossProjectRisks = detectRisks(crossProjectData, day3);
+  const platformTeamRisks = crossProjectRisks.filter((r) => r.title.includes("Platform Team"));
+  ok("V2.18 Risk fingerprint", platformTeamRisks.length === 2, "two different projects blocked on the same team for the same age produce two real risks with byte-identical titles");
+  ok("V2.18 Risk fingerprint", new Set(platformTeamRisks.map((r) => r.projectId)).size === 2, "the two risks carry different projectId — the collision only happens if identity ignores it");
+  ok("V2.18 Risk fingerprint", dedupeRisks([], crossProjectRisks).length === crossProjectRisks.length, "dedupeRisks does NOT collapse the two real, project-distinct risks despite the identical title — the exact JPMC/UBS scenario from the hardening spec");
+
+  // --- Same fingerprint (same rule + project + identityKey), differing free text -> collapses ---
+  const dup1 = { ...platformTeamRisks[0], id: "dup-a" };
+  const dup2 = { ...platformTeamRisks[0], id: "dup-b", evidence: ["completely different evidence text"], confidence: 0.99 };
+  ok("V2.18 Risk fingerprint", riskFingerprint(dup1) === riskFingerprint(dup2), "two risk objects with the same ruleId+projectId+identityKey share one fingerprint regardless of differing free text");
+  ok("V2.18 Risk fingerprint", dedupeRisks([], [dup1, dup2]).length === 1, "same fingerprint collapses to one even with differing evidence/confidence");
+
+  // --- Day-to-day matching survives R6's title text changing as age increments ---
+  const singleDepData: CommandCenterData = { ...emptyData(), workItems: [makeItem({ id: "wi-x", projectId: "p-x", dependencyIds: ["dep-x"] })], dependencies: [makeDependency({ id: "dep-x", dependsOnTeam: "Data Team", raisedDate: "2026-06-10" })] };
+  const day1Risks = dedupeRisks([], detectRisks(singleDepData, day1)); // age 3
+  const day2Risks = dedupeRisks([], detectRisks(singleDepData, day2)); // age 4 -> genuinely different title text
+  ok("V2.18 Risk fingerprint", day1Risks[0].title !== day2Risks[0].title, "sanity check: R6's title text genuinely differs day to day as age increments");
+  ok("V2.18 Risk fingerprint", riskFingerprint(day1Risks[0]) === riskFingerprint(day2Risks[0]), "the fingerprint is stable across the same title-text change that would break title-based matching");
+  const history: DailySnapshot[] = [{ date: day1, workItems: [], risks: day1Risks, requirements: [], dependencies: [], projects: [] }];
+  const esc = computeRiskEscalations(day2Risks, history, day2);
+  ok("V2.18 Risk fingerprint", esc[0].daysOpen === 2, "fingerprint-based matching finds yesterday's occurrence even though the title text changed — title-based matching would have reset this to 1");
+
+  // --- A risk whose underlying condition clears is cleanly absent, no phantom escalation ---
+  const resolvedData: CommandCenterData = { ...emptyData(), workItems: [makeItem({ id: "wi-x", projectId: "p-x", dependencyIds: ["dep-x"] })], dependencies: [makeDependency({ id: "dep-x", dependsOnTeam: "Data Team", raisedDate: "2026-06-10", status: "resolved" })] };
+  const day3Open = dedupeRisks([], detectRisks(resolvedData, day3));
+  ok("V2.18 Risk fingerprint", day3Open.length === 0, "a risk whose underlying condition (the dependency) cleared is simply absent from today's open set");
+  const escDay3 = computeRiskEscalations(day3Open, history, day3);
+  ok("V2.18 Risk fingerprint", escDay3.length === 0, "no phantom escalation entry lingers for a resolved risk that's no longer in the open set");
+}
+
+// ===== V2.18 §7 — auto-detected risks now persist into snapshotHistory =====
+// Confirmed real gap: toSnapshot/buildDailySnapshot only ever serialized data.risks
+// (manually-logged/imported only) — nothing in the live app writes to data.risks in normal
+// Jira/demo usage, so auto-detected risks (the overwhelming majority of what the product
+// actually shows) were never captured in history at all, making the day-over-day
+// "worsening/days open" trajectory logic silently inert for them.
+{
+  const noOwnerItem = makeItem({ id: "wi-no-owner", projectId: "p-1", priority: "P1", owner: undefined });
+  const dataWithAutoRisk: CommandCenterData = { ...emptyData(), workItems: [noOwnerItem] };
+
+  const defaultSnapshot = buildDailySnapshot(dataWithAutoRisk, TODAY, 0);
+  ok("V2.18 Snapshot persistence", defaultSnapshot.risks.length === 0, "no risksOverride passed -> unchanged default behavior (manual risks only, currently empty) — this change is additive/backward-compatible");
+
+  const openRisks = dedupeRisks(dataWithAutoRisk.risks, detectRisks(dataWithAutoRisk, TODAY));
+  const overriddenSnapshot = buildDailySnapshot(dataWithAutoRisk, TODAY, 0, openRisks);
+  ok("V2.18 Snapshot persistence", overriddenSnapshot.risks.some((r) => r.ruleId === "no-owner"), "passing the same deduped manual+auto set the rest of the app already computes persists the auto risk into the snapshot");
+  ok("V2.18 Snapshot persistence", overriddenSnapshot.metrics?.highRiskCount === overriddenSnapshot.risks.filter((r) => r.level === "HIGH").length, "metrics and .risks are computed from the SAME override — never two different risk sets for one snapshot");
+
+  const toSnapshotDefault = toSnapshot(dataWithAutoRisk, TODAY);
+  ok("V2.18 Snapshot persistence", toSnapshotDefault.risks.length === 0, "toSnapshot's own default (no override) is likewise unchanged");
+  const toSnapshotOverridden = toSnapshot(dataWithAutoRisk, TODAY, openRisks);
+  ok("V2.18 Snapshot persistence", toSnapshotOverridden.risks.some((r) => r.ruleId === "no-owner"), "toSnapshot persists the override when passed");
+}
+
+// ===== V2.18 §7 — store.ts: closeDay() actually persists the deduped auto-risk set into
+// snapshotHistory, not just data.risks (end-to-end, not just the pure-function level above) =====
+{
+  commandCenterStore.resetAll();
+  const p1NoOwner = { ...makeItem({ id: "wi-close-day", key: "CD-1", projectId: "p-1", priority: "P1", owner: undefined }), sourceType: "jira" as const, sourceId: "CD-1" };
+  commandCenterStore.importData({ ok: true, data: { ...emptyData(), workItems: [p1NoOwner] }, errors: [], addedCounts: {} });
+
+  await commandCenterStore.closeDay();
+  const afterCloseDay = commandCenterStore.getSnapshot();
+  const persistedSnapshot = afterCloseDay.snapshotHistory.at(-1);
+  ok("V2.18 closeDay persistence", persistedSnapshot?.risks.some((r) => r.auto === true && r.ruleId === "no-owner"), "closeDay() now persists the deduped auto-risk set into snapshotHistory, not just the (empty) data.risks");
+
+  commandCenterStore.resetAll();
 }
 
 // ===== Dependency Radar + Dependency Heat (§10-11) =====
@@ -1668,23 +1783,34 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
 }
 
 // ===== V2.11 §2 — /api/command-center/notify: status route + test-mode, real webhook mocked =====
+// V2.18 §4 — POST now requires the same paired-device/cron auth as every other sensitive
+// route (see the Security hardening section above); every POST Request built below carries a
+// matching Authorization header. GET (status) stays unauthenticated (non-sensitive, boolean/
+// label only), unaffected.
 {
   const originalWebhook = process.env.SLACK_WEBHOOK_URL;
   const originalLabel = process.env.SLACK_CHANNEL_LABEL;
+  const originalAppStateSecret = process.env.APP_STATE_SECRET;
   const originalFetch = globalThis.fetch;
 
   delete process.env.SLACK_WEBHOOK_URL;
   delete process.env.SLACK_CHANNEL_LABEL;
+  process.env.APP_STATE_SECRET = "test-app-state-secret";
+  const authHeaders = { Authorization: "Bearer test-app-state-secret" };
 
   const statusUnconfigured = (await (await notifyStatusGET()).json()) as { configured: boolean; channelLabel?: string };
   ok("V2.11 Notify status", statusUnconfigured.configured === false, "GET /notify reports configured:false when SLACK_WEBHOOK_URL is unset");
 
-  const testWithNoWebhook = (await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", body: JSON.stringify({ test: true }) }))).json();
+  const unauthorizedTest = await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", body: JSON.stringify({ test: true }) }));
+  const unauthorizedTestBody = (await unauthorizedTest.json()) as { sent: boolean; reason?: string };
+  ok("V2.18 Notify auth", unauthorizedTest.status === 401 && unauthorizedTestBody.sent === false && unauthorizedTestBody.reason === "unauthorized", "a POST with no Authorization header is rejected before any Slack/webhook logic runs, even in test-mode");
+
+  const testWithNoWebhook = (await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", headers: authHeaders, body: JSON.stringify({ test: true }) }))).json();
   const testWithNoWebhookBody = (await testWithNoWebhook) as { sent: boolean; reason?: string };
   ok(
     "V2.11 Notify test-mode",
     testWithNoWebhookBody.sent === false && testWithNoWebhookBody.reason === "not-configured",
-    "a {test:true} request with no SLACK_WEBHOOK_URL still returns {sent:false, reason:'not-configured'} — same contract as real signals"
+    "an authorized {test:true} request with no SLACK_WEBHOOK_URL still returns {sent:false, reason:'not-configured'} — same contract as real signals"
   );
 
   process.env.SLACK_WEBHOOK_URL = "https://hooks.slack.example/services/mock";
@@ -1702,10 +1828,10 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
     return { ok: true } as Response;
   }) as typeof fetch;
 
-  const testWithWebhook = (await (await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", body: JSON.stringify({ test: true }) }))).json()) as {
+  const testWithWebhook = (await (await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", headers: authHeaders, body: JSON.stringify({ test: true }) }))).json()) as {
     sent: boolean;
   };
-  ok("V2.11 Notify test-mode", testWithWebhook.sent === true, "a {test:true} request with a configured (mocked) webhook reports sent:true");
+  ok("V2.11 Notify test-mode", testWithWebhook.sent === true, "an authorized {test:true} request with a configured (mocked) webhook reports sent:true");
   ok("V2.11 Notify test-mode", capturedUrl === "https://hooks.slack.example/services/mock", "the test request posts to the real configured webhook URL — the exact same call a real signal would make");
   ok(
     "V2.11 Notify test-mode",
@@ -1720,11 +1846,12 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const realSignalRes = await notifyPOST(
     new Request("http://localhost/api/command-center/notify", {
       method: "POST",
+      headers: authHeaders,
       body: JSON.stringify({ signals: [{ issueKey: "MENT-1", summary: "Test", kind: "MENTION", detail: 'Alice: "hi"' }] }),
     })
   );
   const realSignalBody = (await realSignalRes.json()) as { sent: boolean; delivered: number };
-  ok("V2.11 Notify test-mode", realSignalBody.sent === true && realSignalBody.delivered === 1, "a real signal request still delivers via the identical webhook-call path");
+  ok("V2.11 Notify test-mode", realSignalBody.sent === true && realSignalBody.delivered === 1, "an authorized real signal request still delivers via the identical webhook-call path");
   ok("V2.11 Notify test-mode", capturedBody?.text?.includes("MENT-1") === true, "a real signal's rendered text is genuinely different from the fixed test string, proving no accidental cross-contamination between the two paths");
 
   globalThis.fetch = originalFetch;
@@ -1732,6 +1859,8 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   else process.env.SLACK_WEBHOOK_URL = originalWebhook;
   if (originalLabel === undefined) delete process.env.SLACK_CHANNEL_LABEL;
   else process.env.SLACK_CHANNEL_LABEL = originalLabel;
+  if (originalAppStateSecret === undefined) delete process.env.APP_STATE_SECRET;
+  else process.env.APP_STATE_SECRET = originalAppStateSecret;
 }
 
 // ===== V2.11 §3B — showAdvancedSettings toggle: default, store setter, persistence =====
@@ -1774,6 +1903,28 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   ok("V2.10 http", commentsResult.ok && commentsResult.data.length === 1, "fetchIssueCommentsWith returns the comments Jira reports for one issue");
 }
 
+// ===== V2.18 §6 — fetchMentionedIssuesWith now accepts an optional projectKeys restriction,
+// the fetch-time half of the mention project-scope isolation fix. Confirmed real gap: unlike
+// the main issue sync (buildIssuesJql's own `project in (...)`), the mention search had NO
+// project restriction at all — a FOCUSED sync still searched every Jira project the account
+// can see for mentions. =====
+{
+  const jqlConfig: JiraConnectionConfig = { baseUrl: "https://example.atlassian.net", email: "a@b.com", apiToken: "tok" };
+
+  let capturedJql = "";
+  const captureFetch: FetchLike = async (url, init) => {
+    void url;
+    capturedJql = (JSON.parse(String(init?.body ?? "{}")) as { jql?: string }).jql ?? "";
+    return { ok: true, status: 200, json: async () => ({ issues: [], isLast: true }) };
+  };
+  await fetchMentionedIssuesWith(captureFetch, jqlConfig, "acc-me", undefined, undefined);
+  ok("V2.18 Mention scope (fetch)", !capturedJql.includes("project in"), "no projectKeys passed -> unrestricted, matching buildIssuesJql's own 'no keys -> no project clause' contract");
+
+  await fetchMentionedIssuesWith(captureFetch, jqlConfig, "acc-me", undefined, ["JPMC"]);
+  ok("V2.18 Mention scope (fetch)", capturedJql.includes('project in ("JPMC")'), "projectKeys passed -> the mention JQL carries the identical project in (...) restriction the main issue sync already uses");
+  ok("V2.18 Mention scope (fetch)", capturedJql.includes('comment ~ "accountid:acc-me"'), "the account-mention clause is preserved alongside the new project restriction, not replaced by it");
+}
+
 // ===== V2.10 §4 — automated sync cadence (static source checks, matching the existing
 // V2.2.1/V2.3 pattern for route-level logic: the sync route imports server-only credential
 // code, so it's checked by reading its source rather than importing it into this test
@@ -1783,10 +1934,10 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   const repoRoot = path.resolve(process.cwd());
   const syncRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
   ok("V2.10 Cron", /process\.env\.CRON_SECRET/.test(syncRouteSrc), "the sync route reads CRON_SECRET");
-  // V2.15 §2 — the actual accept/reject decision moved into sync-auth.ts's isSyncRequestAuthorized
+  // V2.15 §2 — the actual accept/reject decision moved into sync-auth.ts's checkSyncRequestAuth
   // (directly unit-tested below); this only checks that the route still wires it up.
-  ok("V2.15 Cron+AppState wiring", /isSyncRequestAuthorized/.test(syncRouteSrc), "the route's auth gate now delegates to the shared, testable isSyncRequestAuthorized rather than a private, unregexable inline check");
-  ok("V2.15 Cron+AppState wiring", /process\.env\.APP_STATE_SECRET/.test(syncRouteSrc), "the route also reads APP_STATE_SECRET, the second secret isSyncRequestAuthorized accepts");
+  ok("V2.15 Cron+AppState wiring", /checkSyncRequestAuth/.test(syncRouteSrc), "the route's auth gate now delegates to the shared, testable checkSyncRequestAuth rather than a private, unregexable inline check");
+  ok("V2.15 Cron+AppState wiring", /process\.env\.APP_STATE_SECRET/.test(syncRouteSrc), "the route also reads APP_STATE_SECRET, the second secret checkSyncRequestAuth accepts");
   ok("V2.10 Cron", /export async function GET/.test(syncRouteSrc), "the route exports a GET handler — Vercel Cron Jobs always issue a GET, never a POST");
 
   const vercelJson = JSON.parse(fs.readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
@@ -3300,9 +3451,158 @@ function pfc(overrides: Partial<PersonalFocusCandidate> = {}): PersonalFocusCand
   };
   const cappedResult = await fetchJiraIssuesWith(hugeFetch, config, {});
   ok("V1.8 Large data safety", cappedResult.ok && cappedResult.recordsFetched === JIRA_MAX_ISSUES, `fetching against an effectively unbounded result set stops exactly at the ${JIRA_MAX_ISSUES}-issue safety cap, never beyond it (got ${cappedResult.ok ? cappedResult.recordsFetched : "error"})`);
+  ok("V2.18 Jira completeness", cappedResult.ok && cappedResult.truncated === true, "the fetch result itself now carries truncated:true when it stopped at the cap — a structural signal, not just a recordsFetched comparison the caller has to infer");
 
   const cappedConformance = await runJiraConformance({ fetchImpl: hugeFetch, config });
   ok("V1.8 Large data safety", cappedConformance.truncated === true, "the conformance report explicitly flags truncation when the result set hits the safety cap — never silently presented as complete");
+}
+
+// ===== V2.18 §5 — Jira sync completeness: truncation is observed directly (never inferred
+// from recordsFetched >= JIRA_MAX_ISSUES, which false-positives on an exactly-2000 real
+// result), ascending sort order makes a capped fetch resumable, and computeResumeCursor
+// derives the exact boundary the next incremental sync must ask for. =====
+{
+  const config: JiraConnectionConfig = { baseUrl: "https://acme.atlassian.net", email: "ba@acme.com", apiToken: "x" };
+
+  // A result of EXACTLY JIRA_MAX_ISSUES real issues, whose final page genuinely reports
+  // isLast:true — must NOT be flagged truncated (the false-positive the old
+  // recordsFetched >= JIRA_MAX_ISSUES heuristic had).
+  const exactCapFetch: FetchLike = async (url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { nextPageToken?: string };
+    const pageIndex = body.nextPageToken ? Number(body.nextPageToken) : 0;
+    const startAt = pageIndex * JIRA_PAGE_SIZE;
+    const isFinalPage = startAt + JIRA_PAGE_SIZE >= JIRA_MAX_ISSUES;
+    const issues = Array.from({ length: JIRA_PAGE_SIZE }, (_, i) => makeJiraIssue({ key: `EXACT-${startAt + i}`, updated: `2026-08-${String(1 + ((startAt + i) % 28)).padStart(2, "0")}T00:00:00.000+0000` }));
+    return { ok: true, status: 200, json: async () => ({ issues, isLast: isFinalPage, nextPageToken: isFinalPage ? undefined : String(pageIndex + 1) }) };
+  };
+  const exactCapResult = await fetchJiraIssuesWith(exactCapFetch, config, {});
+  ok(
+    "V2.18 Jira completeness",
+    exactCapResult.ok && exactCapResult.recordsFetched === JIRA_MAX_ISSUES && exactCapResult.truncated === false,
+    "a result of exactly JIRA_MAX_ISSUES real issues, whose last page honestly reports isLast:true, is NOT flagged truncated — regression guard for the old heuristic's false positive at exactly the cap"
+  );
+
+  // A result that genuinely exceeds the cap (more real pages exist after JIRA_MAX_ISSUES is
+  // reached) IS flagged truncated.
+  const overCapFetch: FetchLike = async (url, init) => {
+    const body = JSON.parse(String(init?.body ?? "{}")) as { nextPageToken?: string };
+    const pageIndex = body.nextPageToken ? Number(body.nextPageToken) : 0;
+    const startAt = pageIndex * JIRA_PAGE_SIZE;
+    const issues = Array.from({ length: JIRA_PAGE_SIZE }, (_, i) => makeJiraIssue({ key: `OVER-${startAt + i}`, updated: `2026-08-${String(1 + ((startAt + i) % 28)).padStart(2, "0")}T00:00:00.000+0000` }));
+    // Always more pages available — a real instance with far more than JIRA_MAX_ISSUES.
+    return { ok: true, status: 200, json: async () => ({ issues, isLast: false, nextPageToken: String(pageIndex + 1) }) };
+  };
+  const overCapResult = await fetchJiraIssuesWith(overCapFetch, config, {});
+  ok("V2.18 Jira completeness", overCapResult.ok && overCapResult.recordsFetched === JIRA_MAX_ISSUES && overCapResult.truncated === true, "a result that genuinely exceeds the cap IS flagged truncated");
+
+  // computeResumeCursor: derives the resume boundary from the last-fetched issue's `updated`.
+  const ascendingIssues = [
+    makeJiraIssue({ key: "A-1", updated: "2026-08-01T00:00:00.000+0000" }),
+    makeJiraIssue({ key: "A-2", updated: "2026-08-05T00:00:00.000+0000" }),
+    makeJiraIssue({ key: "A-3", updated: "2026-08-10T00:00:00.000+0000" }),
+  ];
+  ok("V2.18 computeResumeCursor", computeResumeCursor(ascendingIssues, true) === new Date("2026-08-10T00:00:00.000+0000").toISOString(), "returns the last-fetched issue's updated timestamp (the boundary the next sync should resume from) when truncated");
+  ok("V2.18 computeResumeCursor", computeResumeCursor(ascendingIssues, false) === undefined, "returns undefined when not truncated — nothing to resume from, the cursor should advance normally");
+  const missingTrailingUpdated = [...ascendingIssues.slice(0, 2), { ...ascendingIssues[2], fields: { ...ascendingIssues[2].fields, updated: undefined } }];
+  ok("V2.18 computeResumeCursor", computeResumeCursor(missingTrailingUpdated, true) === new Date("2026-08-05T00:00:00.000+0000").toISOString(), "walks backward past a trailing issue missing `updated` to the nearest one that has it");
+  const allMissingUpdated = ascendingIssues.map((i) => ({ ...i, fields: { ...i.fields, updated: undefined } }));
+  ok("V2.18 computeResumeCursor", computeResumeCursor(allMissingUpdated, true) === undefined, "returns undefined (never advance the cursor) when no fetched issue has a resolvable `updated` at all");
+}
+
+// ===== V2.18 §5 — store.ts syncJira: a partial (truncated) sync must not advance the cursor
+// past what it didn't fetch, and must not destructively replace an existing complete local
+// dataset with a truncated one =====
+{
+  commandCenterStore.resetAll();
+  const originalFetch = globalThis.fetch;
+
+  // Seed the store with an existing Jira work item belonging to a project the next (mocked,
+  // truncated, full) sync will NOT include in its incoming batch — proves a truncated full
+  // sync merges rather than replaces. importData is the existing public seeding path (used
+  // by Data Import); its mergeById-based merge is a no-op destination-side concern here —
+  // this call's only job is to get a sourceType:"jira" work item into a pristine store.
+  const existingBarcItem = { ...makeItem({ id: "wi-barc-1", key: "BARC-1", projectId: "jira-project-BARC" }), sourceType: "jira" as const, sourceId: "BARC-1" };
+  commandCenterStore.importData({
+    ok: true,
+    data: { ...emptyData(), workItems: [existingBarcItem] },
+    errors: [],
+    addedCounts: {},
+  });
+
+  const resumeBoundary = "2026-08-10T00:00:00.000Z";
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (url: string) => {
+    if (String(url).includes("/api/command-center/jira/sync")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          data: { clients: [], projects: [], workItems: [], dependencies: [] },
+          recordsFetched: 2000,
+          truncated: true,
+          resumeSinceIso: resumeBoundary,
+          syncedAt: "2026-08-15T00:00:00.000Z",
+          warnings: ["Result set reached the 2000-issue safety cap — this sync is partial."],
+        }),
+      } as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as Response;
+  }) as typeof fetch;
+
+  const partialSyncResult = await commandCenterStore.syncJira({ full: true });
+  const afterPartial = commandCenterStore.getSnapshot();
+  ok("V2.18 syncJira partial", partialSyncResult.ok === true, "a truncated sync still reports ok:true — it's partial, not a failure");
+  ok("V2.18 syncJira partial", afterPartial.jiraSync.lastSyncStatus === "partial", "lastSyncStatus is 'partial', distinct from both 'success' and 'failed'");
+  ok("V2.18 syncJira partial", afterPartial.jiraSync.lastSyncCompletedAt === resumeBoundary, "the incremental cursor advances only to the resume boundary, never to syncedAt/'now' — so the next sync resumes exactly where this one stopped");
+  ok("V2.18 syncJira partial", afterPartial.data.workItems.some((w) => w.id === "wi-barc-1"), "a truncated FULL sync merges rather than replaces — the pre-existing out-of-batch BARC work item is NOT dropped");
+
+  // A follow-up sync that completes (truncated:false) promotes lastSyncStatus back to success
+  // and advances the cursor to the real syncedAt.
+  const finalSyncedAt = "2026-08-15T00:05:00.000Z";
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (url: string) => {
+    if (String(url).includes("/api/command-center/jira/sync")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, data: { clients: [], projects: [], workItems: [], dependencies: [] }, recordsFetched: 12, truncated: false, syncedAt: finalSyncedAt, warnings: [] }),
+      } as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as Response;
+  }) as typeof fetch;
+  const followUpResult = await commandCenterStore.syncJira({});
+  const afterFollowUp = commandCenterStore.getSnapshot();
+  ok("V2.18 syncJira partial", followUpResult.ok === true && afterFollowUp.jiraSync.lastSyncStatus === "success", "a follow-up sync that completes promotes lastSyncStatus back to success");
+  ok("V2.18 syncJira partial", afterFollowUp.jiraSync.lastSyncCompletedAt === finalSyncedAt, "a complete sync's cursor advances to the real syncedAt, same as before this pass");
+
+  globalThis.fetch = originalFetch;
+  commandCenterStore.resetAll();
+}
+
+// ===== V2.18 §5 — regression: a genuinely COMPLETE full sync still replaces exactly as
+// before this pass (the merge-not-replace change is scoped strictly to truncated syncs) =====
+{
+  commandCenterStore.resetAll();
+  const originalFetch = globalThis.fetch;
+  const existingBarcItem = { ...makeItem({ id: "wi-barc-2", key: "BARC-2", projectId: "jira-project-BARC" }), sourceType: "jira" as const, sourceId: "BARC-2" };
+  commandCenterStore.importData({ ok: true, data: { ...emptyData(), workItems: [existingBarcItem] }, errors: [], addedCounts: {} });
+
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (url: string) => {
+    if (String(url).includes("/api/command-center/jira/sync")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, data: { clients: [], projects: [], workItems: [], dependencies: [] }, recordsFetched: 3, truncated: false, syncedAt: "2026-08-15T00:00:00.000Z", warnings: [] }),
+      } as Response;
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as Response;
+  }) as typeof fetch;
+
+  await commandCenterStore.syncJira({ full: true });
+  const afterComplete = commandCenterStore.getSnapshot();
+  ok("V2.18 syncJira regression", !afterComplete.data.workItems.some((w) => w.id === "wi-barc-2"), "a genuinely complete full sync (truncated:false) still replaces existing Jira-sourced work items exactly as before — the merge-on-partial fix does not weaken this");
+
+  globalThis.fetch = originalFetch;
+  commandCenterStore.resetAll();
 }
 
 // ===== V1.8 §22 — Performance measurement at realistic dataset sizes =====
@@ -4332,6 +4632,25 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   const openDepsText = releaseDraft.sections.find((s) => s.heading === "Open dependencies")!.segments.map((s) => s.text).join(" ");
   ok("V2.2 Release Update", openDepsText.includes(v22Dep.description), "an unresolved dependency on a work item in this release appears in Open Dependencies");
   ok("V2.2 Release Update", releaseDraft.sourceRef?.type === "release" && releaseDraft.sourceRef.fixVersion === "R-2026.1", "the release draft tags a rebuildable sourceRef");
+  ok(
+    "V2.18 Trust wording",
+    releaseDraft.sections.find((s) => s.heading === "Confidence")!.segments[0].text === `${release.deliveryConfidence}/100`,
+    "the auto-generated Release Update's Confidence section reads 'N/100', never 'N%' — deliveryConfidence is a deterministic heuristic score, not a statistical probability"
+  );
+}
+
+// ===== V2.18 §11 — Trust/confidence wording audit: heuristic score never dressed up as a
+// probability, and "no outcomes measured yet" never conflated with "all outcomes were good" =====
+{
+  ok(
+    "V2.18 Trust wording",
+    !/\{deliveryConfidence\}%/.test(fs.readFileSync(path.join(process.cwd(), "src/components/command-center/ControlTower.tsx"), "utf8")),
+    "ControlTower no longer renders the deterministic 0-100 heuristic score with a literal '%' — it uses the same honest '/100' framing ExecutiveView.tsx already used"
+  );
+
+  const controlTowerSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/ControlTower.tsx"), "utf8");
+  ok("V2.18 Trust wording", /proactive\.actionEffectiveness\.length === 0/.test(controlTowerSrc), "ControlTower's Action tile checks actionEffectiveness.length === 0 before ever rendering 'All effective' — zero-outcomes-measured is now distinguishable from zero-ineffective-among-many");
+  ok("V2.18 Trust wording", /No action outcomes yet/.test(controlTowerSrc), "the zero-measured case gets its own honest label, not silently reusing 'All effective'");
 }
 
 // ----- Decision Brief — the system never decides (§4) -----
@@ -4751,9 +5070,9 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
 // buildIssuesJql produced for a first sync with no JIRA_PROJECT_KEYS configured (the common
 // case, since that variable is optional). =====
 {
-  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({}) === "project is not EMPTY order by updated desc", "no scope and no incremental cursor still produces a JQL with a real WHERE clause — never a bare 'order by' that Jira's endpoint rejects as unbounded");
-  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({ projectKeys: ["JPMC"] }) === 'project in ("JPMC") order by updated desc', "a real project scope is used as-is — the bounded-query workaround only applies when there's genuinely no other restriction");
-  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({ sinceIso: "2026-08-01" }) === 'updated >= "2026-08-01" order by updated desc', "an incremental sinceIso is already a real bounding clause — the workaround clause is not redundantly added");
+  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({}) === "project is not EMPTY order by updated asc", "no scope and no incremental cursor still produces a JQL with a real WHERE clause — never a bare 'order by' that Jira's endpoint rejects as unbounded");
+  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({ projectKeys: ["JPMC"] }) === 'project in ("JPMC") order by updated asc', "a real project scope is used as-is — the bounded-query workaround only applies when there's genuinely no other restriction");
+  ok("V2.2.4 Jira bounded JQL", buildIssuesJql({ sinceIso: "2026-08-01" }) === 'updated >= "2026-08-01" order by updated asc', "an incremental sinceIso is already a real bounding clause — the workaround clause is not redundantly added");
   ok("V2.2.4 Jira bounded JQL", !buildIssuesJql({}).startsWith("order by"), "the unbounded case never starts with a bare ORDER BY");
 
   // End-to-end: a fetch that would reject an unbounded JQL with exactly the real-world
@@ -4773,7 +5092,7 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   };
   const result = await fetchJiraIssuesWith(strictInstanceFetch, boundedConfig, {});
   ok("V2.2.4 Jira bounded JQL", result.ok, `a first full sync against an instance that enforces bounded JQL now succeeds (got ${result.ok ? "ok" : "error: " + (result as { error?: string }).error})`);
-  ok("V2.2.4 Jira bounded JQL", sentJql === "project is not EMPTY order by updated desc", "the exact JQL sent to a real instance matches the bounded-query workaround");
+  ok("V2.2.4 Jira bounded JQL", sentJql === "project is not EMPTY order by updated asc", "the exact JQL sent to a real instance matches the bounded-query workaround");
 }
 
 // ===== V2.3 — Focus Project Scope & Jira Ingestion Guard =====
@@ -4978,12 +5297,12 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   ok("V2.3 Jira query", Array.isArray(focusedWithNoOverlapEnv) && focusedWithNoOverlapEnv.length === 0, "zero overlap between the focused selection and the env restriction resolves to an explicit empty array (never undefined/unbounded)");
 
   // §7-8 — the JQL restriction clause itself, for multiple projects.
-  ok("V2.3 Jira query", buildIssuesJql({ projectKeys: ["JPMC", "UBS"] }) === 'project in ("JPMC","UBS") order by updated desc', "FOCUSED mode with multiple projects produces a correctly-quoted `project in (...)` JQL restriction");
-  ok("V2.3 Jira query", buildIssuesJql({ projectKeys: ["JPMC"] }) === 'project in ("JPMC") order by updated desc', "FOCUSED mode with a single project still produces the restriction");
+  ok("V2.3 Jira query", buildIssuesJql({ projectKeys: ["JPMC", "UBS"] }) === 'project in ("JPMC","UBS") order by updated asc', "FOCUSED mode with multiple projects produces a correctly-quoted `project in (...)` JQL restriction");
+  ok("V2.3 Jira query", buildIssuesJql({ projectKeys: ["JPMC"] }) === 'project in ("JPMC") order by updated asc', "FOCUSED mode with a single project still produces the restriction");
 
   // §7 — incremental sync + focused scope combine with AND, neither clause is dropped.
   const combined = buildIssuesJql({ sinceIso: "2026-08-01", projectKeys: ["JPMC", "UBS"] });
-  ok("V2.3 Jira query", combined === 'project in ("JPMC","UBS") AND updated >= "2026-08-01" order by updated desc', "an incremental sync's `updated >=` cursor and a focused project restriction combine into a single AND-ed JQL clause");
+  ok("V2.3 Jira query", combined === 'project in ("JPMC","UBS") AND updated >= "2026-08-01" order by updated asc', "an incremental sync's `updated >=` cursor and a focused project restriction combine into a single AND-ed JQL clause");
   ok("V2.3 Jira query", combined.includes("project in"), "the combined JQL still carries the project restriction");
   ok("V2.3 Jira query", combined.includes('updated >= "2026-08-01"'), "the combined JQL still carries the incremental cursor");
 
@@ -5000,7 +5319,7 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   };
   const scopedFetchResult = await fetchJiraIssuesWith(scopedFetch, { baseUrl: "https://acme.atlassian.net", email: "x", apiToken: "x" }, { projectKeys: ["JPMC"] });
   ok("V2.3 Jira query", scopedFetchResult.ok && scopedFetchResult.recordsFetched === 1, "a focused-scope fetch still succeeds and returns only what the (fixture) instance sent back");
-  ok("V2.3 Jira query", sentJql === 'project in ("JPMC") order by updated desc', "the real HTTP request sent to Jira carries the scoped project restriction — the restriction is enforced BEFORE ingestion, not filtered client-side afterward");
+  ok("V2.3 Jira query", sentJql === 'project in ("JPMC") order by updated asc', "the real HTTP request sent to Jira carries the scoped project restriction — the restriction is enforced BEFORE ingestion, not filtered client-side afterward");
 
   // §20 — the pre-existing 2000-issue safety cap is untouched by this feature.
   ok("V2.3 Jira query", JIRA_MAX_ISSUES === 2000, "the existing 2000-issue safety cap constant is unchanged by Focus Project Scope");
@@ -5345,6 +5664,47 @@ function makeThreeProjectFixture() {
   ok("V2.4 Project override", !!override.proactive && override.proactive.attentionQueue.some((a) => /UBS/i.test(a.what)), "the override's proactive intelligence is computed FROM the override-scoped data, surfacing UBS's own attention item");
 
   ok("V2.4 Project override", state.jiraProjectScope.mode === "FOCUSED" && JSON.stringify(state.jiraProjectScope.projectKeys) === JSON.stringify(["JPMC"]), "§20 — building an override never mutates the input state's global scope object; it stays exactly JPMC as before the call");
+}
+
+// ===== V2.18 §6 — mention project-scope isolation, display-time half (scopeMentionEvents).
+// Confirmed real gap: MentionEvent isn't a field of CommandCenterData, so applyProjectScope
+// never touched it — a mention on an out-of-scope project's issue reached Personal
+// Focus/Attention regardless of Focus Project Scope. Exercises the exact four scenarios the
+// hardening spec names. =====
+{
+  const fixtureData = makeThreeProjectFixture(); // work items JPMC-900 / UBS-900 / WF-900
+  const mentionOnJpmc: MentionEvent = { issueKey: "JPMC-900", commentId: "c-jpmc", excerpt: "please check this", mentionedAt: TODAY };
+  const mentionOnUbs: MentionEvent = { issueKey: "UBS-900", commentId: "c-ubs", excerpt: "please check this too", mentionedAt: TODAY };
+
+  const jpmcScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: ["JPMC"] };
+  const scopedToJpmc = applyProjectScope(fixtureData, jpmcScope);
+  const jpmcFocusedEvents = scopeMentionEvents([mentionOnJpmc, mentionOnUbs], scopedToJpmc.workItems, jpmcScope);
+  ok("V2.18 Mention scope (display)", jpmcFocusedEvents.some((m) => m.issueKey === "JPMC-900"), "Focus = JPMC, mention on JPMC -> included");
+  ok("V2.18 Mention scope (display)", !jpmcFocusedEvents.some((m) => m.issueKey === "UBS-900"), "Focus = JPMC, mention on UBS -> excluded");
+
+  const allScope: JiraProjectScope = { mode: "ALL", projectKeys: [] };
+  const allEvents = scopeMentionEvents([mentionOnJpmc, mentionOnUbs], applyProjectScope(fixtureData, allScope).workItems, allScope);
+  ok("V2.18 Mention scope (display)", allEvents.some((m) => m.issueKey === "UBS-900"), "Focus = ALL, mention on UBS -> included");
+
+  // Explicit project override (buildProjectOverrideView) — the override's OWN scope governs
+  // its own mentions, independent of the persisted global scope, and never mutates it.
+  const globalJpmcState = makeStoreState({ data: fixtureData, jiraProjectScope: jpmcScope, mentionEvents: [mentionOnJpmc, mentionOnUbs] });
+  const ubsOverride = buildProjectOverrideView(globalJpmcState, TODAY, "UBS");
+  ok("V2.18 Mention scope (override)", !!ubsOverride.personalFocus, "the UBS override computes a personalFocus view at all (sanity check before inspecting mentions within it)");
+  ok(
+    "V2.18 Mention scope (override)",
+    JSON.stringify(ubsOverride).includes("please check this too") && !JSON.stringify(ubsOverride).includes("JPMC-900"),
+    "an explicit override for UBS surfaces the UBS mention even though the persisted global scope is JPMC, and carries no trace of the JPMC-scoped mention — the override's own scope, not the global one, governs"
+  );
+  ok("V2.18 Mention scope (override)", globalJpmcState.jiraProjectScope.mode === "FOCUSED" && JSON.stringify(globalJpmcState.jiraProjectScope.projectKeys) === JSON.stringify(["JPMC"]), "building the override never mutates the persisted global scope, same guarantee §20 already established for data");
+
+  // Wiring check: use-command-center.ts must actually route mentions through
+  // scopeMentionEvents before either engine sees them, not pass state.mentionEvents raw.
+  const repoRoot = path.resolve(process.cwd());
+  const hookSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/use-command-center.ts"), "utf8");
+  ok("V2.18 Mention scope wiring", /import \{ applyProjectScope, scopeMentionEvents \}/.test(hookSrc), "the hook imports scopeMentionEvents alongside applyProjectScope, not a second/private scoping helper");
+  ok("V2.18 Mention scope wiring", (hookSrc.match(/scopeMentionEvents\(/g) ?? []).length === 2, "scopeMentionEvents is called exactly twice — once for the main hook, once for buildProjectOverrideView — covering both places raw state.mentionEvents used to reach an engine unfiltered");
+  ok("V2.18 Mention scope wiring", !/computeProactiveIntelligence\([^)]*state\.mentionEvents/.test(hookSrc) && !/computePersonalFocus\([^)]*state\.mentionEvents/.test(hookSrc), "neither engine call site passes raw state.mentionEvents directly any more");
 }
 
 // ----- Artifact per-project evidence targeting (§22) + no cross-project AI leakage (§36):
@@ -7380,21 +7740,67 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
 // ===== V2.15 — Cross-Device Consistency =====
 
-// --- sync-auth.ts: isSyncRequestAuthorized (jira/sync POST gate — accepts EITHER secret) ---
+// --- sync-auth.ts: checkSyncRequestAuth (jira/sync POST gate — accepts EITHER secret) ---
+// V2.18 §4 — the pre-V2.18 "neither secret configured -> open" default is a confirmed P0
+// finding (see the security hardening pass); these assertions now lock in the fail-closed
+// replacement, matching checkAppStateAuth's existing (already-correct) 503 contract exactly.
 {
-  ok("V2.15 sync-auth", isSyncRequestAuthorized(null, undefined, undefined) === true, "neither secret configured -> every request authorized, unchanged pre-V2.10 default-open behavior");
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer anything", undefined, undefined) === true, "still open with neither configured, regardless of what header (if any) is sent");
+  const unconfigured1 = checkSyncRequestAuth(null, undefined, undefined);
+  ok("V2.18 sync-auth", unconfigured1.ok === false && unconfigured1.status === 503, "neither secret configured -> unauthorized (503, not available) — the fail-open default is gone");
+  const unconfigured2 = checkSyncRequestAuth("Bearer anything", undefined, undefined);
+  ok("V2.18 sync-auth", unconfigured2.ok === false && unconfigured2.status === 503, "still closed with neither configured, regardless of what header (if any) is sent");
 
-  ok("V2.15 sync-auth", isSyncRequestAuthorized(null, "cron-secret", undefined) === false, "only CRON_SECRET configured, no header -> unauthorized");
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer cron-secret", "cron-secret", undefined) === true, "only CRON_SECRET configured, matching header -> authorized (the automated cron/GitHub Action path)");
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer wrong", "cron-secret", undefined) === false, "only CRON_SECRET configured, wrong header -> unauthorized");
+  const noHeader = checkSyncRequestAuth(null, "cron-secret", undefined);
+  ok("V2.18 sync-auth", noHeader.ok === false && noHeader.status === 401, "only CRON_SECRET configured, no header -> unauthorized");
+  ok("V2.18 sync-auth", checkSyncRequestAuth("Bearer cron-secret", "cron-secret", undefined).ok === true, "only CRON_SECRET configured, matching header -> authorized (the automated cron/GitHub Action path)");
+  const wrongHeader = checkSyncRequestAuth("Bearer wrong", "cron-secret", undefined);
+  ok("V2.18 sync-auth", wrongHeader.ok === false && wrongHeader.status === 401, "only CRON_SECRET configured, wrong header -> unauthorized");
 
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer app-state-secret", undefined, "app-state-secret") === true, "only APP_STATE_SECRET configured, matching header -> authorized (a paired browser with no CRON_SECRET set)");
+  ok("V2.18 sync-auth", checkSyncRequestAuth("Bearer app-state-secret", undefined, "app-state-secret").ok === true, "only APP_STATE_SECRET configured, matching header -> authorized (a paired browser with no CRON_SECRET set)");
 
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer cron-secret", "cron-secret", "app-state-secret") === true, "both configured: a request bearing CRON_SECRET is authorized");
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer app-state-secret", "cron-secret", "app-state-secret") === true, "both configured: a request bearing APP_STATE_SECRET is ALSO authorized — the exact V2.15 fix, both work at the same time");
-  ok("V2.15 sync-auth", isSyncRequestAuthorized("Bearer neither-of-these", "cron-secret", "app-state-secret") === false, "both configured: a request bearing neither valid secret is rejected");
-  ok("V2.15 sync-auth", isSyncRequestAuthorized(null, "cron-secret", "app-state-secret") === false, "both configured: no header at all is rejected — today's default-open behavior only applies when NEITHER secret is configured");
+  ok("V2.18 sync-auth", checkSyncRequestAuth("Bearer cron-secret", "cron-secret", "app-state-secret").ok === true, "both configured: a request bearing CRON_SECRET is authorized");
+  ok("V2.18 sync-auth", checkSyncRequestAuth("Bearer app-state-secret", "cron-secret", "app-state-secret").ok === true, "both configured: a request bearing APP_STATE_SECRET is ALSO authorized — both work at the same time");
+  const neitherValid = checkSyncRequestAuth("Bearer neither-of-these", "cron-secret", "app-state-secret");
+  ok("V2.18 sync-auth", neitherValid.ok === false && neitherValid.status === 401, "both configured: a request bearing neither valid secret is rejected");
+  const noHeaderBothConfigured = checkSyncRequestAuth(null, "cron-secret", "app-state-secret");
+  ok("V2.18 sync-auth", noHeaderBothConfigured.ok === false && noHeaderBothConfigured.status === 401, "both configured: no header at all is rejected");
+}
+
+// ===== V2.18 — Security hardening: consistent auth across every sensitive route =====
+// Confirmed P0 finding: jira/projects, jira/conformance, ai (POST), and notify (POST) had NO
+// auth code path at all, regardless of any env var — unlike jira/sync and state, which at
+// least checked something. These assertions confirm each route now gates on the same shared
+// checkSyncRequestAuth, and that every client caller that talks to a now-gated route attaches
+// the paired-device secret (source-regex checks: these routes/callers transitively import
+// "server-only" or are client components, so they're read rather than imported/executed,
+// matching this suite's existing precedent for route-level and client-fetch wiring checks).
+{
+  const repoRoot = path.resolve(process.cwd());
+  const read = (p: string) => fs.readFileSync(path.join(repoRoot, p), "utf8");
+
+  const gatedRoutes = [
+    "src/app/api/command-center/jira/projects/route.ts",
+    "src/app/api/command-center/jira/conformance/route.ts",
+    "src/app/api/command-center/ai/route.ts",
+    "src/app/api/command-center/notify/route.ts",
+  ];
+  for (const routePath of gatedRoutes) {
+    const src = read(routePath);
+    ok("V2.18 Security route wiring", /import \{ checkSyncRequestAuth \} from "@\/lib\/command-center\/jira\/sync-auth"/.test(src), `${routePath} imports the shared auth check rather than a private/duplicated one`);
+    ok("V2.18 Security route wiring", /checkSyncRequestAuth\(/.test(src), `${routePath} actually calls the auth check`);
+  }
+
+  const gatedClientCallers = [
+    "src/lib/command-center/notify-client.ts",
+    "src/components/command-center/use-command-center.ts",
+    "src/lib/command-center/ai/claude-provider.ts",
+    "src/lib/command-center/datasource/jira-source.ts",
+    "src/app/data-settings/page.tsx",
+  ];
+  for (const callerPath of gatedClientCallers) {
+    const src = read(callerPath);
+    ok("V2.18 Security client wiring", /pairedAuthHeader/.test(src), `${callerPath} imports/uses pairedAuthHeader so its request(s) to a now-gated route can authenticate as a paired device`);
+  }
 }
 
 // --- app-state.ts: checkAppStateAuth (state route's own auth — deliberately NOT open when

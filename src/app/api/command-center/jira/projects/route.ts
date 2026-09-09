@@ -7,13 +7,22 @@
 
 import { NextResponse } from "next/server";
 import { fetchJiraProjects, getJiraConfig } from "@/lib/server/jira-client";
+import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 
 export const runtime = "nodejs";
 // V2.2.1 §4 precedent — a parameter-less GET route must not be statically frozen at build
 // time; it has to reflect the server's current Jira configuration on every request.
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  // V2.18 §4 — this route makes a real, credentialed Jira API call and returns this Jira
+  // instance's real project catalog; it had no auth at all before this pass. Same
+  // gate/contract as jira/sync (see sync-auth.ts).
+  const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
+  }
+
   const config = getJiraConfig();
   if (!config) {
     return NextResponse.json({ ok: false, error: "Jira is not configured on the server.", errorKind: "not-configured" }, { status: 503 });

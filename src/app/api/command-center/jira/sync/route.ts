@@ -19,11 +19,11 @@ import {
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
-import { isSyncRequestAuthorized } from "@/lib/command-center/jira/sync-auth";
+import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
-import { buildIncrementalSinceParam, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
+import { buildIncrementalSinceParam, computeResumeCursor, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
 import type { MentionEvent } from "@/lib/command-center/types";
 
@@ -43,34 +43,27 @@ const syncRequestSchema = z.object({
 
 /**
  * V2.10 §4 — automated cron requests (see vercel.json / .github/workflows/sync.yml) carry
- * `Authorization: Bearer <CRON_SECRET>`. When neither CRON_SECRET nor APP_STATE_SECRET is
- * configured, this route stays exactly as open as it was before V2.10 — same "safe when
- * unconfigured" contract as every other env var here.
+ * `Authorization: Bearer <CRON_SECRET>`.
  *
- * V2.15 §2 — fixes the regression this introduced: CRON_SECRET alone made the in-app "Sync
- * Now" button 401 (a browser can never safely hold CRON_SECRET). This now also accepts
- * `Authorization: Bearer <APP_STATE_SECRET>` — the same paired secret the browser holds for
- * Cross-Device Sync (see device-pairing.ts) — so a paired browser's manual Sync Now works
- * even while CRON_SECRET locks down the unattended path. The two secrets are never merged
- * into one trust level (see sync-auth.ts's own comment); this function just accepts either.
+ * V2.15 §2 — CRON_SECRET alone made the in-app "Sync Now" button 401 (a browser can never
+ * safely hold CRON_SECRET). This also accepts `Authorization: Bearer <APP_STATE_SECRET>` —
+ * the same paired secret the browser holds for Cross-Device Sync (see device-pairing.ts) —
+ * so a paired browser's manual Sync Now works even while CRON_SECRET locks down the
+ * unattended path. The two secrets are never merged into one trust level (see sync-auth.ts's
+ * own comment); this function just accepts either.
+ *
+ * V2.18 §4 — this route is a real, unauthenticated-internet-reachable endpoint that fetches
+ * live Jira data using this server's own credentials; see sync-auth.ts's own comment for why
+ * "neither secret configured" is now a 503 (not available), never open.
  */
-function isAuthorizedSyncRequest(req: Request): boolean {
-  return isSyncRequestAuthorized(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+function authorizeSyncRequest(req: Request): { ok: true } | { ok: false; status: 401 | 503; error: string } {
+  return checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
 }
 
 export async function POST(req: Request) {
-  if (!isAuthorizedSyncRequest(req)) {
-    const appStateSecretConfigured = !!process.env.APP_STATE_SECRET;
-    return NextResponse.json(
-      {
-        ok: false,
-        error: appStateSecretConfigured
-          ? "This device isn't paired for Cross-Device Sync, so it can't authenticate a manual sync while CRON_SECRET is configured. Pair this device in Data & Settings."
-          : "Manual sync requires pairing this device — see Data & Settings. (CRON_SECRET is configured on this deployment, and APP_STATE_SECRET — required to pair a browser — is not.)",
-        errorKind: "cron-unauthorized",
-      },
-      { status: 401 }
-    );
+  const auth = authorizeSyncRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
   }
 
   const config = getJiraConfig();
@@ -132,12 +125,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: issuesResult.error, errorKind: issuesResult.errorKind }, { status: 502 });
   }
 
-  // V1.7 §3, §7 — the fixed safety cap in jira/http.ts is silent by design (it's a
-  // per-request loop guard, not a diagnostic); this is the one place that knows enough to
-  // turn "we stopped fetching at the cap" into a visible warning rather than hiding it.
+  // V2.18 §5 — truncated is now observed directly by the pagination loop itself (see
+  // jira/http.ts), not inferred here from recordsFetched >= JIRA_MAX_ISSUES (which would
+  // false-positive on a genuine result of exactly JIRA_MAX_ISSUES issues). resumeSinceIso is
+  // the boundary the NEXT sync must ask for — see store.ts's syncJira, which advances its
+  // incremental cursor to this instead of syncedAt whenever a sync is partial, so a truncated
+  // sync can never silently skip whatever it didn't fetch.
+  const truncated = issuesResult.truncated === true;
+  const resumeSinceIso = computeResumeCursor(issuesResult.data, truncated);
   const warnings: string[] = [];
-  if (issuesResult.recordsFetched >= JIRA_MAX_ISSUES) {
-    warnings.push(`Result set reached the ${JIRA_MAX_ISSUES}-issue safety cap — some matching issues may not have been fetched this sync.`);
+  if (truncated) {
+    warnings.push(`Result set reached the ${JIRA_MAX_ISSUES}-issue safety cap — this sync is partial. It will automatically resume from where it stopped on the next sync.`);
   }
 
   const options = { baseUrl: config.baseUrl, projectToClient: getProjectClientMap(), today };
@@ -171,7 +169,10 @@ export async function POST(req: Request) {
   const accountId = parsedRequest.data.accountId;
   if (accountId) {
     try {
-      const mentionedResult = await fetchMentionedIssues(config, accountId, jqlSinceIso);
+      // V2.18 §6 — same projectKeys the main issue fetch above uses, so a FOCUSED sync never
+      // even fetches a mention outside the current Focus Project Scope (see
+      // fetchMentionedIssuesWith's own comment).
+      const mentionedResult = await fetchMentionedIssues(config, accountId, jqlSinceIso, projectKeys);
       if (mentionedResult.ok) {
         const events: MentionEvent[] = [];
         const checkedKeys = new Set<string>();
@@ -224,6 +225,10 @@ export async function POST(req: Request) {
     projectsDiscovered: jiraProjects.length,
     mentionEvents,
     warnings,
+    // V2.18 §5 — truncated/resumeSinceIso let the client (store.ts syncJira) distinguish a
+    // genuinely complete sync from a partial one and advance its incremental cursor safely.
+    truncated,
+    resumeSinceIso,
     // V1.8 §17 — pages is derived from the same page size the connector actually used
     // (jira/http.ts), never a separately-tracked/duplicated counter.
     pages: Math.ceil(issuesResult.recordsFetched / JIRA_PAGE_SIZE) || (issuesResult.recordsFetched === 0 ? 0 : 1),

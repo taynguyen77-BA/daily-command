@@ -42,7 +42,7 @@ export const JIRA_MAX_ISSUES = 2000; // safety cap — §11 "handle large result
 const JIRA_FETCH_TIMEOUT_MS = 20_000;
 
 export type JiraFetchResult<T> =
-  | { ok: true; data: T; recordsFetched: number; method?: "jql-cursor" | "classic-offset" }
+  | { ok: true; data: T; recordsFetched: number; method?: "jql-cursor" | "classic-offset"; truncated?: boolean }
   | { ok: false; error: string; errorKind: JiraErrorKind };
 
 export type FetchLike = (url: string, init?: { headers?: Record<string, string>; method?: string; body?: string; signal?: AbortSignal }) => Promise<{
@@ -155,7 +155,32 @@ export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: strin
   // nothing — it only satisfies the syntactic requirement, never narrows the actual sync
   // scope.
   if (clauses.length === 0) clauses.push("project is not EMPTY");
-  return `${clauses.join(" AND ")} order by updated desc`;
+  // V2.18 §5 — was "order by updated desc". Ascending order is what makes the JIRA_MAX_ISSUES
+  // safety cap safe rather than just "usually fine": a capped fetch now always returns the
+  // OLDEST unfetched issues in the window first, so the last-fetched issue's `updated` value
+  // is a safe, monotonically-non-decreasing resume boundary for the next sync (see
+  // computeResumeCursor below and store.ts's syncJira). With descending order, a capped fetch
+  // returns the same newest N issues every time and can never make forward progress.
+  return `${clauses.join(" AND ")} order by updated asc`;
+}
+
+/** V2.18 §5 — resume boundary for a truncated sync: the `updated` timestamp of the
+ *  last-fetched issue. With buildIssuesJql's ascending order this is the maximum `updated`
+ *  seen in a truncated fetch, so the next sync's `updated >= <this>` picks up exactly where
+ *  this one stopped (`>=`, not `>`, so a tie at the boundary is re-fetched and deduped by
+ *  store.ts's mergeById, never skipped). Walks backward past any issue missing `updated`
+ *  (the field is optional per jira/types.ts's schema). Returns undefined when not truncated,
+ *  or when no fetched issue has a resolvable `updated` at all — callers must then not advance
+ *  the incremental cursor. */
+export function computeResumeCursor(issues: JiraIssue[], truncated: boolean): string | undefined {
+  if (!truncated) return undefined;
+  for (let i = issues.length - 1; i >= 0; i--) {
+    const raw = issues[i]?.fields?.updated;
+    if (!raw) continue;
+    const ms = new Date(raw).getTime();
+    if (Number.isFinite(ms)) return new Date(ms).toISOString();
+  }
+  return undefined;
 }
 
 export const JIRA_PROJECT_PAGE_SIZE = 50;
@@ -223,8 +248,9 @@ async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnecti
   const jql = buildIssuesJql(options);
   const issues: JiraIssue[] = [];
   let startAt = 0;
+  let truncated = false;
   try {
-    while (issues.length < JIRA_MAX_ISSUES) {
+    while (true) {
       const res = await fetchImpl(
         buildUrl(config.baseUrl, "/rest/api/3/search", { jql, startAt: String(startAt), maxResults: String(JIRA_PAGE_SIZE), fields: ISSUE_FIELDS }),
         { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
@@ -242,9 +268,16 @@ async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnecti
       issues.push(...parsed.data.issues);
       const fetchedThisPage = parsed.data.issues.length;
       startAt += fetchedThisPage;
-      if (fetchedThisPage === 0 || startAt >= parsed.data.total) break;
+      if (fetchedThisPage === 0 || startAt >= parsed.data.total) break; // reached the real end
+      // V2.18 §5 — the cap is observed directly at the moment it stops a loop that still had
+      // more real pages, rather than inferred afterward from recordsFetched >= JIRA_MAX_ISSUES
+      // (which would false-positive on a result of exactly JIRA_MAX_ISSUES real issues).
+      if (issues.length >= JIRA_MAX_ISSUES) {
+        truncated = true;
+        break;
+      }
     }
-    return { ok: true, data: issues, recordsFetched: issues.length, method: "classic-offset" };
+    return { ok: true, data: issues, recordsFetched: issues.length, method: "classic-offset", truncated };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
   }
@@ -285,8 +318,9 @@ async function fetchIssuesByJqlCursor(
   const issues: JiraIssue[] = [];
   let nextPageToken: string | undefined;
   let firstPage = true;
+  let truncated = false;
   try {
-    while (issues.length < JIRA_MAX_ISSUES) {
+    while (true) {
       const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: JQL_SEARCH_FIELDS };
       if (nextPageToken) body.nextPageToken = nextPageToken;
       const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
@@ -311,10 +345,16 @@ async function fetchIssuesByJqlCursor(
 
       issues.push(...parsed.data.issues);
       const fetchedThisPage = parsed.data.issues.length;
-      if (fetchedThisPage === 0 || parsed.data.isLast || !parsed.data.nextPageToken) break;
+      if (fetchedThisPage === 0 || parsed.data.isLast || !parsed.data.nextPageToken) break; // reached the real end
+      // V2.18 §5 — same direct-observation fix as fetchJiraIssuesClassic above: the cap is
+      // noted at the exact point it stopped a loop that still had a real nextPageToken.
+      if (issues.length >= JIRA_MAX_ISSUES) {
+        truncated = true;
+        break;
+      }
       nextPageToken = parsed.data.nextPageToken;
     }
-    return { ok: true, data: issues, recordsFetched: issues.length, method: "jql-cursor" };
+    return { ok: true, data: issues, recordsFetched: issues.length, method: "jql-cursor", truncated };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
   }
@@ -334,15 +374,28 @@ export async function fetchJiraIssuesWith(fetchImpl: FetchLike, config: JiraConn
  * pass buildIncrementalSinceParam's result in directly; this function never recomputes it).
  * The actual comment bodies/excerpts are fetched only for the small set of issue keys this
  * returns — see fetchIssueCommentsWith below.
+ *
+ * V2.18 §6 — confirmed P1 finding: this had no project restriction at all, unlike the main
+ * issue sync (buildIssuesJql's `project in (...)`), so a FOCUSED Focus Project Scope sync
+ * still searched every Jira project the account can see for mentions — an out-of-scope
+ * project's mention would be fetched and could reach Personal Focus/Attention regardless of
+ * scope. `projectKeys`, when passed, adds the identical `project in (...)` clause so a scoped
+ * sync never even fetches an out-of-scope mention (see jira/sync/route.ts's caller, which now
+ * passes the same `projectKeys` the main issue fetch already uses). Absent/empty means
+ * unrestricted, matching buildIssuesJql's own "no keys -> no project clause" contract.
  */
 export async function fetchMentionedIssuesWith(
   fetchImpl: FetchLike,
   config: JiraConnectionConfig,
   accountId: string,
-  sinceIso?: string
+  sinceIso?: string,
+  projectKeys?: string[]
 ): Promise<JiraFetchResult<JiraIssue[]>> {
   const safeAccountId = accountId.replace(/"/g, '\\"');
   const clauses = [`comment ~ "accountid:${safeAccountId}"`];
+  if (projectKeys && projectKeys.length > 0) {
+    clauses.push(`project in (${projectKeys.map((k) => `"${k}"`).join(",")})`);
+  }
   if (sinceIso) clauses.push(`updated >= "${sinceIso}"`);
   const jql = `${clauses.join(" AND ")} order by updated desc`;
   return fetchIssuesByJqlCursor(fetchImpl, config, jql);

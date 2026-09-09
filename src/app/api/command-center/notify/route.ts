@@ -25,6 +25,7 @@
 import { NextResponse } from "next/server";
 import { renderSlackText, postToSlack, slackSignalSchema } from "@/lib/server/slack-notify";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
+import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -54,6 +55,13 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  // V2.18 §4 — this route posts to the org's real Slack webhook using an attacker-controlled
+  // request body; it had no auth at all before this pass. Same gate/contract as jira/sync.
+  const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  if (!auth.ok) {
+    return NextResponse.json({ sent: false, reason: "unauthorized" }, { status: auth.status });
+  }
+
   const webhookUrl = process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) {
     return NextResponse.json({ sent: false, reason: "not-configured" });

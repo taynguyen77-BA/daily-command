@@ -6,6 +6,7 @@
 import { NextResponse } from "next/server";
 import { getJiraConfig } from "@/lib/server/jira-client";
 import { runJiraConformance } from "@/lib/command-center/jira/conformance";
+import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 
 export const runtime = "nodejs";
 // V2.2.1 §4 — same reasoning as jira/status/route.ts: without this, Next.js would statically
@@ -15,6 +16,15 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  // V2.18 §4 — when Jira is configured, this route makes real, credentialed Jira API calls;
+  // it had no auth at all before this pass. Same gate/contract as jira/sync (see
+  // sync-auth.ts) — gated uniformly rather than only when config is present, so this route's
+  // auth behavior is consistent and simple to reason about/test regardless of server config.
+  const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  }
+
   const config = getJiraConfig();
   // V2.3 §19 — the client sends the currently-configured Focus Project Scope (read-only
   // query params, no server-side state) so a live conformance run honestly restricts itself

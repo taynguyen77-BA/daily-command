@@ -42,6 +42,8 @@ export class JiraDataSource implements DataSourceProvider {
         focusedProjectCount?: number;
         focusedProjects?: string[];
         mentionEvents?: MentionEvent[];
+        truncated?: boolean;
+        resumeSinceIso?: string;
       };
       if (!res.ok || !json.ok) {
         return { ok: false, error: json.error ?? `Jira sync failed (${res.status}).`, errorKind: json.errorKind ?? "unknown" };
@@ -61,6 +63,8 @@ export class JiraDataSource implements DataSourceProvider {
         focusedProjectCount: json.focusedProjectCount,
         focusedProjects: json.focusedProjects,
         mentionEvents: json.mentionEvents,
+        truncated: json.truncated,
+        resumeSinceIso: json.resumeSinceIso,
       };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Network error contacting the sync endpoint.", errorKind: "network-error" };
@@ -82,7 +86,7 @@ export async function checkJiraConfigured(): Promise<{ configured: boolean; base
  *  /api/command-center/jira/projects route. */
 export async function discoverJiraProjects(): Promise<{ ok: boolean; projects?: JiraProjectSummary[]; error?: string }> {
   try {
-    const res = await fetch(PROJECTS_ENDPOINT, { method: "GET" });
+    const res = await fetch(PROJECTS_ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
     const json = (await res.json()) as { ok: boolean; projects?: JiraProjectSummary[]; error?: string };
     if (!res.ok || !json.ok) return { ok: false, error: json.error ?? `Project discovery failed (${res.status}).` };
     return { ok: true, projects: json.projects ?? [] };

@@ -2,7 +2,7 @@
 // No AI calls happen here; screens call the AI provider separately for prose narration.
 
 import { detectChanges } from "./change-detection";
-import { detectRisks, RISK_LEVEL_ORDER } from "./risk-detection";
+import { detectRisks, riskFingerprint, RISK_LEVEL_ORDER } from "./risk-detection";
 import { isOverdue, scoreAllWorkItems } from "./scoring";
 import type { CommandCenterData, ChangeEvent, DailySnapshot, PriorityScoreResult, Risk, WorkItem } from "./types";
 
@@ -16,17 +16,24 @@ export interface Kpis {
 export interface DerivedData {
   scores: PriorityScoreResult[]; // sorted desc, open items only
   scoreByItemId: Map<string, PriorityScoreResult>;
-  risks: Risk[]; // manual + auto-detected, deduped by title, sorted by level
+  risks: Risk[]; // manual + auto-detected, deduped by fingerprint, sorted by level
   changes: ChangeEvent[];
   kpis: Kpis;
 }
 
+/** V2.18 §7 — dedup key is riskFingerprint (rule + project + a stable natural key), not
+ *  title. A title-only key silently collapsed two real, distinct risks whenever their titles
+ *  happened to match (confirmed: R6/R7/R10 generate titles with no project/client token at
+ *  all, e.g. two different projects both blocked on "Platform Team" for the same number of
+ *  days produced byte-identical titles). */
 export function dedupeRisks(manual: Risk[], auto: Risk[]): Risk[] {
-  const seen = new Set(manual.filter((r) => r.status === "open").map((r) => r.title));
-  const merged = [...manual.filter((r) => r.status === "open")];
+  const openManual = manual.filter((r) => r.status === "open");
+  const seen = new Set(openManual.map(riskFingerprint));
+  const merged = [...openManual];
   for (const r of auto) {
-    if (seen.has(r.title)) continue;
-    seen.add(r.title);
+    const fp = riskFingerprint(r);
+    if (seen.has(fp)) continue;
+    seen.add(fp);
     merged.push(r);
   }
   return merged.sort((a, b) => RISK_LEVEL_ORDER[a.level] - RISK_LEVEL_ORDER[b.level] || b.confidence - a.confidence);

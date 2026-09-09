@@ -2,7 +2,7 @@
 // from data the app already has — the AI provider only narrates these facts into the
 // required section headers; it is never given room to invent an achievement or a metric.
 
-import { compareSnapshots } from "./memory";
+import { compareSnapshots, dailyCanonicalSnapshots } from "./memory";
 import { detectRecurringPatterns } from "./pattern-detection";
 import { scoreAllWorkItems } from "./scoring";
 import { daysBetween } from "./scoring";
@@ -32,7 +32,11 @@ export function buildWeeklyReviewFacts(
   today: string,
   sourceType: EvidenceSourceType
 ): WeeklyReviewFacts {
-  const window = history.slice(-7); // up to the last 7 persisted snapshots, oldest→newest
+  // V2.18 §10 — history is the raw, frequent operational record (see dailyCanonicalSnapshots'
+  // own comment) — a "week" here must mean up to 7 distinct calendar days, not up to 7
+  // possibly-same-day array entries (which repeated manual syncs could otherwise produce),
+  // or a same-day noise delta could be reported as a week's trend.
+  const window = dailyCanonicalSnapshots(history).slice(-7); // up to the last 7 distinct days, oldest→newest
   const oldest = window[0];
   const latest = window[window.length - 1];
 

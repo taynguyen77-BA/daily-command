@@ -50,6 +50,7 @@ import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
 import { MockAIProvider, type AIProvider, type CommunicationArtifactResult } from "./provider";
 import { recordAiCall } from "./trace";
+import { pairedAuthHeader } from "../device-pairing";
 import {
   assessmentResponseSchema,
   communicationArtifactResponseSchema,
@@ -148,7 +149,7 @@ export class ClaudeProvider implements AIProvider {
     try {
       const res = await fetch(ENDPOINT, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
         body: JSON.stringify({ task, prompt }),
       });
       if (!res.ok) {

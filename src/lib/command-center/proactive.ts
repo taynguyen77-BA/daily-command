@@ -16,7 +16,7 @@ import { computeDependencyRadar } from "./dependency-radar";
 import { computeDeliveryDrift, computeTrajectory } from "./delivery-drift";
 import { buildFirst30Minutes } from "./first-30-minutes";
 import { resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
-import { buildDailySnapshot } from "./memory";
+import { buildDailySnapshot, dailyCanonicalSnapshots } from "./memory";
 import { computeOutcomeScorecard } from "./outcome-scorecard";
 import { computeAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
@@ -76,9 +76,16 @@ export function computeProactiveIntelligence(
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
 
-  const drift = computeDeliveryDrift(snapshotHistory, currentMetrics);
-  const trajectory = computeTrajectory(snapshotHistory, currentMetrics);
-  const riskEscalations = computeRiskEscalations(derived.risks, snapshotHistory, today);
+  // V2.18 §10 — snapshotHistory is the raw, frequent operational record (appended to on
+  // every sync/import/close-day, possibly several times per day). Genuine day-over-day
+  // comparison must read the canonicalized (one-entry-per-calendar-date) view instead, or a
+  // same-day noise delta from repeated syncing gets reported as if it were a real trend — see
+  // dailyCanonicalSnapshots' own comment.
+  const dailyHistory = dailyCanonicalSnapshots(snapshotHistory);
+
+  const drift = computeDeliveryDrift(dailyHistory, currentMetrics);
+  const trajectory = computeTrajectory(dailyHistory, currentMetrics);
+  const riskEscalations = computeRiskEscalations(derived.risks, dailyHistory, today);
   const dependencyRadar = computeDependencyRadar(data, derived.risks, today);
   const releaseHealths = computeAllReleaseHealth(data, today);
   const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today);
@@ -89,7 +96,7 @@ export function computeProactiveIntelligence(
   const decisionRadar = computeDecisionRadar(data, sourceType, today, { riskEscalations, dependencyRadar, releaseDrift, ineffectiveActionWorkItemIds });
   const decisionEffectiveness = data.decisions
     .filter((d) => d.date)
-    .map((d) => computeDecisionEffectiveness(d, snapshotHistory, currentMetrics, actionEffectiveness.filter((r) => (d.relatedActionIds ?? []).includes(r.actionId))));
+    .map((d) => computeDecisionEffectiveness(d, dailyHistory, currentMetrics, actionEffectiveness.filter((r) => (d.relatedActionIds ?? []).includes(r.actionId))));
   const deliveryLoops = computeDeliveryLoops(data, decisionRadar, actionEffectiveness, today);
 
   const stakeholderAttention = computeStakeholderAttention(data, dependencyRadar, decisionRadar);

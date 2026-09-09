@@ -4,6 +4,8 @@
 // paths — the real webhook URL is never sent to, or seen by, the client (see the route's own
 // header comment).
 
+import { pairedAuthHeader } from "./device-pairing";
+
 const NOTIFY_ENDPOINT = "/api/command-center/notify";
 
 export interface SlackNotifyStatus {
@@ -50,7 +52,11 @@ export interface SlackTestNotificationResult {
  *  (same graceful-degradation contract as every other status check in this app). */
 export async function sendTestSlackNotification(): Promise<SlackTestNotificationResult> {
   try {
-    const res = await fetch(NOTIFY_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ test: true }) });
+    const res = await fetch(NOTIFY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
+      body: JSON.stringify({ test: true }),
+    });
     return (await res.json()) as SlackTestNotificationResult;
   } catch {
     return { sent: false, reason: "network-error" };

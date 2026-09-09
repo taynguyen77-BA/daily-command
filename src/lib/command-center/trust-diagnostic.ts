@@ -74,12 +74,25 @@ export function computeTrustDiagnostic(input: TrustDiagnosticInput): TrustDiagno
       : "";
   entries.push({
     category: "Jira",
-    status: dataSource !== "jira" ? "info" : jiraSync.lastSyncStatus === "success" ? "good" : jiraSync.lastSyncStatus === "failed" ? "bad" : "warn",
+    // V2.18 §5 — "partial" is its own status, distinct from both "good" (a partial sync is
+    // real but incomplete data) and "bad" (nothing was lost — it just isn't finished yet).
+    status:
+      dataSource !== "jira"
+        ? "info"
+        : jiraSync.lastSyncStatus === "success"
+        ? "good"
+        : jiraSync.lastSyncStatus === "partial"
+        ? "warn"
+        : jiraSync.lastSyncStatus === "failed"
+        ? "bad"
+        : "warn",
     answer:
       (dataSource !== "jira"
         ? "Active data source is not Jira — this doesn't apply."
         : jiraSync.lastSyncStatus === "success"
         ? `Last sync succeeded${jiraSync.lastSyncCompletedAt ? ` at ${new Date(jiraSync.lastSyncCompletedAt).toLocaleString()}` : ""}.`
+        : jiraSync.lastSyncStatus === "partial"
+        ? `Last sync was partial — it reached the Jira safety cap${jiraSync.recordsFetched !== undefined ? ` (${jiraSync.recordsFetched} issue(s) fetched)` : ""}. It will automatically resume and complete on the next sync.`
         : jiraSync.lastSyncStatus === "failed"
         ? `Last sync failed${jiraSync.lastSyncError ? `: ${jiraSync.lastSyncError}` : ""}. Previous data was preserved — nothing was lost.`
         : "Jira has never been synced yet.") + scopeSuffix,

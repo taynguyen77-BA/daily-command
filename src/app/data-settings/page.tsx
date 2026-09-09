@@ -27,7 +27,7 @@ import { clearAiTrace, getRecentAiTrace, getAiTraceSummary } from "@/lib/command
 import { aiCacheSize, clearAICache, getCacheStats } from "@/lib/command-center/ai/ai-cache";
 import { listAllUsagePolicies } from "@/lib/command-center/ai/usage-policy";
 import { commandCenterStore, getTodayIso } from "@/lib/command-center/store";
-import { setPairedSecret, clearPairedSecret } from "@/lib/command-center/device-pairing";
+import { setPairedSecret, clearPairedSecret, pairedAuthHeader } from "@/lib/command-center/device-pairing";
 import { checkAppStateSyncStatus, initAppStateSync, resetAppStateSyncForNewPairing } from "@/lib/command-center/app-state-sync";
 import { computeTrustDiagnostic, type TrustDiagnosticStatus } from "@/lib/command-center/trust-diagnostic";
 import { buildLivePilotChecklist, buildDataProtectionChecklist, type PilotReadinessStatus, type PilotCheckItem } from "@/lib/command-center/jira/pilot-checklist";
@@ -762,7 +762,7 @@ export default function DataSettingsPage() {
       if (state.jiraProjectScope.mode === "FOCUSED") {
         for (const key of state.jiraProjectScope.projectKeys) params.append("projectKey", key);
       }
-      const res = await fetch(`/api/command-center/jira/conformance?${params.toString()}`);
+      const res = await fetch(`/api/command-center/jira/conformance?${params.toString()}`, { headers: { ...pairedAuthHeader() } });
       setConformance((await res.json()) as JiraConformanceReport);
     } finally {
       setConformanceLoading(false);

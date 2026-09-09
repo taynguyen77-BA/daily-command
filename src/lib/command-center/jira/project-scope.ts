@@ -12,7 +12,7 @@
 // identifier every other Jira code path in this codebase uses (JIRA_PROJECT_KEYS env var,
 // buildIssuesJql's `project in (...)` clause, Project.sourceId).
 
-import type { CommandCenterData, JiraProjectScope, JiraProjectScopeMode, JiraProjectSummary } from "../types";
+import type { CommandCenterData, JiraProjectScope, JiraProjectScopeMode, JiraProjectSummary, MentionEvent, WorkItem } from "../types";
 
 export const DEFAULT_JIRA_PROJECT_SCOPE: JiraProjectScope = { mode: "ALL", projectKeys: [] };
 
@@ -68,6 +68,27 @@ export function applyProjectScope(data: CommandCenterData, scope: JiraProjectSco
     actions: data.actions.filter((a) => !a.relatedWorkItemId || workItemIds.has(a.relatedWorkItemId)),
     communications: data.communications.filter((c) => !c.workItemId || workItemIds.has(c.workItemId)),
   };
+}
+
+/** V2.18 §6 — confirmed real gap: MentionEvent isn't a field of CommandCenterData (it's a
+ *  sibling top-level array on the store), so applyProjectScope above never touched it — a
+ *  mention on an out-of-scope project's issue reached Personal Focus/Attention regardless of
+ *  Focus Project Scope. This is the display-time half of the fix (the fetch-time half is
+ *  fetchMentionedIssuesWith's own projectKeys parameter in jira/http.ts, which stops a
+ *  FOCUSED sync from ever fetching an out-of-scope mention at all) — still needed as
+ *  defense-in-depth for mentions already cached locally from a prior ALL-scope sync before
+ *  the user narrowed their focus. Same "keep if it resolves into the already-scoped view"
+ *  test applyProjectScope's own risks filter above uses, just for mentions: a mention whose
+ *  issue isn't among the scoped (pre-filter) work items is out of scope. ALL mode is an
+ *  unconditional no-op, identical to applyProjectScope's own contract. */
+export function scopeMentionEvents(events: MentionEvent[] | undefined, scopedWorkItems: WorkItem[], scope: JiraProjectScope): MentionEvent[] {
+  // Defensive, matching attention-queue.ts's own `inputs.mentionEvents ?? []` discipline for
+  // this same field — StoreState.mentionEvents is typed required, but pre-migration persisted
+  // state and hand-built test fixtures can still omit it.
+  const safeEvents = events ?? [];
+  if (scope.mode !== "FOCUSED") return safeEvents;
+  const scopedKeys = new Set(scopedWorkItems.map((w) => w.key));
+  return safeEvents.filter((m) => scopedKeys.has(m.issueKey));
 }
 
 /** The Jira projects this browser currently knows about locally (from the last sync,

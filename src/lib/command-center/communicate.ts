@@ -321,7 +321,11 @@ export function buildReleaseUpdateDraft(release: ReleaseHealth, data: CommandCen
 
   const sections: ArtifactSection[] = [
     section("Release", [seg("CALCULATED", release.fixVersion)]),
-    section("Confidence", [seg("CALCULATED", `${release.deliveryConfidence}%`)]),
+    // V2.18 §11 — was `${release.deliveryConfidence}%`, implying a statistical probability in
+    // an auto-generated, externally-shareable communication. This is a deterministic 0-100
+    // heuristic score, never a probability — "/100" matches the honest framing already used
+    // elsewhere (ExecutiveView.tsx).
+    section("Confidence", [seg("CALCULATED", `${release.deliveryConfidence}/100`)]),
     section("Readiness", [seg("CALCULATED", release.readiness.replace(/_/g, " "))]),
     section("Key blockers", blockerSegs),
     section("Open dependencies", openDepsSegs),

@@ -1,10 +1,13 @@
 // Risk Escalation Engine (V1.4 §8-9). Reconstructs each open risk's severity/evidence
-// history from snapshotHistory (matched by title — auto-detected risk ids are regenerated
-// on every recompute, title is the stable identity, same convention selectors.ts already
-// uses for dedup). Deterministic: escalation is only ever declared from an observed
-// sequence of snapshots, never from a single day.
+// history from snapshotHistory, matched by riskFingerprint (V2.18 §7 — auto-detected risk
+// ids are regenerated on every recompute, AND title text is not reliably stable either: R6's
+// title embeds an age-in-days that changes daily even though the underlying dependency is
+// unchanged, and R6/R7/R10's titles carry no project token, so a title-only match could also
+// collide across two different projects' otherwise-identical-titled risks). Deterministic:
+// escalation is only ever declared from an observed sequence of snapshots, never from a
+// single day.
 
-import { RISK_LEVEL_ORDER } from "./risk-detection";
+import { riskFingerprint, RISK_LEVEL_ORDER } from "./risk-detection";
 import type { DailySnapshot, Risk, RiskEscalation } from "./types";
 
 export function computeRiskEscalations(risks: Risk[], history: DailySnapshot[], today: string): RiskEscalation[] {
@@ -12,8 +15,9 @@ export function computeRiskEscalations(risks: Risk[], history: DailySnapshot[], 
   return risks
     .filter((r) => r.status === "open")
     .map((risk) => {
-      // Presence of a same-titled risk on each historical day, oldest -> newest, then "today".
-      const presence = history.map((day) => day.risks.some((r) => r.title === risk.title));
+      const fp = riskFingerprint(risk);
+      // Presence of the same-fingerprinted risk on each historical day, oldest -> newest, then "today".
+      const presence = history.map((day) => day.risks.some((r) => riskFingerprint(r) === fp));
       presence.push(true); // the risk is open today by definition (we're mapping open risks)
 
       let daysOpen = 0;
@@ -27,7 +31,7 @@ export function computeRiskEscalations(risks: Risk[], history: DailySnapshot[], 
       let previousSeverity: Risk["level"] | undefined;
       let previousEvidenceCount: number | undefined;
       for (let i = history.length - 1; i >= 0; i--) {
-        const match = history[i].risks.find((r) => r.title === risk.title);
+        const match = history[i].risks.find((r) => riskFingerprint(r) === fp);
         if (match) {
           previousSeverity = match.level;
           previousEvidenceCount = match.evidence.length;
