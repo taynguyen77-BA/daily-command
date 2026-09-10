@@ -112,7 +112,14 @@ export function ControlTower({
             <p className="text-sm text-text3">All effective</p>
           )}
         </Tile>
-        <Tile label="Data confidence">
+        {/* V2.22 §13 — confirmed real mislabel: this tile has always rendered FRESHNESS
+            (Live/Aging/Stale/Unknown — see freshness.ts), never a confidence measure, but was
+            labeled "Data confidence" — the exact false-precision this pass's own audit
+            criterion warns against ("do not call freshness 'Data confidence' unless it
+            actually represents confidence"). Renamed to name what it actually shows; the
+            footnote below (which already correctly described this as freshness, not
+            confidence) is unchanged. */}
+        <Tile label="Data freshness">
           <p className="text-sm text-text2">
             {freshness && <span className={freshness === "stale" ? "text-yellow" : freshness === "unknown" ? "text-text3" : "text-text2"}>{FRESHNESS_LABEL[freshness]}</span>}
             {lastSyncedLabel ? ` · ${lastSyncedLabel}` : freshness ? "" : "Live"}

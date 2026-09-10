@@ -392,7 +392,12 @@ export function answerFromRoute(
   // V2.12 — see jira/work-relevance-history.ts. Defaults to "no history yet" rather than
   // failing: that just means the ACTIONABLE Policy Review Signal can't fire (honestly —
   // there's no evidence yet), never a fabricated one.
-  workItemCalibrationHistory: WorkItemCalibrationHistory = {}
+  workItemCalibrationHistory: WorkItemCalibrationHistory = {},
+  // V2.21 §4 (bug fix) — additive/optional trailing parameter, same no-op-when-omitted
+  // contract as every other one above: threaded into buildPlan()/computeExecutionPathTrace()/
+  // listCandidatePoolActionableItems() below so a Command Bar query (global or explicit
+  // per-project override) agrees with the main dashboard about a Daily-Command-completed item.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): QueryFacts {
   const none = (msg: string): QueryFacts => ({ facts: [msg], evidence: [], recommendedAction: "No action needed right now." });
   if (!proactive && route.intent !== "unrecognized" && isProactiveIntent(route.intent)) {
@@ -710,7 +715,7 @@ export function answerFromRoute(
         return { facts: [`No Jira work item matching "${route.target}" was found in the current scope.`], evidence: [], recommendedAction: "" };
       }
       const idx = workRelevanceIndex ?? new Map();
-      const trace = computeExecutionPathTrace(item, data, today, idx, proactive ?? null, personalFocus ?? null);
+      const trace = computeExecutionPathTrace(item, data, today, idx, proactive ?? null, personalFocus ?? null, dailyCommandCompletedWorkItemIds);
       return {
         facts: [
           `${item.key} — Jira status "${item.jiraStatusName ?? item.status}", Work Relevance ${trace.relevance === "NOT_APPLICABLE" ? "N/A" : trace.relevance}.`,
@@ -728,7 +733,7 @@ export function answerFromRoute(
     // jira-statuses-actionable (policy vocabulary) and next-actions (all candidate work).
     case "candidate-pool-actionable-items": {
       const idx = workRelevanceIndex ?? new Map();
-      const items = listCandidatePoolActionableItems(data, idx, today);
+      const items = listCandidatePoolActionableItems(data, idx, today, dailyCommandCompletedWorkItemIds);
       if (items.length === 0) return none("No ACTIONABLE Jira item is currently in the candidate pool.");
       return {
         facts: items.slice(0, 8).map((w) => `${w.key} — ${w.title}`),
@@ -834,7 +839,7 @@ export function answerFromRoute(
     }
     case "release-risk": {
       if (!route.target) return { facts: ["No matching release/fix version found in the current data."], evidence: [], recommendedAction: "Specify a valid fix version." };
-      const health = computeReleaseHealth(data, route.target, today);
+      const health = computeReleaseHealth(data, route.target, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
       return {
         facts: [
           `Completion: ${health.completionPct}%`,
@@ -849,7 +854,7 @@ export function answerFromRoute(
       };
     }
     case "next-actions": {
-      const plan = buildPlan(data, today, (route.minutes ?? 30) as 15 | 30 | 60 | 120 | 480, workRelevanceIndex);
+      const plan = buildPlan(data, today, (route.minutes ?? 30) as 15 | 30 | 60 | 120 | 480, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
       if (plan.length === 0) return { facts: ["No candidates fit this time window."], evidence: [], recommendedAction: "Try a longer time budget." };
       return {
         facts: plan.map((c) => `${c.title} (${c.estimateMinutes} min)`),

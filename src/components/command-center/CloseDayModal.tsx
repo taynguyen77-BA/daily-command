@@ -5,17 +5,45 @@
 // open loops, and the carry-into-tomorrow list — plus the deterministic Outcome Scorecard
 // and "Did Today Help?" — all before generating tomorrow's starting point.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useCommandCenter } from "./use-command-center";
 import { getAIProvider } from "@/lib/command-center/ai";
 import type { EodEntry } from "@/lib/command-center/store";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
 import { dailyReportToMarkdown, summarizeDailyReport } from "@/lib/command-center/daily-report";
+import { computeFreshness } from "@/lib/command-center/freshness";
+import { getActiveAssignedWorkItems } from "@/lib/command-center/assigned-work";
+import { selectRecentMentions } from "@/lib/command-center/recent-mentions";
+import { buildWaitingFor } from "@/lib/command-center/waiting-for";
+import { buildPilotFeedbackContext } from "@/lib/command-center/pilot-feedback";
 import type { DailyReportSnapshot } from "@/lib/command-center/types";
 import { AiProviderIndicator, LoopHealthBadge, TrustLabel } from "./ui";
 
+const PILOT_SCORE_LABELS: Record<0 | 1 | 2, string> = { 0: "No", 1: "Partially", 2: "Yes" };
+
+function PilotScoreRow({ label, value, onChange }: { label: string; value: 0 | 1 | 2 | null; onChange: (v: 0 | 1 | 2) => void }) {
+  return (
+    <div role="group" aria-label={label}>
+      <p className="text-xs text-text2">{label}</p>
+      <div className="mt-1 flex gap-1">
+        {([0, 1, 2] as const).map((score) => (
+          <button
+            key={score}
+            type="button"
+            aria-pressed={value === score}
+            onClick={() => onChange(score)}
+            className={`rounded border px-2 py-1 text-xs font-medium ${value === score ? "border-accent bg-accent/10 text-accent2" : "border-border text-text2 hover:border-accent hover:text-text"}`}
+          >
+            {PILOT_SCORE_LABELS[score]}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function CloseDayModal({ onClose }: { onClose: () => void }) {
-  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, store } = useCommandCenter();
+  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, scopedMentionEvents, store } = useCommandCenter();
   const [entry, setEntry] = useState<EodEntry | null>(null);
   const [entryMode, setEntryMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
@@ -25,6 +53,33 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
   // was already generated earlier this session — never silently regenerated on remount.
   const [dailyReport, setDailyReport] = useState<DailyReportSnapshot | null>(state.dailyReports[today] ?? null);
   const [reportCopied, setReportCopied] = useState(false);
+
+  // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. `todaysPilotFeedback` is null until
+  // a real submission exists for today, so the form is never shown twice for the same day.
+  const todaysPilotFeedback = useMemo(() => [...state.pilotFeedback].reverse().find((f) => f.date === today) ?? null, [state.pilotFeedback, today]);
+  const [pilotUsefulness, setPilotUsefulness] = useState<0 | 1 | 2 | null>(null);
+  const [pilotClarity, setPilotClarity] = useState<0 | 1 | 2 | null>(null);
+  const [pilotTrust, setPilotTrust] = useState<0 | 1 | 2 | null>(null);
+  const [pilotNote, setPilotNote] = useState("");
+
+  function submitPilotFeedback() {
+    if (pilotUsefulness === null || pilotClarity === null || pilotTrust === null) return;
+    const identity = { displayName: state.ownerName, accountId: state.personalIdentity?.accountId };
+    const assignedWorkActiveCount = getActiveAssignedWorkItems(filteredData.workItems, identity, workRelevanceIndex, new Set(Object.keys(state.dailyCommandCompletions))).length;
+    const recentMentionsCount = selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, Date.now(), { dailyCommandCompletions: state.dailyCommandCompletions }).length;
+    const waitingForCount = proactive ? buildWaitingFor(filteredData, proactive.dependencyRadar).length : 0;
+    const attentionQueueActiveCount = proactive ? proactive.attentionQueue.filter((a) => a.lifecycle !== "SNOOZED" && a.lifecycle !== "RESOLVED").length : 0;
+    const context = buildPilotFeedbackContext({
+      isJira: state.dataSource === "jira",
+      freshness: state.dataSource === "jira" ? computeFreshness(state.jiraSync.lastSyncCompletedAt) : undefined,
+      jiraProjectScope: state.jiraProjectScope,
+      assignedWorkActiveCount,
+      recentMentionsCount,
+      waitingForCount,
+      attentionQueueActiveCount,
+    });
+    store.submitPilotFeedback({ date: today, usefulness: pilotUsefulness, nextActionClarity: pilotClarity, trust: pilotTrust, note: pilotNote.trim() || undefined, context });
+  }
 
   function generateDailyReport() {
     setDailyReport(store.generateDailyReport(today));
@@ -266,6 +321,42 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
                   </div>
                 );
               })()
+            )}
+          </section>
+
+          {/* V2.22 §3 — Pilot Trust Model: three simple 0/1/2 questions, never a
+              productivity score, captured once per day alongside a deterministic snapshot
+              of already-computed state (§4) — see pilot-feedback.ts. Local-only, never
+              synced or sent anywhere. */}
+          <section className="rounded-md border border-border bg-surface2 p-3">
+            <div className="mb-2 flex items-center gap-2">
+              <TrustLabel kind="user-input" />
+              <span className="text-xs font-semibold uppercase tracking-wide text-text3">Pilot feedback</span>
+            </div>
+            {todaysPilotFeedback ? (
+              <p className="text-xs text-text2">
+                Recorded for today — Usefulness: {PILOT_SCORE_LABELS[todaysPilotFeedback.usefulness]}, Next-action clarity: {PILOT_SCORE_LABELS[todaysPilotFeedback.nextActionClarity]}, Trust:{" "}
+                {PILOT_SCORE_LABELS[todaysPilotFeedback.trust]}. Thanks — this stays local and is never sent anywhere.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                <PilotScoreRow label="Did Daily Command help me understand what matters today?" value={pilotUsefulness} onChange={setPilotUsefulness} />
+                <PilotScoreRow label="Did it make the next action obvious?" value={pilotClarity} onChange={setPilotClarity} />
+                <PilotScoreRow label="Did I trust the information enough to act on it?" value={pilotTrust} onChange={setPilotTrust} />
+                <textarea
+                  value={pilotNote}
+                  onChange={(e) => setPilotNote(e.target.value)}
+                  placeholder="Anything specific — a false positive, something missing, a wrong number? (optional)"
+                  className="h-14 w-full resize-none rounded-md border border-border bg-surface p-2 text-xs text-text2"
+                />
+                <button
+                  onClick={submitPilotFeedback}
+                  disabled={pilotUsefulness === null || pilotClarity === null || pilotTrust === null}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text2 hover:border-accent hover:text-text disabled:opacity-50"
+                >
+                  Submit feedback
+                </button>
+              </div>
             )}
           </section>
         </div>

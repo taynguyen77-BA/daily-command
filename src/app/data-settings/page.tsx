@@ -651,7 +651,7 @@ const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
 };
 
 export default function DataSettingsPage() {
-  const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex } = useCommandCenter();
+  const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
@@ -703,8 +703,8 @@ export default function DataSettingsPage() {
   // counts above and every other scoped screen, instead of silently reporting global figures
   // across every project this browser has ever synced under a label that doesn't say so.
   const dataHealth = useMemo(
-    () => computeDataHealth(scopedData, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex),
-    [scopedData, state.dataSource, state.jiraSync.lastSyncCompletedAt, workRelevanceIndex]
+    () => computeDataHealth(scopedData, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
+    [scopedData, state.dataSource, state.jiraSync.lastSyncCompletedAt, workRelevanceIndex, dailyCommandCompletedWorkItemIds]
   );
   // V2.6 §10 — Data Health's own Work Relevance dimension: scoped to Focus Projects when
   // FOCUSED, every known project when ALL. Plain arithmetic (§4), never blended into any

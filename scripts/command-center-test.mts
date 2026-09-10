@@ -140,6 +140,7 @@ import {
   isPersonalWorkEligible,
   isPersonalWorkEligibleItem,
   isWorkItemDoneOrExcluded,
+  isWorkItemOperationallyOpen,
   jiraProjectKeyForWorkItem,
   listUnclassifiedJiraStatuses,
   parseWorkRelevancePolicyMap,
@@ -8418,6 +8419,156 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.19 Daily Command Completion gate", omittedParam.candidates.some((c) => c.sourceId === dccDrift.id), "omitting the new parameter reproduces pre-V2.19 behavior exactly — every existing call site is unaffected");
 }
 
+// ----- V2.21 §3 — isWorkItemOperationallyOpen: the one canonical "is this item still open,
+// operationally?" gate, combining isWorkItemDoneOrExcluded with Daily Command Completion. -----
+{
+  const idx221 = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE", Resolved: "COMPLETED", "Won't Fix": "EXCLUDED" }));
+  const openItem = jiraItem({ id: "wi-open-221", jiraStatusName: "To Do", status: "In Progress" });
+  const jiraDoneItem = jiraItem({ id: "wi-done-221", jiraStatusName: "To Do", status: "Done" });
+  const wrCompletedItem = jiraItem({ id: "wi-wrcompleted-221", jiraStatusName: "Resolved", status: "In Progress" }); // WR-COMPLETED but NOT native Jira Done
+  const wrExcludedItem = jiraItem({ id: "wi-wrexcluded-221", jiraStatusName: "Won't Fix", status: "In Progress" });
+  const dccCompletedItem = jiraItem({ id: "wi-dcc-221", jiraStatusName: "To Do", status: "In Progress" });
+  const dccIds221 = new Set(["wi-dcc-221"]);
+
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(openItem, idx221, dccIds221) === true, "an ACTIONABLE, non-completed item is open");
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(jiraDoneItem, idx221, dccIds221) === false, "native Jira Done is not open");
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(wrCompletedItem, idx221, dccIds221) === false, "Work-Relevance-COMPLETED is not open even though native status isn't Done — the exact gap raw `status === \"Done\"` checks missed");
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(wrExcludedItem, idx221, dccIds221) === false, "Work-Relevance-EXCLUDED is not open");
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(dccCompletedItem, idx221, dccIds221) === false, "a Daily-Command-completed item is not open even though Jira status is still ACTIONABLE");
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(openItem, idx221, undefined) === true, "omitting dailyCommandCompletedWorkItemIds is a no-op for an otherwise-open item");
+  ok("V2.21 isWorkItemOperationallyOpen", isWorkItemOperationallyOpen(jiraDoneItem, undefined, undefined) === false, "omitting both optional params still honors native Jira Done — same floor as isWorkItemDoneOrExcluded");
+}
+
+// ----- V2.21 §5 — action-plan.ts buildCandidates()/buildPlan(): a Daily-Command-completed
+// WorkItem must not be resurfaced as a fresh auto-suggested candidate, and a valid
+// reactivation (reopening it) brings it back. -----
+{
+  const apIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
+  const apItem = jiraItem({ id: "wi-ap-221", key: "JPMC-2210", jiraStatusName: "To Do", status: "In Progress", businessImpact: 5, dueDate: TODAY, priority: "P1", blocked: true, blockerReason: "x" });
+  const apData = { ...emptyData(), workItems: [apItem] };
+
+  const beforeCompletion = buildCandidates(apData, TODAY, apIdx);
+  ok("V2.21 Action Plan completion safety", beforeCompletion.some((c) => c.item?.id === apItem.id), "sanity check — the item is a candidate before any Daily Command completion");
+
+  const afterCompletion = buildCandidates(apData, TODAY, apIdx, new Set([apItem.id]));
+  ok("V2.21 Action Plan completion safety", !afterCompletion.some((c) => c.item?.id === apItem.id), "a Daily-Command-completed WorkItem is never resurfaced as a fresh auto-suggested candidate");
+
+  const planAfterCompletion = buildPlan(apData, TODAY, 480, apIdx, new Set([apItem.id]));
+  ok("V2.21 Action Plan completion safety", !planAfterCompletion.some((c) => c.item?.id === apItem.id), "buildPlan() inherits the same suppression — even with a full-day budget, the completed item is never selected");
+
+  // §3.4 Reactivation — Daily Command Completion is never permanent; the ONLY way back is an
+  // explicit reopen (store.reopenTicketInDailyCommand), which simply means this item's id is
+  // no longer in the caller-supplied set on the next recompute.
+  const afterReopen = buildCandidates(apData, TODAY, apIdx, new Set()); // reopened -> no longer in the completed set
+  ok("V2.21 Action Plan completion safety — reactivation", afterReopen.some((c) => c.item?.id === apItem.id), "reopening the ticket (removing it from the completed set) makes it eligible again — reactivation is explicit, never automatic");
+
+  const omittedDcc = buildCandidates(apData, TODAY, apIdx);
+  ok("V2.21 Action Plan completion safety", omittedDcc.some((c) => c.item?.id === apItem.id), "omitting the new parameter reproduces pre-V2.21 behavior exactly — every existing call site is unaffected");
+}
+
+// ----- V2.21 §3.2 — risk-detection.ts detectRisks(): a Work-Relevance-COMPLETED (not native
+// Jira Done) or Daily-Command-completed item must not generate a fresh risk either. -----
+{
+  const riskIdx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE", Resolved: "COMPLETED" }));
+  const stalledOpen = jiraItem({ id: "wi-risk-open-221", jiraStatusName: "In Progress", status: "In Progress", lastUpdated: "2026-06-05" }); // 10 days stale
+  const stalledWrCompleted = jiraItem({ id: "wi-risk-wrc-221", jiraStatusName: "Resolved", status: "In Progress", lastUpdated: "2026-06-05" });
+  const dccItem221 = jiraItem({ id: "wi-risk-dcc-221", jiraStatusName: "In Progress", status: "In Progress", lastUpdated: "2026-06-05" });
+
+  const withoutIdx = detectRisks({ ...emptyData(), workItems: [stalledOpen] }, TODAY);
+  ok("V2.21 risk-detection canonical gate", withoutIdx.some((r) => r.sourceWorkItemIds.includes(stalledOpen.id)), "sanity check — a stalled, open item generates a risk with no index/completion supplied at all (pre-V2.21 behavior preserved)");
+
+  const wrCompletedRisks = detectRisks({ ...emptyData(), workItems: [stalledWrCompleted] }, TODAY, riskIdx);
+  ok("V2.21 risk-detection canonical gate", !wrCompletedRisks.some((r) => r.sourceWorkItemIds.includes(stalledWrCompleted.id)), "a Work-Relevance-COMPLETED item (native status still not \"Done\") no longer generates a fresh stalled-item risk");
+
+  const dccRisks = detectRisks({ ...emptyData(), workItems: [dccItem221] }, TODAY, riskIdx, new Set([dccItem221.id]));
+  ok("V2.21 risk-detection canonical gate", !dccRisks.some((r) => r.sourceWorkItemIds.includes(dccItem221.id)), "a Daily-Command-completed item no longer generates a fresh risk either");
+}
+
+// ----- V2.21 §3.2 — selectors.ts deriveData(): the shared scores/risks/kpis every screen
+// (Home, Priorities, Risks) reads must agree with the canonical gate too. -----
+{
+  const ddIdx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE", Resolved: "COMPLETED" }));
+  const ddOverdueOpen = jiraItem({ id: "wi-dd-open-221", jiraStatusName: "In Progress", status: "In Progress", dueDate: "2026-06-01" }); // overdue
+  const ddOverdueWrCompleted = jiraItem({ id: "wi-dd-wrc-221", jiraStatusName: "Resolved", status: "In Progress", dueDate: "2026-06-01" });
+  const ddOverdueDcc = jiraItem({ id: "wi-dd-dcc-221", jiraStatusName: "In Progress", status: "In Progress", dueDate: "2026-06-01" });
+  const ddData = { ...emptyData(), workItems: [ddOverdueOpen, ddOverdueWrCompleted, ddOverdueDcc] };
+
+  const derivedNoGate = deriveData(ddData, null, TODAY);
+  ok("V2.21 deriveData canonical gate", derivedNoGate.kpis.overdue === 3, "sanity check — with no index/completion supplied, all 3 overdue items count (pre-V2.21 behavior preserved)");
+
+  const derivedGated = deriveData(ddData, null, TODAY, ddIdx, new Set([ddOverdueDcc.id]));
+  ok("V2.21 deriveData canonical gate", derivedGated.kpis.overdue === 1, "with the canonical gate applied, only the genuinely-open item counts toward 'overdue' — the WR-COMPLETED and Daily-Command-completed items no longer inflate the KPI");
+  ok("V2.21 deriveData canonical gate", !derivedGated.scores.some((s) => s.itemId === ddOverdueWrCompleted.id || s.itemId === ddOverdueDcc.id), "the same two items are excluded from the scored/open population entirely, not just from the overdue count");
+}
+
+// ----- V2.21 §3.2 — release-health.ts computeReleaseHealth(): a Work-Relevance-COMPLETED
+// item counts as completed (not against readiness), matching the canonical gate. -----
+{
+  const rhIdx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE", Resolved: "COMPLETED" }));
+  const rhOpen = jiraItem({ id: "wi-rh-open-221", jiraStatusName: "In Progress", status: "In Progress", fixVersion: "R1", priority: "P1" });
+  const rhWrCompleted = jiraItem({ id: "wi-rh-wrc-221", jiraStatusName: "Resolved", status: "In Progress", fixVersion: "R1", priority: "P1", dueDate: "2026-06-01" });
+  const rhData = { ...emptyData(), workItems: [rhOpen, rhWrCompleted] };
+
+  const healthNoGate = computeReleaseHealth(rhData, "R1", TODAY);
+  ok("V2.21 release-health canonical gate", healthNoGate.completedItems === 0, "sanity check — with no index supplied, the WR-COMPLETED item does not count as completed (pre-V2.21 behavior preserved)");
+
+  const healthGated = computeReleaseHealth(rhData, "R1", TODAY, rhIdx);
+  ok("V2.21 release-health canonical gate", healthGated.completedItems === 1, "with the canonical gate applied, the Work-Relevance-COMPLETED item counts toward completedItems even though its native Jira status is not \"Done\"");
+  ok("V2.21 release-health canonical gate", healthGated.highPriorityIncompleteCount === 1, "the genuinely-open P1 item still counts as high-priority-incomplete, but the WR-COMPLETED P1 item no longer does — 1, not 2");
+  ok("V2.21 release-health canonical gate", healthGated.overdueCount === 0, "nor as overdue, despite its past due date");
+}
+
+// ----- V2.21 §4 (bug fix) — use-command-center.ts buildProjectOverrideView(): Daily Command
+// Completion must propagate into a project-scoped Command Bar/Meeting Mode override the exact
+// same way it does into the main dashboard's global scope. Before this fix, the override
+// pipeline never resolved or passed dailyCommandCompletedWorkItemIds at all. -----
+{
+  const povFixture = makeThreeProjectFixture();
+  // UBS-900 (wi-ubs-x) is "Blocked"/P1 in the shared fixture — reclassify it ACTIONABLE and
+  // make it stalled so it's a real Personal Focus candidate via the risk/attention pipeline.
+  povFixture.workItems = povFixture.workItems.map((w) =>
+    w.key === "UBS-900" ? { ...w, status: "In Progress" as const, blocked: false, jiraStatusName: "In Progress", lastUpdated: "2026-06-05", owner: "Alice", ownerId: "acc-alice" } : w
+  );
+  const povState = makeStoreState({
+    data: povFixture,
+    jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC"] },
+    jiraWorkRelevancePolicy: { "In Progress": "ACTIONABLE" },
+    ownerName: "Alice",
+    personalIdentity: { accountId: "acc-alice" },
+  });
+
+  const overrideBefore = buildProjectOverrideView(povState, TODAY, "UBS");
+  ok(
+    "V2.21 project override completion propagation",
+    !!overrideBefore.personalFocus?.candidates.some((c) => c.ticketKey === "UBS-900"),
+    "sanity check — UBS-900's stalled-item risk is a real Personal Focus candidate in the override BEFORE any Daily Command completion"
+  );
+
+  const povStateCompleted = makeStoreState({
+    ...povState,
+    dailyCommandCompletions: { "UBS-900": { ticketKey: "UBS-900", completedAt: `${TODAY}T09:00:00.000Z` } },
+  });
+  const overrideAfter = buildProjectOverrideView(povStateCompleted, TODAY, "UBS");
+  ok(
+    "V2.21 project override completion propagation",
+    overrideAfter.dailyCommandCompletedWorkItemIds?.has("wi-ubs-x") === true,
+    "the override resolves the ticket-key-keyed completion to the correct WorkItem id, scoped to the override's own data"
+  );
+  ok(
+    "V2.21 project override completion propagation",
+    !overrideAfter.personalFocus?.candidates.some((c) => c.ticketKey === "UBS-900"),
+    "a Daily-Command-completed ticket is suppressed from Personal Focus in a project-scoped override the same way it is in the global scope — this was the confirmed §4 bug: the override never threaded completion through at all"
+  );
+
+  // Cross-project isolation: completing UBS-900 must never affect a JPMC-scoped override.
+  const overrideOtherProject = buildProjectOverrideView(povStateCompleted, TODAY, "JPMC");
+  ok(
+    "V2.21 project override completion propagation",
+    overrideOtherProject.dailyCommandCompletedWorkItemIds?.has("wi-ubs-x") !== true,
+    "completion resolution is scoped to each override's own data — a JPMC override never carries a UBS ticket's WorkItem id, even though the completion set is global by ticket key"
+  );
+}
+
 // ----- assigned-work.ts — "My Assigned Work": the FULL assigned population, never a curated
 // subset (§28's non-negotiable: full assigned work != full Personal Focus). -----
 {
@@ -8539,6 +8690,110 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   const recentMentionedSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/RecentlyMentioned.tsx"), "utf8");
   ok("V2.19 UI wiring", /No Jira mentions in the last 24 hours/.test(recentMentionedSrc), "Recently Mentioned has the documented empty state");
   ok("V2.19 UI wiring", /selectRecentMentions/.test(recentMentionedSrc), "the component reuses the shared selector, not a second inline window/dedupe implementation");
+}
+
+// ----- V2.22 §13 — data-health.ts computeDataHealth(): a Work-Relevance-COMPLETED or
+// Daily-Command-completed item must not count against ownership/due-date/release coverage,
+// nor trigger a "review these items" remediation nudge for a ticket the user already
+// considers finished. Confirmed real defect found during the V2.22 pilot audit. -----
+{
+  const dhIdx = buildWorkRelevanceIndex(globalPolicy({ "In Progress": "ACTIONABLE", Resolved: "COMPLETED" }));
+  const dhOpenUnowned = jiraItem({ id: "wi-dh-open-222", key: "JPMC-2220", jiraStatusName: "In Progress", status: "In Progress", owner: undefined });
+  const dhWrCompletedUnowned = jiraItem({ id: "wi-dh-wrc-222", key: "JPMC-2221", jiraStatusName: "Resolved", status: "In Progress", owner: undefined });
+  const dhDccUnowned = jiraItem({ id: "wi-dh-dcc-222", key: "JPMC-2222", jiraStatusName: "In Progress", status: "In Progress", owner: undefined });
+  const dhData = { ...emptyData(), workItems: [dhOpenUnowned, dhWrCompletedUnowned, dhDccUnowned] };
+
+  const healthNoGate = computeDataHealth(dhData, "jira", undefined);
+  ok("V2.22 data-health canonical gate", healthNoGate.totalWorkItems === 3, "sanity check — with no index/completion supplied, all 3 unowned items count as open (pre-V2.22 behavior preserved)");
+
+  const healthGated = computeDataHealth(dhData, "jira", undefined, undefined, dhIdx, new Set([dhDccUnowned.id]));
+  ok("V2.22 data-health canonical gate", healthGated.totalWorkItems === 1, "with the canonical gate applied, only the genuinely-open unowned item counts — the WR-COMPLETED and Daily-Command-completed items are excluded from the open population entirely");
+  ok("V2.22 data-health canonical gate", healthGated.ownershipCoveragePct === 0, "coverage math still runs correctly over the smaller, correct open population (0 of 1 owned)");
+  const ownershipRemediation222 = healthGated.remediation.find((r) => r.dimension === "Ownership coverage");
+  ok("V2.22 data-health canonical gate", !!ownershipRemediation222 && ownershipRemediation222.affectedItemIds.length === 1 && ownershipRemediation222.affectedItemIds[0] === dhOpenUnowned.id, "the ownership remediation nudge names only the genuinely-open unowned item, never the two finished ones");
+}
+
+// ----- V2.22 §13 — "Data confidence" was a confirmed real mislabel: the ControlTower tile
+// and data-health.ts's own remediation text both used this exact phrase for what is actually
+// a FRESHNESS signal (Live/Aging/Stale/Unknown), not a confidence measure. -----
+{
+  const repoRoot222 = path.resolve(process.cwd());
+  const controlTowerSrc = fs.readFileSync(path.join(repoRoot222, "src/components/command-center/ControlTower.tsx"), "utf8");
+  ok("V2.22 Data Trust UX wording", !/label="Data confidence"/.test(controlTowerSrc), "ControlTower no longer labels the freshness tile \"Data confidence\"");
+  ok("V2.22 Data Trust UX wording", /label="Data freshness"/.test(controlTowerSrc), "ControlTower now labels it \"Data freshness\", naming what it actually shows");
+
+  const dataHealthSrc = fs.readFileSync(path.join(repoRoot222, "src/lib/command-center/data-health.ts"), "utf8");
+  ok("V2.22 Data Trust UX wording", !/DATA CONFIDENCE/.test(dataHealthSrc), "data-health.ts's own remediation text no longer calls freshness \"DATA CONFIDENCE\" either");
+}
+
+// ----- V2.22 §12 Case 11 — Unknown Work Relevance: isWorkItemOperationallyOpen must follow
+// EXISTING policy (UNKNOWN is conservative — never personal-work-eligible, per V2.5 — but
+// still counts as operationally OPEN for delivery-risk/scoring purposes, since nobody has
+// said it's finished), never silently reinterpreted into either "done" or "eligible". -----
+{
+  const unknownIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" })); // "Some Custom Status" deliberately left unclassified
+  const unknownItem = jiraItem({ id: "wi-unknown-222", jiraStatusName: "Some Custom Status", status: "In Progress" });
+  ok("V2.22 completion regression — Case 11 (UNKNOWN)", isWorkItemOperationallyOpen(unknownItem, unknownIdx) === true, "an UNKNOWN-relevance item is still counted as operationally OPEN (existing conservative default — nobody has classified it as finished)");
+  ok("V2.22 completion regression — Case 11 (UNKNOWN)", isPersonalWorkEligibleItem(unknownItem, unknownIdx) === false, "...but it is NOT personal-work-eligible — UNKNOWN is never actionable (V2.5's own conservatism, unchanged and unreinterpreted by V2.22)");
+}
+
+// ----- V2.22 §3 — Pilot Trust Model: store.submitPilotFeedback() + persistence. -----
+{
+  commandCenterStore.resetAll();
+  ok("V2.22 Pilot feedback", commandCenterStore.getSnapshot().pilotFeedback.length === 0, "starts empty — nothing recorded by default");
+
+  const context222 = {
+    freshness: "fresh" as const,
+    projectScopeMode: "ALL" as const,
+    assignedWorkActiveCount: 3,
+    recentMentionsCount: 1,
+    waitingForCount: 2,
+    attentionQueueActiveCount: 5,
+  };
+  commandCenterStore.submitPilotFeedback({ date: TODAY, usefulness: 2, nextActionClarity: 1, trust: 2, note: "Waiting For was genuinely useful today.", context: context222 });
+  const afterSubmit = commandCenterStore.getSnapshot().pilotFeedback;
+  ok("V2.22 Pilot feedback", afterSubmit.length === 1, "submitPilotFeedback records one entry");
+  ok("V2.22 Pilot feedback", afterSubmit[0].date === TODAY && afterSubmit[0].usefulness === 2 && afterSubmit[0].nextActionClarity === 1 && afterSubmit[0].trust === 2, "the three 0-2 scores round-trip exactly as submitted");
+  ok("V2.22 Pilot feedback", typeof afterSubmit[0].id === "string" && afterSubmit[0].id.length > 0 && typeof afterSubmit[0].submittedAt === "string" && afterSubmit[0].submittedAt.length > 0, "a real id and submittedAt timestamp are stamped, never left for the caller to invent");
+  ok("V2.22 Pilot feedback", afterSubmit[0].context.assignedWorkActiveCount === 3 && afterSubmit[0].context.waitingForCount === 2, "the deterministic context snapshot (§4 pilot observability) is stored verbatim, not re-derived later");
+  commandCenterStore.resetAll();
+}
+
+// ----- V2.22 §3 — Pilot feedback: parseStoredState round-trip + defensive parsing, same
+// discipline as every other persisted field (V2.19 Daily Command Completion, etc). -----
+{
+  const validPilotBlob = JSON.stringify({
+    loaded: true,
+    pilotFeedback: [
+      {
+        id: "pilot-1",
+        date: "2026-06-15",
+        submittedAt: "2026-06-15T18:00:00.000Z",
+        usefulness: 2,
+        nextActionClarity: 0,
+        trust: 1,
+        note: "Missing a risk on JPMC-9.",
+        context: { freshness: "aging", projectScopeMode: "FOCUSED", focusedProjectCount: 2, assignedWorkActiveCount: 4, recentMentionsCount: 0, waitingForCount: 1, attentionQueueActiveCount: 6 },
+      },
+    ],
+  });
+  const parsedPilot = parseStoredState(validPilotBlob);
+  ok("V2.22 Pilot feedback parsing", parsedPilot.pilotFeedback.length === 1 && parsedPilot.pilotFeedback[0].note === "Missing a risk on JPMC-9.", "a well-formed persisted pilot feedback entry round-trips through parseStoredState");
+
+  const malformedPilotBlob = JSON.stringify({
+    loaded: true,
+    pilotFeedback: [
+      { id: "p-1", date: "2026-06-15", submittedAt: "2026-06-15T18:00:00.000Z", usefulness: 2, nextActionClarity: 1, trust: 2, context: { freshness: "fresh", projectScopeMode: "ALL", assignedWorkActiveCount: 1, recentMentionsCount: 0, waitingForCount: 0, attentionQueueActiveCount: 0 } }, // valid
+      { id: "p-2", date: "2026-06-15", usefulness: 3, nextActionClarity: 1, trust: 2, context: {} }, // usefulness out of range, malformed context — dropped
+      "not-an-object", // dropped
+      null, // dropped
+    ],
+  });
+  const parsedMalformedPilot = parseStoredState(malformedPilotBlob);
+  ok("V2.22 Pilot feedback parsing", parsedMalformedPilot.pilotFeedback.length === 1 && parsedMalformedPilot.pilotFeedback[0].id === "p-1", "a malformed entry (out-of-range score, missing context fields, or a non-object) is dropped rather than trusted or crashing the parse");
+
+  const noPilotFieldAtAll = parseStoredState(JSON.stringify({ loaded: true }));
+  ok("V2.22 Pilot feedback parsing", noPilotFieldAtAll.pilotFeedback.length === 0, "a pre-V2.22 persisted blob with no pilotFeedback field at all degrades to empty, never a crash");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

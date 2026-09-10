@@ -39,11 +39,11 @@ function GapCard({ gap }: { gap: Gap }) {
 }
 
 export function GapsPanel() {
-  const { state, filteredData } = useCommandCenter();
+  const { state, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const [gaps, setGaps] = useState<Gap[] | null>(null);
 
   function run() {
-    setGaps(detectGaps(filteredData, getTodayIso(), state.isDemo ? "demo" : "manual"));
+    setGaps(detectGaps(filteredData, getTodayIso(), state.isDemo ? "demo" : "manual", workRelevanceIndex, dailyCommandCompletedWorkItemIds));
   }
 
   return (

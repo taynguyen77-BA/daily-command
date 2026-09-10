@@ -20,7 +20,7 @@
 // failure or a missing stage — see NOT_APPLICABLE below.
 
 import { buildCandidates, buildPlan } from "./action-plan";
-import { jiraProjectKeyForWorkItem, resolveWorkRelevance, explainWorkItemRelevance, type EffectiveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { isWorkItemOperationallyOpen, jiraProjectKeyForWorkItem, resolveWorkRelevance, explainWorkItemRelevance, type EffectiveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { Action, ActionStatus, AttentionItem, CommandCenterData, DeliveryLoop, PersonalFocusCandidate, WorkItem, WorkRelevance } from "./types";
 import type { ProactiveIntelligence } from "./proactive";
 import type { PersonalFocusResult } from "./types";
@@ -160,10 +160,15 @@ export function computeExecutionPathTrace(
   today: string,
   workRelevanceIndex: WorkRelevanceIndex,
   proactive: ProactiveIntelligence | null,
-  personalFocus: PersonalFocusResult | null
+  personalFocus: PersonalFocusResult | null,
+  // V2.21 §3.2 — additive/optional trailing parameter, same no-op-when-omitted contract as
+  // every other V2.21 extension: folds Daily Command Completion into "isOpen" and into the
+  // buildCandidates()/buildPlan() calls below, so a Daily-Command-completed item's trace
+  // correctly shows it as no longer eligible/selected rather than stale ACTIONABLE state.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): ExecutionPathTrace {
   const relevance = resolveWorkRelevance(item, workRelevanceIndex);
-  const isOpen = item.status !== "Done";
+  const isOpen = isWorkItemOperationallyOpen(item, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
 
   // Stage 3 — Candidate Evaluation (§5 Stage 3): reuses buildCandidates() verbatim, the
   // same eligibilityScore >= 40 gate action-plan.ts already enforces — never reimplemented here.
@@ -187,7 +192,7 @@ export function computeExecutionPathTrace(
       // imply the item's own score was too low, when the real reason is an existing Action.
       candidateEvaluation = "NOT_APPLICABLE";
     } else {
-      const candidateIds = new Set(buildCandidates(data, today, workRelevanceIndex).map((c) => c.item?.id).filter(Boolean) as string[]);
+      const candidateIds = new Set(buildCandidates(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds).map((c) => c.item?.id).filter(Boolean) as string[]);
       candidateEvaluation = candidateIds.has(item.id) ? "ELIGIBLE" : "NOT_ELIGIBLE";
     }
   }
@@ -196,7 +201,7 @@ export function computeExecutionPathTrace(
   // selected within the product's own default 30-minute Action Plan budget?
   let actionPlan: ActionPlanState = "NOT_APPLICABLE";
   if (candidateEvaluation === "ELIGIBLE") {
-    const planIds = new Set(buildPlan(data, today, REFERENCE_ACTION_PLAN_BUDGET_MINUTES, workRelevanceIndex).map((c) => c.item?.id).filter(Boolean));
+    const planIds = new Set(buildPlan(data, today, REFERENCE_ACTION_PLAN_BUDGET_MINUTES, workRelevanceIndex, dailyCommandCompletedWorkItemIds).map((c) => c.item?.id).filter(Boolean));
     actionPlan = planIds.has(item.id) ? "SELECTED" : "NOT_SELECTED";
   } else if (candidateEvaluation === "NOT_ELIGIBLE") {
     actionPlan = "NOT_SELECTED";
@@ -300,7 +305,13 @@ export interface ExecutionPathStatusRow {
 /** §10, §23 — one pass building per-status rows with real, indexed counts. candidateCount is
  *  ONLY meaningful for ACTIONABLE rows (§10's own worked example shows "N/A" for
  *  OBSERVE/WAITING) — computed via a single buildCandidates() call, not a per-item rescan. */
-export function computeExecutionPathStatusTable(data: CommandCenterData, index: WorkRelevanceIndex, today: string, projectKeys?: string[]): ExecutionPathStatusRow[] {
+export function computeExecutionPathStatusTable(
+  data: CommandCenterData,
+  index: WorkRelevanceIndex,
+  today: string,
+  projectKeys?: string[],
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): ExecutionPathStatusRow[] {
   const scope = projectKeys && projectKeys.length > 0 ? new Set(projectKeys) : undefined;
   const actionsByWorkItemId = new Map<string, Action[]>();
   for (const action of data.actions) {
@@ -309,11 +320,11 @@ export function computeExecutionPathStatusTable(data: CommandCenterData, index: 
     if (list) list.push(action);
     else actionsByWorkItemId.set(action.relatedWorkItemId, [action]);
   }
-  const candidateIds = new Set(buildCandidates(data, today, index).map((c) => c.item?.id).filter(Boolean));
+  const candidateIds = new Set(buildCandidates(data, today, index, dailyCommandCompletedWorkItemIds).map((c) => c.item?.id).filter(Boolean));
 
   const groups = new Map<string, { statusName: string; relevance: WorkRelevance; items: WorkItem[] }>();
   for (const item of data.workItems) {
-    if (item.sourceType !== "jira" || item.status === "Done" || !item.jiraStatusName) continue;
+    if (item.sourceType !== "jira" || !isWorkItemOperationallyOpen(item, index, dailyCommandCompletedWorkItemIds) || !item.jiraStatusName) continue;
     const projectKey = jiraProjectKeyForWorkItem(item);
     if (!projectKey || (scope && !scope.has(projectKey))) continue;
     const relevance = resolveWorkRelevance(item, index);
@@ -348,9 +359,13 @@ export function computeExecutionPathStatusTable(data: CommandCenterData, index: 
 // ===== §17 Command Bar helpers =====
 
 /** "Which actionable items entered the candidate pool?" */
-export function listCandidatePoolActionableItems(data: CommandCenterData, index: WorkRelevanceIndex, today: string): WorkItem[] {
-  const candidates = buildCandidates(data, today, index);
-  const actionableIds = new Set(data.workItems.filter((w) => w.sourceType === "jira" && w.status !== "Done" && resolveWorkRelevance(w, index) === "ACTIONABLE").map((w) => w.id));
+export function listCandidatePoolActionableItems(data: CommandCenterData, index: WorkRelevanceIndex, today: string, dailyCommandCompletedWorkItemIds?: ReadonlySet<string>): WorkItem[] {
+  const candidates = buildCandidates(data, today, index, dailyCommandCompletedWorkItemIds);
+  const actionableIds = new Set(
+    data.workItems
+      .filter((w) => w.sourceType === "jira" && isWorkItemOperationallyOpen(w, index, dailyCommandCompletedWorkItemIds) && resolveWorkRelevance(w, index) === "ACTIONABLE")
+      .map((w) => w.id)
+  );
   const seen = new Set<string>();
   const out: WorkItem[] = [];
   for (const c of candidates) {

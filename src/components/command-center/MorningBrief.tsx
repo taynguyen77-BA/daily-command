@@ -2,23 +2,21 @@
 
 import { useState } from "react";
 import { deriveDontForget } from "@/lib/command-center/personal-focus";
-import { reviewStatusFor } from "@/lib/command-center/decision-radar";
 import { getTodayIso } from "@/lib/command-center/store";
 import { buildTodaysUpdateDraft } from "@/lib/command-center/communicate";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import type { CommandCenterData, DataSourceType, HealthTrend, PersonalFocusResult } from "@/lib/command-center/types";
 import { ArtifactEditor } from "./ArtifactEditor";
-import { DecisionReviewStatusBadge, Panel, TrustLabel } from "./ui";
+import { Panel, TrustLabel } from "./ui";
 
 /**
- * V1.1 §8 — the first thing the user sees. Must answer "what should I care about today?"
- * in about 10 seconds. V1.3 §39 — with a live source, states what data it's based on and
- * when. V1.4 §18 — upgraded into a proactive brief. V1.5 §30 — upgraded again into
- * "TODAY'S DELIVERY CONTROL": worse/better split out, decisions needed, actions not
- * working, stalled loops, who needs to act, first 30 minutes, expected outcomes. V2.0 §6 —
- * restructured into an explicit TODAY -> WATCH -> DON'T FORGET flow (reusing Personal
- * Focus + Attention Queue + Gap Detection; no new scoring). Still purely template-based —
- * no new AI call.
+ * V1.1 §8 — the first thing the user sees. V2.0 §6 — an explicit TODAY -> WATCH -> DON'T
+ * FORGET flow (reusing Personal Focus + Attention Queue + Gap Detection; no new scoring).
+ * V2.21 §9, §10 — trimmed to the content genuinely unique to this brief (trend, ineffective
+ * actions, who most needs contact, the watch list, don't-forget, expected outcomes): top3,
+ * decisions-needing-review, stalled loops, and the 30-minute plan all now render exactly
+ * once each, on their own dedicated surfaces elsewhere on this page, rather than being
+ * duplicated here too. Still purely template-based — no new AI call.
  */
 export function MorningBrief({
   data,
@@ -36,24 +34,14 @@ export function MorningBrief({
   lastSyncedAt?: string;
 }) {
   const openComms = data.communications.filter((c) => c.status === "open");
-  const topAttention = proactive?.attentionQueue.filter((a) => a.lifecycle !== "SNOOZED" && a.lifecycle !== "RESOLVED").slice(0, 3) ?? [];
   const topComm = proactive?.communicationPriority.find((c) => c.priority === "URGENT" || c.priority === "IMPORTANT");
   const topStakeholder = proactive?.stakeholderAttention[0];
-  const top3 = personalFocus?.top3 ?? [];
   const watch = personalFocus?.byCategory.WATCH.slice(0, 3) ?? [];
-  const thirtyMin = personalFocus?.thirtyMinutePlan ?? [];
-  const first30 = proactive?.first30Minutes.slice(0, 3) ?? [];
-  const decisionsNeeded = proactive?.decisionRadar.slice(0, 3) ?? [];
   const actionsNotWorking = proactive?.actionEffectiveness.filter((r) => r.classification === "INEFFECTIVE").slice(0, 3) ?? [];
-  const stalledLoops = proactive?.deliveryLoops.filter((l) => l.health === "STALLED" || l.health === "AT_RISK").slice(0, 3) ?? [];
   const expectedOutcomes = data.decisions.filter((d) => d.expectedOutcome && (d.status === "IMPLEMENTING" || d.status === "VALIDATING" || d.status === "DECIDED")).slice(0, 3);
   const dontForget = personalFocus ? deriveDontForget(personalFocus) : [];
   const today = getTodayIso();
   const [creatingUpdate, setCreatingUpdate] = useState(false);
-  const upcomingReviews = data.decisions
-    .map((d) => ({ decision: d, status: reviewStatusFor(d, today) }))
-    .filter((r) => r.status === "REVIEW_DUE" || r.status === "REVIEW_SOON" || r.status === "REVIEW_OVERDUE")
-    .slice(0, 3);
 
   return (
     <Panel className="p-5">
@@ -79,39 +67,10 @@ export function MorningBrief({
 
       <div className="space-y-4">
         <p className="font-display text-sm text-text">TODAY</p>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-text3">Your top 3</p>
-          {top3.length > 0 ? (
-            <ol className="mt-1 space-y-0.5 text-sm text-text2">
-              {top3.map((c, i) => (
-                <li key={c.id}>
-                  {i + 1}. {c.title}{c.projectName ? ` (${c.projectName})` : ""} — {c.nowWhat} (~{c.estimatedMinutes}m)
-                </li>
-              ))}
-            </ol>
-          ) : topAttention.length > 0 ? (
-            <ol className="mt-1 space-y-0.5 text-sm text-text2">
-              {topAttention.map((a, i) => (
-                <li key={a.id}>
-                  {i + 1}. {a.what} — {a.why}
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className="mt-1 text-sm text-text3">Nothing urgent — everything is within expected range.</p>
-          )}
-        </div>
-
-        {top3.length > 0 && (
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-text3">Why these matter</p>
-            <ul className="mt-1 space-y-0.5 text-sm text-text2">
-              {top3.map((c) => (
-                <li key={c.id}>{c.title}: {c.why}</li>
-              ))}
-            </ul>
-          </div>
-        )}
+        {/* V2.21 §9.3, §10 — "Your top 3"/"Why these matter" were removed here: Your Delivery
+            Focus (rendered above this brief, compact) is now the one canonical surface for
+            top3 + why — this brief no longer repeats it in plain-text form immediately
+            after. */}
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
@@ -143,29 +102,11 @@ export function MorningBrief({
           </div>
         </div>
 
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-text3">Decisions needed</p>
-          {decisionsNeeded.length > 0 ? (
-            <ul className="mt-1 space-y-0.5 text-sm text-text2">
-              {decisionsNeeded.map((d) => (
-                <li key={d.decisionId}>
-                  {d.decision.title} — {d.reviewUrgency === "URGENT_REVIEW" ? "urgent review" : "may need review"}.
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-1 text-sm text-text3">No decisions currently need review.</p>
-          )}
-          {upcomingReviews.length > 0 && (
-            <ul className="mt-1 space-y-0.5 text-sm text-text2">
-              {upcomingReviews.map(({ decision, status }) => (
-                <li key={decision.id} className="flex items-center gap-2">
-                  <DecisionReviewStatusBadge status={status} /> {decision.title}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+        {/* V2.21 §9.4, §10 — the "Decisions needed" and "Stalled loops" blocks that used to
+            live here were removed: the main dashboard already renders a full "Decisions"
+            section and a full "Stalled Loops" section (with badges and evidence) directly
+            below this brief — the condensed versions here added no information a reader
+            wouldn't already see a few seconds later, just the same recommendation twice. */}
 
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-text3">Actions not working</p>
@@ -181,47 +122,15 @@ export function MorningBrief({
         </div>
 
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-text3">Stalled loops</p>
-          {stalledLoops.length > 0 ? (
-            <ul className="mt-1 space-y-0.5 text-sm text-text2">
-              {stalledLoops.map((l) => (
-                <li key={l.id}>{l.issue} — {l.why}</li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-1 text-sm text-text3">No stalled management loops.</p>
-          )}
-        </div>
-
-        <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-text3">Who needs to act</p>
           <p className="mt-1 text-sm text-text2">
             {topComm ? `${topComm.who} — ${topComm.why} (${topComm.when})` : topStakeholder ? topStakeholder.reason : openComms.length > 0 ? `${openComms[0].who} (${openComms[0].audience})` : "No one currently needs to be contacted."}
           </p>
         </div>
 
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-wide text-text3">If you only have 30 minutes</p>
-          {thirtyMin.length > 0 ? (
-            <ol className="mt-1 space-y-0.5 text-sm text-text2">
-              {thirtyMin.map((c, i) => (
-                <li key={c.id}>
-                  {i + 1}. {c.title} — {c.estimatedMinutes}m
-                </li>
-              ))}
-            </ol>
-          ) : first30.length > 0 ? (
-            <ol className="mt-1 space-y-0.5 text-sm text-text2">
-              {first30.map((f, i) => (
-                <li key={i}>
-                  {i + 1}. {f.text}
-                </li>
-              ))}
-            </ol>
-          ) : (
-            <p className="mt-1 text-sm text-text3">No priority items fit the next 30 minutes.</p>
-          )}
-        </div>
+        {/* V2.21 §9.3, §10 — "If you only have 30 minutes" was removed here: Your Delivery
+            Focus (above) already owns this exact list, with Start-focus buttons this
+            plain-text copy never had anyway. */}
 
         <p className="border-t border-border pt-4 font-display text-sm text-text">WATCH</p>
         <div>

@@ -27,6 +27,7 @@ export function PriorityCard({
   isDemo,
   onTakeAction,
   workRelevanceIndex,
+  dailyCommandCompletedWorkItemIds,
   today,
   proactive,
   personalFocus,
@@ -41,6 +42,9 @@ export function PriorityCard({
   // on my work list?" (§7 "smallest number of useful entry points"). Undefined is a no-op,
   // not a crash — any other PriorityCard caller keeps working unchanged.
   workRelevanceIndex?: WorkRelevanceIndex;
+  // V2.21 §3 — optional/additive, same no-op-when-absent contract: forwarded to
+  // ExecutionPathTrace so its trace agrees with the canonical completion gate.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
   // V2.8 §9 — optional, same no-op-when-absent contract: the Execution Path trace only
   // renders when the caller supplies today + proactive + personalFocus alongside the index.
   today?: string;
@@ -120,7 +124,15 @@ export function PriorityCard({
       {workRelevanceIndex && <WhyNotATaskDrawer item={item} workRelevanceIndex={workRelevanceIndex} />}
 
       {workRelevanceIndex && today && (
-        <ExecutionPathTrace item={item} data={data} today={today} workRelevanceIndex={workRelevanceIndex} proactive={proactive ?? null} personalFocus={personalFocus ?? null} />
+        <ExecutionPathTrace
+          item={item}
+          data={data}
+          today={today}
+          workRelevanceIndex={workRelevanceIndex}
+          proactive={proactive ?? null}
+          personalFocus={personalFocus ?? null}
+          dailyCommandCompletedWorkItemIds={dailyCommandCompletedWorkItemIds}
+        />
       )}
 
       <button

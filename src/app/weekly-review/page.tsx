@@ -107,6 +107,15 @@ export default function WeeklyReviewPage() {
             <span>Decisions: {weeklyReport.totalDecisions}</span>
             <span>Outcomes recorded: {weeklyReport.totalOutcomes}</span>
           </div>
+          {/* V2.21 §11 — Daily/Weekly evidence reconciliation: this "Completed" count and the
+              DELIVERY section's "Actions completed" below are DELIBERATELY built from
+              different evidence and may not match — this line makes that explicit instead of
+              leaving two same-looking numbers to silently disagree. This one is the frozen,
+              append-only completion record for each calendar day this range actually has a
+              Daily Report for (never re-derived from today's live ticket/action state). */}
+          <p className="mt-2 text-[11px] text-text3">
+            From {weeklyReport.dateRange[0]} to {weeklyReport.dateRange[weeklyReport.dateRange.length - 1]} — recorded completion events on the day they happened, frozen at Close Day. Distinct from DELIVERY&apos;s live count below.
+          </p>
           {weeklyReport.byProject.length > 0 && (
             <ul className="mt-2 space-y-0.5 text-xs text-text2">
               {weeklyReport.byProject.map((p) => (
@@ -136,6 +145,14 @@ export default function WeeklyReviewPage() {
               <span>Stalled loops: {stalledLoopsCount}</span>
               <span>Recurring risks: {facts.recurringRisks.length}</span>
             </div>
+            {/* V2.21 §11 — the counterpart note to WEEKLY REPORT's own: this count is a LIVE
+                read of current ticket/action state over the last {facts.windowDays} day(s) of
+                actual stored snapshot history (which can be shorter or longer than a fixed
+                7-day range — see "hasEnoughHistory" above), not a frozen daily record. The two
+                sections can legitimately disagree; this is not a bug in either one. */}
+            <p className="mt-2 text-[11px] text-text3">
+              Live count over the last {facts.windowDays} day(s) of stored snapshot history — recomputed from today&apos;s ticket/action state, not frozen at the time of completion. Distinct from WEEKLY REPORT&apos;s recorded-events count above.
+            </p>
             {facts.recurringRisks.length > 0 && (
               <ul className="mt-2 space-y-0.5 text-xs text-text2">
                 {facts.recurringRisks.map((r, i) => (
@@ -184,6 +201,12 @@ export default function WeeklyReviewPage() {
               <span>Skipped: {personalReview.skippedCount}</span>
               <span>Carried forward: {personalReview.deferredCount}</span>
             </div>
+            {/* V2.21 §11 — a third, independent evidence source (Personal Plan items you
+                explicitly planned — not every Action or memory event), so this "Completed"
+                count is expected to differ from both counts above too. */}
+            <p className="mt-2 text-[11px] text-text3">
+              Personal Plan items you explicitly planned and completed this window — a narrower population than either count above, which is expected.
+            </p>
             <p className="mt-3 text-sm text-text2">
               Across: {personalReview.projectsWorkedIn.join(", ") || "no projects"}. Actions: {personalReview.effectiveActionsCount} effective, {personalReview.ineffectiveActionsCount} ineffective. Decision loops completed: {personalReview.decisionsReviewedCount}.
             </p>

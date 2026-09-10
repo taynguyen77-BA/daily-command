@@ -4,6 +4,7 @@
 
 import { daysBetween } from "./scoring";
 import { makeEvidence } from "./evidence";
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, Evidence, EvidenceSourceType } from "./types";
 
 export interface Gap {
@@ -21,7 +22,16 @@ function gapId(): string {
   return `gap-${counter}`;
 }
 
-export function detectGaps(data: CommandCenterData, today: string, sourceType: EvidenceSourceType): Gap[] {
+/** V2.21 §3.2 — `workRelevanceIndex`/`dailyCommandCompletedWorkItemIds` are additive/optional
+ *  trailing parameters, same no-op-when-omitted contract as every other V2.21 extension:
+ *  omitting them reproduces the pre-V2.21 raw-Jira-Done-only behavior exactly. */
+export function detectGaps(
+  data: CommandCenterData,
+  today: string,
+  sourceType: EvidenceSourceType,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): Gap[] {
   const out: Gap[] = [];
   const push = (g: Omit<Gap, "id">) => out.push({ ...g, id: gapId() });
 
@@ -40,7 +50,7 @@ export function detectGaps(data: CommandCenterData, today: string, sourceType: E
 
   // High-priority work item with no owner (reframed as a planning gap, not just a risk).
   for (const item of data.workItems) {
-    if (item.status === "Done") continue;
+    if (!isWorkItemOperationallyOpen(item, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) continue;
     if ((item.priority === "P1" || item.priority === "P2") && !item.owner) {
       push({
         title: `${item.key} has no owner assigned`,
@@ -112,7 +122,7 @@ export function detectGaps(data: CommandCenterData, today: string, sourceType: E
 
   // Production issue with no follow-up action tracked.
   for (const item of data.workItems) {
-    if (item.type !== "production-issue" || item.status === "Done") continue;
+    if (item.type !== "production-issue" || !isWorkItemOperationallyOpen(item, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) continue;
     const hasFollowUp = data.actions.some((a) => a.relatedWorkItemId === item.id && a.status !== "completed");
     if (!hasFollowUp) {
       push({

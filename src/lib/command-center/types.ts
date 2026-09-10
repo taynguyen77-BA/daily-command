@@ -1579,4 +1579,33 @@ export interface DailyCommandCompletion {
   completedBy?: string; // PersonalIdentity.displayName at the moment of completion, when configured
 }
 
+// V2.22 §3-4 — Pilot Trust Model + Pilot Observability. A lightweight, local-only feedback
+// record — three simple 0/1/2 questions, never a productivity score, never sent anywhere.
+// `context` is a deterministic SNAPSHOT of state already computed elsewhere at the moment of
+// submission (freshness, scope, assigned-work/mentions/waiting-for/attention counts) — this is
+// the entire "pilot observability" mechanism: no new tracking, no new instrumentation, just
+// capturing values every one of those existing engines already produces, alongside the
+// person's own answer, so a later reviewer can correlate "did I trust it" with "was the data
+// actually fresh / in the right scope" for that specific day.
+export interface PilotFeedbackContext {
+  freshness: Freshness | "not-jira";
+  projectScopeMode: "ALL" | "FOCUSED";
+  focusedProjectCount?: number;
+  assignedWorkActiveCount: number;
+  recentMentionsCount: number;
+  waitingForCount: number;
+  attentionQueueActiveCount: number;
+}
+
+export interface PilotFeedbackEntry {
+  id: string;
+  date: string; // ISO date this feedback is about
+  submittedAt: string; // ISO datetime
+  usefulness: 0 | 1 | 2; // "Did Daily Command help me understand what matters today?"
+  nextActionClarity: 0 | 1 | 2; // "Did it make the next action obvious?"
+  trust: 0 | 1 | 2; // "Did I trust the information enough to act on it?"
+  note?: string;
+  context: PilotFeedbackContext;
+}
+
 export const DATA_SCHEMA_VERSION = 5;

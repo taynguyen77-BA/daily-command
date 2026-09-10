@@ -62,6 +62,8 @@ import type {
   PersonalPlanItem,
   PersonalPlanItemSnapshot,
   PersonalPlanItemStatus,
+  PilotFeedbackContext,
+  PilotFeedbackEntry,
   PlanItemOrigin,
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
@@ -90,6 +92,10 @@ const MAX_MENTION_EVENTS = 500;
 // V2.17 Task 2 — at most one entry per calendar day; ~2 years of daily reports is generous
 // headroom while still bounded, same philosophy as MAX_SNAPSHOT_HISTORY above.
 const MAX_DAILY_REPORTS = 730;
+// V2.22 §3 — one feedback entry per day is the expected cadence (a Close-Day-adjacent
+// prompt); ~1.5 years of daily entries is generous bounded headroom, same philosophy as
+// MAX_SNAPSHOT_HISTORY/MAX_DAILY_REPORTS above.
+const MAX_PILOT_FEEDBACK = 500;
 
 export interface EodEntry {
   date: string;
@@ -185,6 +191,10 @@ export interface StoreState {
   // ticket present here is suppressed from active personal-work surfaces regardless of its
   // Jira status; removed only by an explicit reopen.
   dailyCommandCompletions: Record<string, DailyCommandCompletion>;
+  // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. Local-only, bounded like every
+  // other history-shaped field above; never synced (not part of SyncedAppState), never sent
+  // anywhere. See PilotFeedbackEntry's own comment (types.ts) for the full reasoning.
+  pilotFeedback: PilotFeedbackEntry[];
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -222,6 +232,7 @@ function initialState(): StoreState {
     lastAppStateSyncIso: undefined,
     dailyReports: {},
     dailyCommandCompletions: {},
+    pilotFeedback: [],
   };
 }
 
@@ -379,6 +390,45 @@ function asDailyCommandCompletions(v: unknown): Record<string, DailyCommandCompl
   return out;
 }
 
+// V2.22 §3 — same discipline as every other parsed field here: a malformed entry is dropped
+// rather than trusted or crashing the parse.
+function isPilotScore(v: unknown): v is 0 | 1 | 2 {
+  return v === 0 || v === 1 || v === 2;
+}
+
+function isPilotFeedbackContextShape(v: unknown): v is PilotFeedbackContext {
+  if (typeof v !== "object" || v === null) return false;
+  const c = v as Partial<PilotFeedbackContext>;
+  return (
+    typeof c.freshness === "string" &&
+    (c.projectScopeMode === "ALL" || c.projectScopeMode === "FOCUSED") &&
+    typeof c.assignedWorkActiveCount === "number" &&
+    typeof c.recentMentionsCount === "number" &&
+    typeof c.waitingForCount === "number" &&
+    typeof c.attentionQueueActiveCount === "number"
+  );
+}
+
+function isPilotFeedbackEntryShape(v: unknown): v is PilotFeedbackEntry {
+  if (typeof v !== "object" || v === null) return false;
+  const e = v as Partial<PilotFeedbackEntry>;
+  return (
+    typeof e.id === "string" &&
+    typeof e.date === "string" &&
+    typeof e.submittedAt === "string" &&
+    isPilotScore(e.usefulness) &&
+    isPilotScore(e.nextActionClarity) &&
+    isPilotScore(e.trust) &&
+    (e.note === undefined || typeof e.note === "string") &&
+    isPilotFeedbackContextShape(e.context)
+  );
+}
+
+function asPilotFeedback(v: unknown): PilotFeedbackEntry[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter(isPilotFeedbackEntryShape);
+}
+
 // V2.14 §4 — same discipline as every other parsed field here: a malformed/missing entry
 // falls back to its safe default (false — "Everything") rather than being trusted as-is.
 function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
@@ -428,6 +478,7 @@ export function parseStoredState(raw: string): StoreState {
       lastAppStateSyncIso: typeof parsed.lastAppStateSyncIso === "string" ? parsed.lastAppStateSyncIso : undefined,
       dailyReports: asDailyReports(parsed.dailyReports),
       dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
+      pilotFeedback: asPilotFeedback(parsed.pilotFeedback),
     };
   } catch {
     return initialState();
@@ -702,6 +753,16 @@ export class CommandCenterStore {
     const next = { ...this.state.dailyCommandCompletions };
     delete next[ticketKey];
     this.set({ ...this.state, dailyCommandCompletions: next });
+  }
+
+  /** V2.22 §3-4 — records one lightweight pilot-feedback entry (3 questions, 0-2 each, plus
+   *  an optional note) alongside a deterministic snapshot of already-computed state, never a
+   *  new instrumentation/analytics mechanism — the caller (CloseDayModal) is responsible for
+   *  building `context` from engines it already has in scope. Bounded like every other
+   *  history array in this store, oldest evicted first. */
+  submitPilotFeedback(input: Omit<PilotFeedbackEntry, "id" | "submittedAt">) {
+    const entry: PilotFeedbackEntry = { ...input, id: `pilot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, submittedAt: new Date().toISOString() };
+    this.set({ ...this.state, pilotFeedback: [...this.state.pilotFeedback, entry].slice(-MAX_PILOT_FEEDBACK) });
   }
 
   setFilters(patch: Partial<GlobalFilters>) {

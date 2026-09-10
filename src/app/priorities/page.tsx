@@ -31,7 +31,7 @@ function matchesRelationFilter(relation: PersonalRelation, filter: RelationFilte
 }
 
 function PrioritiesInner() {
-  const { state, today, derived, filteredData, store, workRelevanceIndex, proactive, personalFocus } = useCommandCenter();
+  const { state, today, derived, filteredData, store, workRelevanceIndex, dailyCommandCompletedWorkItemIds, proactive, personalFocus } = useCommandCenter();
   const searchParams = useSearchParams();
   const [filter, setFilter] = useState<string>(searchParams.get("filter") ?? "ALL");
   const [relationFilter, setRelationFilter] = useState<RelationFilter>("ALL");
@@ -59,7 +59,7 @@ function PrioritiesInner() {
     const item = itemForScore(filteredData, result);
     if (!item) return false;
     if (filter !== "ALL") {
-      if (filter === "OVERDUE" && !isOverdue(item, today)) return false;
+      if (filter === "OVERDUE" && !isOverdue(item, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) return false;
       if (filter === "ON_TRACK" && result.classification !== "MEDIUM" && result.classification !== "LOW") return false;
       if (filter !== "OVERDUE" && filter !== "ON_TRACK" && result.classification !== (filter as Severity)) return false;
     }
@@ -123,6 +123,7 @@ function PrioritiesInner() {
                 isDemo={state.isDemo}
                 onTakeAction={() => setSelected({ item, result })}
                 workRelevanceIndex={workRelevanceIndex}
+                dailyCommandCompletedWorkItemIds={dailyCommandCompletedWorkItemIds}
                 today={today}
                 proactive={proactive}
                 personalFocus={personalFocus}

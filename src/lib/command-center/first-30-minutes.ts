@@ -12,13 +12,19 @@ export interface First30MinutesItem {
   attentionItemId?: string;
 }
 
-export function buildFirst30Minutes(attentionQueue: AttentionItem[], data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex): First30MinutesItem[] {
+export function buildFirst30Minutes(
+  attentionQueue: AttentionItem[],
+  data: CommandCenterData,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): First30MinutesItem[] {
   const eligible = attentionQueue.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
   const top = eligible.slice(0, 5).map((i) => ({ text: `${i.nowWhat} (${i.what})`, attentionItemId: i.id }));
 
   if (top.length >= 3) return top;
 
-  const plan = buildPlan(data, today, 30, workRelevanceIndex);
+  const plan = buildPlan(data, today, 30, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const fromPlan = plan.slice(0, 5 - top.length).map((c) => ({ text: c.title }));
   return [...top, ...fromPlan];
 }

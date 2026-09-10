@@ -1,6 +1,7 @@
 // Deterministic AI Priority Model (BUILD REQUEST §7).
 // Pure functions, no AI calls — every number here must be reproducible and explainable.
 
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, PriorityFactor, PriorityScoreResult, Severity, WorkItem } from "./types";
 
 export function daysBetween(fromIso: string, toIso: string): number {
@@ -131,14 +132,30 @@ export function eligibilityScore(item: WorkItem, result: PriorityScoreResult): n
   return Math.round((result.score * 100) / maxAchievable);
 }
 
-export function scoreAllWorkItems(data: CommandCenterData, today: string): PriorityScoreResult[] {
+/** V2.21 §3.2 — `workRelevanceIndex`/`dailyCommandCompletedWorkItemIds` are additive/optional
+ *  trailing parameters: omitting them reproduces the pre-V2.21 behavior exactly (raw Jira
+ *  Done only). Passing them makes "open" agree with the canonical gate
+ *  (isWorkItemOperationallyOpen) every other personal-work surface already uses, so a
+ *  Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item stops being scored/
+ *  counted as open work here too. */
+export function scoreAllWorkItems(
+  data: CommandCenterData,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): PriorityScoreResult[] {
   return data.workItems
-    .filter((i) => i.status !== "Done")
+    .filter((i) => isWorkItemOperationallyOpen(i, workRelevanceIndex, dailyCommandCompletedWorkItemIds))
     .map((i) => scoreWorkItem(i, data, today))
     .sort((a, b) => b.score - a.score);
 }
 
-export function isOverdue(item: WorkItem, today: string): boolean {
-  if (!item.dueDate || item.status === "Done") return false;
+export function isOverdue(
+  item: WorkItem,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): boolean {
+  if (!item.dueDate || !isWorkItemOperationallyOpen(item, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) return false;
   return daysBetween(today, item.dueDate) < 0;
 }

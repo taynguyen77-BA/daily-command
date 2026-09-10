@@ -183,6 +183,33 @@ export function isWorkItemDoneOrExcluded(item: Pick<WorkItem, "status" | "source
   return relevance === "COMPLETED" || relevance === "EXCLUDED";
 }
 
+/** V2.21 §3.1 — THE canonical "is this item still open, operationally?" gate: combines
+ *  isWorkItemDoneOrExcluded above (Jira native Done, or Work Relevance COMPLETED/EXCLUDED)
+ *  with the one remaining independent completion signal, Daily Command's own explicit
+ *  completion (a WorkItem the user marked done IN Daily Command — a fact distinct from Jira
+ *  status, see types.ts's DailyCommandCompletion). This is not a new completion model: it is
+ *  the exact `!isWorkItemDoneOrExcluded(...) && !dailyCommandCompletedIds.has(...)` pattern
+ *  assigned-work.ts and proactive.ts already apply inline, named once so every engine that
+ *  needs "is this item open" asks the same question the same way — see this file's own
+ *  isWorkItemDoneOrExcluded doc for why a scattered `status === "Done"` check silently
+ *  disagreed with this for a Work-Relevance-COMPLETED (but not Jira-native-Done) status, or
+ *  for a Daily-Command-completed item, in several engines (risk-detection, scoring,
+ *  release-health, action-plan, gap-detection, execution-path) that never consulted either
+ *  signal.
+ *
+ *  Additive/optional trailing parameter, same no-op-when-omitted contract as
+ *  isWorkItemDoneOrExcluded's own `index` — omitting `dailyCommandCompletedWorkItemIds`
+ *  reproduces isWorkItemDoneOrExcluded's behavior exactly. */
+export function isWorkItemOperationallyOpen(
+  item: Pick<WorkItem, "id" | "status" | "sourceType" | "projectId" | "jiraStatusName">,
+  index: WorkRelevanceIndex | undefined,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): boolean {
+  if (isWorkItemDoneOrExcluded(item, index)) return false;
+  if (dailyCommandCompletedWorkItemIds?.has(item.id)) return false;
+  return true;
+}
+
 /** §9 — the exact, deterministic explanation text for each classification, reused verbatim
  *  by Data & Settings, the "why isn't this on my list?" trust flow, and Command Bar. */
 export const WORK_RELEVANCE_EXPLANATIONS: Record<WorkRelevance, string> = {

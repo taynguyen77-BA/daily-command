@@ -91,12 +91,6 @@ export function useCommandCenter() {
     [scopedData, state.filters, today]
   );
 
-  const derived = useMemo(
-    () => deriveData(filteredData, previousSnapshot, today),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, previousSnapshot, today]
-  );
-
   // V2.5 — Work Relevance Policy index, built once per render from the persisted per-project
   // status maps. Threaded into computeProactiveIntelligence (which uses it for First 30
   // Minutes' action-plan fallback) and exposed directly for surfaces that classify a raw
@@ -111,11 +105,24 @@ export function useCommandCenter() {
   // ticket KEY (see its own comment) — this is purely a lookup-shape conversion, never a second
   // source of truth.
   const dailyCommandCompletedWorkItemIds = useMemo(() => {
-    const keys = new Set(Object.keys(state.dailyCommandCompletions));
+    const keys = new Set(Object.keys(state.dailyCommandCompletions ?? {}));
     if (keys.size === 0) return new Set<string>();
     return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.dailyCommandCompletions, scopedData.workItems]);
+
+  // V2.21 §3 — computed AFTER workRelevanceIndex/dailyCommandCompletedWorkItemIds (moved
+  // below them, was above before V2.21) and now threaded through: `derived` is the shared
+  // scores/risks/kpis every screen reads (Home, Priorities, Risks), so it must apply the same
+  // canonical "is this item operationally open" gate Personal Focus/Assigned Work already do
+  // — otherwise a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item kept
+  // inflating "needs attention"/"overdue" counts and generating fresh risks even though every
+  // other surface already treated it as finished (see selectors.ts's own comment).
+  const derived = useMemo(
+    () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds]
+  );
 
   // V1.4 — one composed bundle for every proactive engine, mirroring `derived` above.
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
@@ -217,7 +224,16 @@ export function useCommandCenter() {
  *  session can be temporarily scoped to a project outside (or narrower than) the current
  *  global focus without ever calling store.setJiraProjectScope (§20 "the global application
  *  selection does NOT change"). No new intelligence — every function called here is the
- *  same one the hook above already uses. */
+ *  same one the hook above already uses.
+ *
+ *  V2.21 §4 (bug fix) — this override pipeline never resolved or threaded Daily Command
+ *  Completion at all: `deriveData`/`computeProactiveIntelligence`/`computePersonalFocus` were
+ *  called with no `dailyCommandCompletedWorkItemIds`, so a ticket the user completed IN
+ *  DAILY COMMAND kept reappearing as active work the moment a query or Meeting Mode session
+ *  was scoped to its project — the exact "project-scoped queries don't see completion"
+ *  inconsistency V2.21 closes. Resolved the same way useCommandCenter() resolves it above
+ *  (ticket-key -> WorkItem-id lookup over THIS call's own scoped data, since an override can
+ *  legitimately see a different WorkItem population than the persisted global scope). */
 export function buildProjectOverrideView(state: StoreState, today: string, projectKey: string) {
   const overrideScope: JiraProjectScope = { mode: "FOCUSED", projectKeys: [projectKey] };
   const scopedData = applyProjectScope(state.data, overrideScope);
@@ -228,9 +244,14 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const scopedMentionEvents = scopeMentionEvents(state.mentionEvents, scopedData.workItems, overrideScope);
   const filteredData = applyFilters(scopedData, state.filters, today);
   const previousSnapshot = previousSnapshotOf(state);
-  const derived = deriveData(filteredData, previousSnapshot, today);
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
   const workRelevanceIndex = buildWorkRelevanceIndex(state.jiraWorkRelevancePolicy);
+  const dailyCommandCompletedWorkItemIds = (() => {
+    const keys = new Set(Object.keys(state.dailyCommandCompletions ?? {}));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+  })();
+  const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const proactive = state.loaded
     ? computeProactiveIntelligence(
         filteredData,
@@ -243,9 +264,12 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         workRelevanceIndex,
         scopedMentionEvents,
         state.personalIdentity?.accountId,
-        state.ownerName
+        state.ownerName,
+        dailyCommandCompletedWorkItemIds
       )
     : null;
-  const personalFocus = proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents) : null;
-  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex };
+  const personalFocus = proactive
+    ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds)
+    : null;
+  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds };
 }

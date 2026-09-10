@@ -34,7 +34,13 @@ function estimateForWorkItem(item: WorkItem): number {
   return minutes;
 }
 
-export function buildCandidates(data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex): PlanCandidate[] {
+/** V2.21 §5 — `dailyCommandCompletedWorkItemIds` is an additive/optional trailing parameter,
+ *  same no-op-when-omitted contract as `workRelevanceIndex` above: a WorkItem the user has
+ *  explicitly marked completed IN DAILY COMMAND must not be resurfaced as a fresh
+ *  auto-suggested candidate, the same way a Jira-Done or Work-Relevance-COMPLETED/EXCLUDED
+ *  item already isn't (line below). An item that already has its own explicit Action is
+ *  untouched either way — coveredItemIds already keeps it out of the auto-suggest loop. */
+export function buildCandidates(data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex, dailyCommandCompletedWorkItemIds?: ReadonlySet<string>): PlanCandidate[] {
   const candidates: PlanCandidate[] = [];
   // BUGFIX — covered by ANY action regardless of status, not just "open" ones. The
   // underlying WorkItem doesn't become Done just because its Action was completed/
@@ -74,6 +80,7 @@ export function buildCandidates(data: CommandCenterData, today: string, workRele
   // such an item is untouched — that's the user's own explicit decision, not an inference.
   for (const item of data.workItems) {
     if (item.status === "Done" || coveredItemIds.has(item.id)) continue;
+    if (dailyCommandCompletedWorkItemIds?.has(item.id)) continue;
     if (workRelevanceIndex && !isPersonalWorkEligibleItem(item, workRelevanceIndex)) continue;
     const result = scoreWorkItem(item, data, today);
     // V2.9 §F-01 — gate on eligibilityScore, not the raw score: an item missing a due
@@ -95,8 +102,8 @@ export function buildCandidates(data: CommandCenterData, today: string, workRele
 }
 
 /** Greedy fill: highest priority first, skip anything that doesn't fit the remaining budget. */
-export function buildPlan(data: CommandCenterData, today: string, budgetMinutes: TimeBudget, workRelevanceIndex?: WorkRelevanceIndex): PlanCandidate[] {
-  const candidates = buildCandidates(data, today, workRelevanceIndex);
+export function buildPlan(data: CommandCenterData, today: string, budgetMinutes: TimeBudget, workRelevanceIndex?: WorkRelevanceIndex, dailyCommandCompletedWorkItemIds?: ReadonlySet<string>): PlanCandidate[] {
+  const candidates = buildCandidates(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const plan: PlanCandidate[] = [];
   let remaining = budgetMinutes;
   for (const c of candidates) {

@@ -2,6 +2,7 @@
 // Every rule here is an explicit, reproducible combination of fields — no model call.
 
 import { daysBetween } from "./scoring";
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, Risk, RiskRuleId, WorkItem } from "./types";
 
 let counter = 0;
@@ -32,15 +33,27 @@ function clientName(data: CommandCenterData, clientId: string) {
 type AutoRiskInput = Omit<Risk, "id" | "detectedAt" | "status" | "auto"> & { ruleId: RiskRuleId; identityKey: string };
 
 /** Returns freshly-detected risks. Does not mutate stored risks — callers merge/dedupe via
- *  dedupeRisks (selectors.ts), which uses riskFingerprint above, not title. */
-export function detectRisks(data: CommandCenterData, today: string): Risk[] {
+ *  dedupeRisks (selectors.ts), which uses riskFingerprint above, not title.
+ *
+ *  V2.21 §3.2 — `workRelevanceIndex`/`dailyCommandCompletedWorkItemIds` are additive/optional
+ *  trailing parameters, same no-op-when-omitted contract as scoring.ts's own extension:
+ *  omitting them reproduces the pre-V2.21 raw-Jira-Done-only behavior exactly. Passing them
+ *  means a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item never generates
+ *  a fresh deadline/stalled/owner-overload risk, matching what Personal Focus/Action Plan
+ *  already treat as finished. */
+export function detectRisks(
+  data: CommandCenterData,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): Risk[] {
   const out: Risk[] = [];
   // V2.18 §7 — ruleId/identityKey are now part of AutoRiskInput, so every call site below is
   // compile-time required to stamp a real identity, not just documented to do so.
   const push = (r: AutoRiskInput) => out.push({ ...r, id: riskId(out.length.toString()), detectedAt: today, status: "open", auto: true });
 
   for (const item of data.workItems) {
-    if (item.status === "Done") continue;
+    if (!isWorkItemOperationallyOpen(item, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) continue;
     const client = clientName(data, item.clientId);
     const daysToDue = item.dueDate ? daysBetween(today, item.dueDate) : null;
 
@@ -232,7 +245,7 @@ export function detectRisks(data: CommandCenterData, today: string): Risk[] {
   // R10: ownership concentration — one owner holding many open P1/P2 items
   const counts = new Map<string, WorkItem[]>();
   for (const item of data.workItems) {
-    if (!item.owner || item.status === "Done") continue;
+    if (!item.owner || !isWorkItemOperationallyOpen(item, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) continue;
     if (item.priority !== "P1" && item.priority !== "P2") continue;
     counts.set(item.owner, [...(counts.get(item.owner) ?? []), item]);
   }

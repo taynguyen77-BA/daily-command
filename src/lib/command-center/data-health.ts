@@ -7,7 +7,7 @@
 // real WorkItem ids already in the domain model — never invented work.
 
 import { computeFreshness } from "./freshness";
-import { countUnclassifiedJiraStatuses, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { countUnclassifiedJiraStatuses, isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, DataHealth, DataHealthRemediationItem, DataSourceType, WorkItem } from "./types";
 
 function pct(numerator: number, denominator: number): number {
@@ -19,8 +19,24 @@ function idsOf(items: WorkItem[]): string[] {
   return items.map((w) => w.id);
 }
 
-export function computeDataHealth(data: CommandCenterData, sourceType: DataSourceType, lastSyncedAtIso: string | undefined, nowMs?: number, workRelevanceIndex?: WorkRelevanceIndex): DataHealth {
-  const openItems = data.workItems.filter((w) => w.status !== "Done");
+/** V2.22 §13 (bug fix) — `dailyCommandCompletedWorkItemIds` is an additive/optional trailing
+ *  parameter, and `openItems` now uses the canonical isWorkItemOperationallyOpen gate
+ *  (already threaded through `workRelevanceIndex`, which this function already accepted but
+ *  previously only used for `unclassifiedJiraStatusCount`) instead of raw `status !== "Done"`.
+ *  Confirmed real defect: a Work-Relevance-COMPLETED or Daily-Command-completed item with no
+ *  owner/due date/fix version was still counted against Ownership/Due-date/Release coverage
+ *  and surfaced a "review ownership for these items" remediation nudge for tickets the user
+ *  already considers finished — directly undermining trust in this exact panel. Omitting
+ *  either parameter reproduces the pre-V2.22 behavior exactly. */
+export function computeDataHealth(
+  data: CommandCenterData,
+  sourceType: DataSourceType,
+  lastSyncedAtIso: string | undefined,
+  nowMs?: number,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): DataHealth {
+  const openItems = data.workItems.filter((w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
   const totalWorkItems = openItems.length;
 
   const missingOwner = openItems.filter((w) => !w.owner);
@@ -95,7 +111,7 @@ export function computeDataHealth(data: CommandCenterData, sourceType: DataSourc
     remediation.push({
       dimension: "Freshness",
       what: `Data is ${freshness}${lastSyncedAtIso ? ` (last synced ${lastSyncedAtIso})` : ""}.`,
-      whyItMatters: "Conclusions drawn from this data may be outdated — this affects DATA CONFIDENCE, not the underlying deterministic delivery score itself.",
+      whyItMatters: "Conclusions drawn from this data may be outdated — this affects DATA FRESHNESS, not the underlying deterministic delivery score itself.",
       whatToDo: "Run a Jira sync (or refresh the active data source) from Data & Settings.",
       affectedItemIds: [],
     });

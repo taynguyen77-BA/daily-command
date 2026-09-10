@@ -28,6 +28,11 @@ interface CommandView {
   personalFocus: PersonalFocusResult | null;
   personalReview: PersonalDeliveryReviewFacts | undefined;
   workRelevanceIndex: WorkRelevanceIndex;
+  // V2.21 §4 (bug fix) — additive: the global-scope view already had this from
+  // useCommandCenter(); an explicit-project override view now carries it too (see
+  // buildProjectOverrideView's own V2.21 comment), so Command Bar/Meeting Mode intelligence
+  // never disagrees with the main dashboard about a Daily-Command-completed ticket.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
 }
 
 const EXAMPLES = [
@@ -44,7 +49,7 @@ const EXAMPLES = [
 /** V1.3 §26 — NOT a generic chatbot. Every query is routed deterministically
  *  (query-router.ts) to a known intent; Claude only narrates the retrieved facts. */
 export function CommandBar() {
-  const { state, today, filteredData, derived, proactive, personalFocus, workRelevanceIndex } = useCommandCenter();
+  const { state, today, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QueryAnswer | null>(null);
@@ -89,7 +94,7 @@ export function CommandBar() {
       return;
     }
 
-    let view: CommandView = { filteredData, derived, proactive, personalFocus, personalReview, workRelevanceIndex };
+    let view: CommandView = { filteredData, derived, proactive, personalFocus, personalReview, workRelevanceIndex, dailyCommandCompletedWorkItemIds };
     if (mention) {
       const override = buildProjectOverrideView(state, today, mention.match.key);
       view = {
@@ -134,7 +139,8 @@ export function CommandBar() {
       view.personalFocus ?? undefined,
       view.personalReview,
       view.workRelevanceIndex,
-      state.workItemCalibrationHistory
+      state.workItemCalibrationHistory,
+      view.dailyCommandCompletedWorkItemIds
     );
     const answer = await getAIProvider().answerQuery(q, facts, evidence, recommendedAction);
     setResult(answer);

@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { computeAllReleaseHealth } from "@/lib/command-center/release-health";
 import { buildReleaseUpdateDraft } from "@/lib/command-center/communicate";
+import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { CommandCenterData, ReleaseHealth } from "@/lib/command-center/types";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
@@ -43,8 +44,18 @@ function ReleaseCard({ release, data }: { release: ReleaseHealth; data: CommandC
   );
 }
 
-export function ReleaseHealthPanel({ data, today }: { data: CommandCenterData; today: string }) {
-  const releases = computeAllReleaseHealth(data, today);
+export function ReleaseHealthPanel({
+  data,
+  today,
+  workRelevanceIndex,
+  dailyCommandCompletedWorkItemIds,
+}: {
+  data: CommandCenterData;
+  today: string;
+  workRelevanceIndex?: WorkRelevanceIndex;
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
+}) {
+  const releases = computeAllReleaseHealth(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   if (releases.length === 0) return null;
 
   return (

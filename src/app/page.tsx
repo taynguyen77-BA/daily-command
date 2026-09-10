@@ -22,6 +22,7 @@ import { ControlTower } from "@/components/command-center/ControlTower";
 import { YourDeliveryFocus } from "@/components/command-center/YourDeliveryFocus";
 import { MyAssignedWork } from "@/components/command-center/MyAssignedWork";
 import { RecentlyMentioned } from "@/components/command-center/RecentlyMentioned";
+import { WaitingFor } from "@/components/command-center/WaitingFor";
 import { AttentionQueuePanel } from "@/components/command-center/AttentionQueuePanel";
 import { ClientAttentionMap } from "@/components/command-center/ClientAttentionMap";
 import { BeforeYouTrustThisData } from "@/components/command-center/BeforeYouTrustThisData";
@@ -37,7 +38,7 @@ import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 type ViewMode = "operations" | "executive";
 
 export default function CommandCenterPage() {
-  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, store } = useCommandCenter();
+  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, store } = useCommandCenter();
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
   const [closingDay, setClosingDay] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("operations");
@@ -91,12 +92,25 @@ export default function CommandCenterPage() {
       {state.dataSource === "jira" && state.jiraSync.lastSyncStatus === "success" && (
         <>
           <BeforeYouTrustThisData
-            summary={buildBeforeYouTrustSummary(computeDataHealth(state.data, state.dataSource, state.jiraSync.lastSyncCompletedAt))}
+            summary={buildBeforeYouTrustSummary(
+              computeDataHealth(
+                state.data,
+                state.dataSource,
+                state.jiraSync.lastSyncCompletedAt,
+                undefined,
+                workRelevanceIndex,
+                // V2.22 §13 — this Global panel deliberately reads UNSCOPED state.data (it can
+                // include a project outside the current Focus Project Scope), so its own
+                // completion-id set is resolved against that same unscoped population rather
+                // than reusing the hook's scoped one.
+                new Set(state.data.workItems.filter((w) => Object.prototype.hasOwnProperty.call(state.dailyCommandCompletions ?? {}, w.key)).map((w) => w.id))
+              )
+            )}
             label={state.jiraProjectScope.mode === "FOCUSED" ? "Global" : undefined}
           />
           {state.jiraProjectScope.mode === "FOCUSED" && (
             <BeforeYouTrustThisData
-              summary={buildBeforeYouTrustSummary(computeDataHealth(filteredData, state.dataSource, state.jiraSync.lastSyncCompletedAt))}
+              summary={buildBeforeYouTrustSummary(computeDataHealth(filteredData, state.dataSource, state.jiraSync.lastSyncCompletedAt, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds))}
               label="Current Scope"
             />
           )}
@@ -206,23 +220,11 @@ export default function CommandCenterPage() {
             </section>
           )}
 
-          {/* V1.6 §42 — Operations Mode personal-focus additions. Focus Overload is already
-              surfaced by Your Delivery Focus above; these add the remaining two bullets. */}
-          {personalFocus && (personalFocus.byCategory.DO_NOW.length > 0 || personalFocus.byCategory.DO_TODAY.length > 0) && (
-            <section>
-              <SectionHeading title="My Next Actions" subtitle="Personal Focus Engine — DO NOW and DO TODAY." action={<Link href="/focus" className="text-xs font-medium text-accent2 hover:underline">Open My Day →</Link>} />
-              <div className="grid gap-2 md:grid-cols-2">
-                {[...personalFocus.byCategory.DO_NOW, ...personalFocus.byCategory.DO_TODAY].slice(0, 4).map((c) => (
-                  <Panel key={c.id} className="p-4">
-                    <FocusCategoryBadge category={c.category} />
-                    <p className="mt-1 font-display text-sm text-text">{c.title}</p>
-                    <p className="mt-1 text-xs text-text2">{c.nowWhat}</p>
-                  </Panel>
-                ))}
-              </div>
-            </section>
-          )}
-
+          {/* V2.21 §9.3, §10 — the standalone "My Next Actions" section (DO_NOW/DO_TODAY) was
+              removed here: it was a pure subset of what Your Delivery Focus (rendered once,
+              near the top of this page) already shows — the same candidates, the same
+              recommendation, rendered a second time. There is now exactly ONE primary "what
+              should I do next" surface on this page; Your Delivery Focus is it. */}
           {personalFocus && personalFocus.byCategory.BLOCKED.length > 0 && (
             <section>
               <SectionHeading title="Blocked Focus" subtitle="Personal focus items that cannot progress right now." />
@@ -322,6 +324,8 @@ export default function CommandCenterPage() {
             )}
           </section>
 
+          <WaitingFor data={filteredData} proactive={proactive} />
+
           <section>
             <SectionHeading
               title="What Might Go Wrong?"
@@ -349,30 +353,12 @@ export default function CommandCenterPage() {
             )}
           </section>
 
-          <section>
-            <SectionHeading
-              title="First 30 Minutes"
-              subtitle="Deterministic recommendation — priority-ordered from the Attention Queue, not automatic actions."
-              action={
-                <Link href="/action-plan" className="text-xs font-medium text-accent2 hover:underline">
-                  Build a full plan →
-                </Link>
-              }
-            />
-            <Panel className="p-4">
-              {!proactive || proactive.first30Minutes.length === 0 ? (
-                <p className="text-sm text-text3">No priority items fit the next 30 minutes.</p>
-              ) : (
-                <ol className="space-y-2 text-sm text-text2">
-                  {proactive.first30Minutes.map((f, i) => (
-                    <li key={i}>
-                      {i + 1}. {f.text}
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </Panel>
-          </section>
+          {/* V2.21 §9.3, §10 — the standalone "First 30 Minutes" section was removed here: it
+              answered the exact same question ("what can I do right now?") as Your Delivery
+              Focus's own "If you only have 30 minutes" list, rendered near the top of this
+              page, just from a slightly different underlying computation. One canonical
+              Next Up surface, not two. The full Action Plan remains one click away via the
+              primary nav. */}
 
           <section>
             <SectionHeading title="Who Should I Communicate With?" subtitle="Detected from blockers, deadlines, and unresolved decisions." />

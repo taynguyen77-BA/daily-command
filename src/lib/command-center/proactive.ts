@@ -94,7 +94,7 @@ export function computeProactiveIntelligence(
   const trajectory = computeTrajectory(dailyHistory, currentMetrics);
   const riskEscalations = computeRiskEscalations(derived.risks, dailyHistory, today);
   const dependencyRadar = computeDependencyRadar(data, derived.risks, today);
-  const releaseHealths = computeAllReleaseHealth(data, today);
+  const releaseHealths = computeAllReleaseHealth(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today);
   const actionEffectiveness = computeActionEffectiveness(data);
   const ineffective = ineffectiveActions(actionEffectiveness, data.actions);
@@ -196,7 +196,7 @@ export function computeProactiveIntelligence(
     gatedAttentionQueue.push(item);
   }
 
-  const first30Minutes = buildFirst30Minutes(gatedAttentionQueue, data, today, workRelevanceIndex);
+  const first30Minutes = buildFirst30Minutes(gatedAttentionQueue, data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   // V2.1 §4 — fixes a confirmed bug: this used to pass the full-history `actionEffectiveness`
   // array (every completed action ever) into a parameter literally named "actionsToday",
   // which is why the Outcome Scorecard's counts and Close Day's ACTIONS section could

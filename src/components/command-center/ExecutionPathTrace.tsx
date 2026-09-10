@@ -62,6 +62,7 @@ export function ExecutionPathTrace({
   workRelevanceIndex,
   proactive,
   personalFocus,
+  dailyCommandCompletedWorkItemIds,
 }: {
   item: WorkItem;
   data: CommandCenterData;
@@ -69,6 +70,9 @@ export function ExecutionPathTrace({
   workRelevanceIndex: WorkRelevanceIndex;
   proactive: ProactiveIntelligence | null;
   personalFocus: PersonalFocusResult | null;
+  // V2.21 §3 — optional/additive: folds Daily Command Completion into the trace so it agrees
+  // with Action Plan/Personal Focus about a completed item.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
 }) {
   const [open, setOpen] = useState(false);
   const [openWhy, setOpenWhy] = useState<ExecutionSurface | null>(null);
@@ -78,7 +82,7 @@ export function ExecutionPathTrace({
   // own gate).
   if (item.sourceType !== "jira") return null;
 
-  const trace = computeExecutionPathTrace(item, data, today, workRelevanceIndex, proactive, personalFocus);
+  const trace = computeExecutionPathTrace(item, data, today, workRelevanceIndex, proactive, personalFocus, dailyCommandCompletedWorkItemIds);
 
   function toggleWhy(surface: ExecutionSurface) {
     setOpenWhy((cur) => (cur === surface ? null : surface));
