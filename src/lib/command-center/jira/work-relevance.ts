@@ -153,6 +153,36 @@ export function isPersonalWorkEligibleItem(item: Pick<WorkItem, "sourceType" | "
   return isPersonalWorkEligible(resolveWorkRelevance(item, index));
 }
 
+/** V2.19 (bug fix) — the ONE canonical "is this ticket finished?" check, combining two
+ *  independent completion signals: Jira's own statusCategory (`WorkItem.status === "Done"` —
+ *  always available, zero configuration, derived in jira/mapping.ts's mapStatus from Jira's
+ *  own `statusCategory.key === "done"`, and already the exact signal action-plan.ts's
+ *  buildCandidates() uses to hard-exclude a finished item) OR the Work Relevance Policy's
+ *  explicit COMPLETED/EXCLUDED classification of the exact raw status name (opt-in, requires
+ *  the user to have classified that status in Data & Settings).
+ *
+ *  Confirmed bug this closes: every personal-work surface EXCEPT one already treats an
+ *  unclassified status conservatively (UNKNOWN is never eligible — see isPersonalWorkEligible
+ *  above), so a Jira-Done-but-not-yet-classified ticket was already excluded from My Day/
+ *  Action Plan by construction. The one exception is a MENTION attention item: it
+ *  deliberately bypasses the Work Relevance gate entirely (a mention is a personal signal
+ *  regardless of ticket status — see personal-focus.ts/proactive.ts's own "§1b" comments), so
+ *  its own safety net for "the ticket this mention lives on is actually finished" needs an
+ *  explicit check — and that check previously consulted ONLY the opt-in policy, so a mention
+ *  on a genuinely Jira-Done ticket kept surfacing in Your Delivery Focus/the Attention Queue
+ *  forever on any install where the user hadn't yet visited Data & Settings to classify that
+ *  exact status name. This function gives that one call site (see proactive.ts's
+ *  completedOrExcludedWorkItemIds) the same zero-config floor every other surface already had.
+ *  Never the reverse: an item whose native status is NOT "Done" and whose exact status name is
+ *  still UNKNOWN in the policy is correctly NOT reported finished here — conservatism (§26) is
+ *  preserved, this only adds a floor under it, never removes it. */
+export function isWorkItemDoneOrExcluded(item: Pick<WorkItem, "status" | "sourceType" | "projectId" | "jiraStatusName">, index: WorkRelevanceIndex | undefined): boolean {
+  if (item.status === "Done") return true;
+  if (!index) return false;
+  const relevance = resolveWorkRelevance(item, index);
+  return relevance === "COMPLETED" || relevance === "EXCLUDED";
+}
+
 /** §9 — the exact, deterministic explanation text for each classification, reused verbatim
  *  by Data & Settings, the "why isn't this on my list?" trust flow, and Command Bar. */
 export const WORK_RELEVANCE_EXPLANATIONS: Record<WorkRelevance, string> = {

@@ -15,7 +15,7 @@ import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
 import { computeDeliveryDrift, computeTrajectory } from "./delivery-drift";
 import { buildFirst30Minutes } from "./first-30-minutes";
-import { resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { isWorkItemDoneOrExcluded, resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { buildDailySnapshot, dailyCanonicalSnapshots } from "./memory";
 import { computeOutcomeScorecard } from "./outcome-scorecard";
 import { computeAllReleaseHealth } from "./release-health";
@@ -72,7 +72,14 @@ export function computeProactiveIntelligence(
   // every other one above: the configured PersonalIdentity's displayName, needed alongside
   // `identityOwnerId` so AttentionItem.relation can fall back to displayName matching exactly
   // like every other identity comparison in this app (see personal-relation.ts).
-  identityDisplayName?: string
+  identityDisplayName?: string,
+  // V2.19 — additive/optional trailing parameter, same no-op-when-omitted contract as every
+  // parameter above: work item ids the user has explicitly marked completed IN DAILY COMMAND
+  // (see store.ts's dailyCommandCompletions, keyed by ticket key there and resolved to
+  // WorkItem ids by the caller — use-command-center.ts) — a fact distinct from the Jira
+  // issue's own status. Folded into the same forceResolved/exclusion mechanisms as a
+  // Jira-COMPLETED/EXCLUDED ticket below, never a second suppression system.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
 
@@ -108,16 +115,16 @@ export function computeProactiveIntelligence(
   // V2.17 §1a point 5 — resolved once, before buildAttentionQueue, so a still-open MENTION
   // tied to one of these work items can auto-resolve (see attention-queue.ts's forceResolved).
   // Deliberately not threaded for ASSIGNMENT — see that task's own scope note.
-  const completedOrExcludedWorkItemIds = workRelevanceIndex
-    ? new Set(
-        data.workItems
-          .filter((w) => {
-            const relevance = resolveWorkRelevance(w, workRelevanceIndex);
-            return relevance === "COMPLETED" || relevance === "EXCLUDED";
-          })
-          .map((w) => w.id)
-      )
-    : undefined;
+  // V2.19 (bug fix) — now built unconditionally (never gated behind `workRelevanceIndex`
+  // existing at all): isWorkItemDoneOrExcluded's native-status floor works even with no policy
+  // configured, closing the exact gap where a MENTION on a genuinely Jira-Done ticket used to
+  // linger forever on an install where the user hadn't classified that status name yet (see
+  // that function's own comment). A Daily-Command-completed ticket (§ Daily Command
+  // Completion) is folded into the same set — from the ticket's perspective, both are "there
+  // is nothing left to do here", so both use the identical forceResolved mechanism.
+  const completedOrExcludedWorkItemIds = new Set(
+    data.workItems.filter((w) => isWorkItemDoneOrExcluded(w, workRelevanceIndex) || dailyCommandCompletedWorkItemIds?.has(w.id)).map((w) => w.id)
+  );
 
   const { items: attentionQueue, nextAttentionState } = buildAttentionQueue(
     {

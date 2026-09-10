@@ -139,6 +139,7 @@ import {
   explainWorkItemRelevance,
   isPersonalWorkEligible,
   isPersonalWorkEligibleItem,
+  isWorkItemDoneOrExcluded,
   jiraProjectKeyForWorkItem,
   listUnclassifiedJiraStatuses,
   parseWorkRelevancePolicyMap,
@@ -207,6 +208,12 @@ import { decideInitialSync, extractSyncedAppState, looksUnused, mergeSyncedAppSt
 
 // V2.16 — sync-failure visibility (see the V2.16 test section near the end of this file)
 import { daysStale } from "../src/components/command-center/Header";
+
+// V2.19 — Personal Work & Reporting Hardening: My Assigned Work, Recently Mentioned, Daily
+// Command Completion
+import { getActiveAssignedWorkItems, getAssignedWorkItems, getCompletedAssignedWorkItems } from "../src/lib/command-center/assigned-work";
+import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions } from "../src/lib/command-center/recent-mentions";
+import type { DailyCommandCompletion } from "../src/lib/command-center/types";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -8259,6 +8266,262 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.17 Sync route wiring", /import \{ buildMentionEvents, selectRecentMentionCandidates \}/.test(syncRouteSrc2), "the route imports the shared, directly-tested selectRecentMentionCandidates rather than a second inline implementation");
   ok("V2.17 Sync route wiring", /selectRecentMentionCandidates\(issuesResult\.data, checkedKeys, Date\.now\(\)\)/.test(syncRouteSrc2), "the recency fallback runs over this sync's own already-fetched issue batch (never a second Jira fetch) and excludes issues the JQL search already covered");
   ok("V2.17 Sync route wiring", (syncRouteSrc2.match(/buildMentionEvents\(issue\.key, commentsResult\.data, accountId/g) ?? []).length === 2, "both the JQL-search pass and the recency-fallback pass call the exact same buildMentionEvents/commentMentionsAccount verification — no second, divergent detection rule for the fallback path");
+}
+
+// ===================================================================================
+// V2.19 — Personal Work & Reporting Hardening: Assigned/Mentioned/Completion/Focus/Reports
+// ===================================================================================
+
+// ----- isWorkItemDoneOrExcluded — the root-cause fix. A MENTION attention item bypasses the
+// Work Relevance gate entirely (§1b — a mention is a personal signal regardless of ticket
+// status), so its own "is this ticket actually finished?" safety net (proactive.ts's
+// completedOrExcludedWorkItemIds) previously consulted ONLY the opt-in Work Relevance Policy —
+// on a fresh install (empty policy map, the default), a mention on a ticket that is genuinely
+// Done in Jira kept surfacing in Your Delivery Focus/the Attention Queue forever. This is the
+// zero-config floor: Jira's own statusCategory-derived native `status === "Done"` (already the
+// exact signal action-plan.ts's buildCandidates() hard-excludes on) is now consulted too. -----
+{
+  const doneNative = jiraItem({ id: "wi-done-native", key: "JPMC-800", status: "Done", jiraStatusName: "Some Custom Done-ish Status Nobody Classified" });
+  const notDoneNative = jiraItem({ id: "wi-not-done", key: "JPMC-801", status: "In Progress", jiraStatusName: "Some Custom Status Nobody Classified" });
+
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(doneNative, undefined) === true, "native status Done is finished even with NO Work Relevance index at all — the zero-config floor");
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(notDoneNative, undefined) === false, "a non-Done native status with no index is correctly NOT finished — conservatism is unaffected, this only adds a floor");
+
+  const emptyIdx = buildWorkRelevanceIndex({});
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(doneNative, emptyIdx) === true, "native status Done is finished even with an EMPTY policy map (fresh install, nothing classified yet)");
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(notDoneNative, emptyIdx) === false, "a non-Done, unclassified status stays NOT finished — UNKNOWN is still conservative");
+
+  const classifiedIdx = buildWorkRelevanceIndex(globalPolicy({ "Won't Fix": "EXCLUDED", "Ready for UAT/Business Test": "OBSERVE", "To Do": "ACTIONABLE" }));
+  const excludedByPolicy = jiraItem({ id: "wi-excl-policy", key: "JPMC-802", status: "In Progress", jiraStatusName: "Won't Fix" });
+  const observeByPolicy = jiraItem({ id: "wi-obs-policy", key: "JPMC-803", status: "In Progress", jiraStatusName: "Ready for UAT/Business Test" });
+  const actionableByPolicy = jiraItem({ id: "wi-act-policy", key: "JPMC-804", status: "In Progress", jiraStatusName: "To Do" });
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(excludedByPolicy, classifiedIdx) === true, "an explicit policy EXCLUDED classification is finished, even though native status isn't Done");
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(observeByPolicy, classifiedIdx) === false, "OBSERVE is never finished");
+  ok("V2.19 isWorkItemDoneOrExcluded", isWorkItemDoneOrExcluded(actionableByPolicy, classifiedIdx) === false, "ACTIONABLE is never finished");
+}
+
+// ----- The end-to-end fix: a MENTION on a ticket that is genuinely Done in Jira (native
+// status) but whose exact raw status name has never been classified in the Work Relevance
+// Policy now auto-resolves — closing the exact "why is this completed ticket still asking me
+// to focus on it?" complaint, with zero configuration required. -----
+{
+  const mdcDoneTicket = jiraItem({ id: "wi-mdc2-done", key: "JPMC-900", status: "Done", jiraStatusName: "Some Bespoke Terminal Status" });
+  const mdcOpenTicket = jiraItem({ id: "wi-mdc2-open", key: "JPMC-901", status: "In Progress", jiraStatusName: "In Progress" });
+  const mdc2Data: CommandCenterData = { ...emptyData(), workItems: [mdcDoneTicket, mdcOpenTicket] };
+  const mdc2Derived = deriveData(mdc2Data, null, TODAY);
+  const mdc2Mentions = [
+    { issueKey: mdcDoneTicket.key, commentId: `c-${mdcDoneTicket.key}`, excerpt: "please check", mentionedAt: TODAY },
+    { issueKey: mdcOpenTicket.key, commentId: `c-${mdcOpenTicket.key}`, excerpt: "please check", mentionedAt: TODAY },
+  ];
+
+  // No policy configured at all (undefined index) — the exact fresh-install scenario.
+  const mdc2NoIndex = computeProactiveIntelligence(mdc2Data, mdc2Derived, [], null, {}, "jira", TODAY, undefined, mdc2Mentions);
+  const findMention = (bundle: typeof mdc2NoIndex, key: string) => bundle.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}:${slug(`c-${key}`)}`);
+  ok(
+    "V2.19 root-cause fix — MENTION on native-Done ticket",
+    findMention(mdc2NoIndex, mdcDoneTicket.key)?.lifecycle === "RESOLVED",
+    "a MENTION on a native-status-Done ticket auto-resolves even with NO Work Relevance index configured at all — the confirmed root cause of 'completed tickets keep appearing' is fixed"
+  );
+  ok("V2.19 root-cause fix — MENTION on native-Done ticket", findMention(mdc2NoIndex, mdcOpenTicket.key)?.lifecycle === "NEW", "a MENTION on a genuinely open ticket is unaffected");
+
+  // Also holds with an empty (but present) index.
+  const mdc2EmptyIndex = computeProactiveIntelligence(mdc2Data, mdc2Derived, [], null, {}, "jira", TODAY, buildWorkRelevanceIndex({}), mdc2Mentions);
+  ok("V2.19 root-cause fix — MENTION on native-Done ticket", findMention(mdc2EmptyIndex, mdcDoneTicket.key)?.lifecycle === "RESOLVED", "same result with an empty (rather than undefined) policy map");
+
+  // And the fix also means such a ticket's mention never reaches Your Delivery Focus.
+  const mdc2Focus = computePersonalFocus(mdc2Data, mdc2NoIndex, "Alice", TODAY);
+  ok(
+    "V2.19 root-cause fix — Your Delivery Focus",
+    !mdc2Focus.candidates.some((c) => c.ticketKey === mdcDoneTicket.key),
+    "the resolved MENTION never produces a Personal Focus candidate — it never reaches Your Delivery Focus/Today/Top 3/the 30-minute plan"
+  );
+}
+
+// ----- Daily Command Completion — a distinct execution fact from Jira Completion and Action
+// Completion (§ types.ts's DailyCommandCompletion). Marking a ticket completed IN DAILY
+// COMMAND suppresses it from active surfaces regardless of the Jira issue's own status. -----
+{
+  commandCenterStore.resetAll();
+  ok("V2.19 Daily Command Completion", Object.keys(commandCenterStore.getSnapshot().dailyCommandCompletions).length === 0, "starts empty — nothing completed by default");
+
+  commandCenterStore.completeTicketInDailyCommand("JPMC-1000");
+  const afterComplete = commandCenterStore.getSnapshot().dailyCommandCompletions;
+  ok("V2.19 Daily Command Completion", !!afterComplete["JPMC-1000"], "completeTicketInDailyCommand records a completion, keyed by ticket key");
+  ok("V2.19 Daily Command Completion", typeof afterComplete["JPMC-1000"].completedAt === "string" && afterComplete["JPMC-1000"].completedAt.length > 0, "records a real completedAt timestamp");
+
+  commandCenterStore.reopenTicketInDailyCommand("JPMC-1000");
+  ok("V2.19 Daily Command Completion", !commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-1000"], "reopenTicketInDailyCommand clears the completion — the only way back, and it's always explicit");
+
+  // Reopening something never completed is a safe no-op.
+  commandCenterStore.reopenTicketInDailyCommand("JPMC-NEVER-COMPLETED");
+  ok("V2.19 Daily Command Completion", Object.keys(commandCenterStore.getSnapshot().dailyCommandCompletions).length === 0, "reopening a ticket with no recorded completion is a no-op, not a crash");
+  commandCenterStore.resetAll();
+}
+
+// ----- Daily Command Completion — parseStoredState round-trip + defensive parsing -----
+{
+  const validBlob2 = JSON.stringify({ loaded: true, dailyCommandCompletions: { "JPMC-1": { ticketKey: "JPMC-1", completedAt: "2026-06-15T10:00:00.000Z", completedBy: "Alice" } } });
+  const parsed2 = parseStoredState(validBlob2);
+  ok("V2.19 Daily Command Completion parsing", parsed2.dailyCommandCompletions["JPMC-1"]?.completedBy === "Alice", "a well-formed persisted completion round-trips through parseStoredState");
+
+  const malformedBlob = JSON.stringify({
+    loaded: true,
+    dailyCommandCompletions: {
+      "JPMC-1": { ticketKey: "JPMC-1", completedAt: "2026-06-15T10:00:00.000Z" }, // valid, no completedBy
+      "JPMC-2": { ticketKey: "JPMC-2" }, // missing completedAt — dropped
+      "JPMC-3": "not-an-object", // dropped
+      "JPMC-4": null, // dropped
+    },
+  });
+  const parsedMalformed = parseStoredState(malformedBlob);
+  ok("V2.19 Daily Command Completion parsing", Object.keys(parsedMalformed.dailyCommandCompletions).length === 1 && !!parsedMalformed.dailyCommandCompletions["JPMC-1"], "a malformed entry is dropped rather than trusted or crashing the parse — same discipline as every other persisted field");
+
+  const noFieldAtAll = parseStoredState(JSON.stringify({ loaded: true }));
+  ok("V2.19 Daily Command Completion parsing", Object.keys(noFieldAtAll.dailyCommandCompletions).length === 0, "a pre-V2.19 persisted blob with no dailyCommandCompletions field at all degrades to empty, never a crash");
+}
+
+// ----- personal-focus.ts's evaluateWorkRelevanceGate now also excludes a Daily-Command-
+// completed ticket — independent of the ticket's own Jira status (even ACTIONABLE), and
+// independent of whether a Work Relevance index is configured at all. -----
+{
+  const dccWorkItem = jiraItem({ id: "wi-dcc-focus", key: "JPMC-1100", jiraStatusName: "To Do" });
+  const dccIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
+  const dccDrift = { id: "DRIFT:dcc-focus-item", category: "DRIFT" as const, severity: "HIGH" as const, what: "x", why: "x", impact: "x", nowWhat: "x", evidence: [], lifecycle: "ACTIVE" as const, firstSeenDate: TODAY, lastSeenDate: TODAY, sourceRef: { type: "workItem" as const, id: dccWorkItem.id } };
+  const dccData2: CommandCenterData = { ...emptyData(), workItems: [dccWorkItem] };
+  const dccProactive = fakeProactive([dccDrift]);
+
+  const withoutCompletion = computePersonalFocus(dccData2, dccProactive, "Alice", TODAY, undefined, dccIdx);
+  ok("V2.19 Daily Command Completion gate", withoutCompletion.candidates.some((c) => c.sourceId === dccDrift.id), "sanity check — the candidate exists before any completion is recorded");
+
+  const withCompletion = computePersonalFocus(dccData2, dccProactive, "Alice", TODAY, undefined, dccIdx, undefined, undefined, new Set([dccWorkItem.id]));
+  ok("V2.19 Daily Command Completion gate", !withCompletion.candidates.some((c) => c.sourceId === dccDrift.id), "a Daily-Command-completed ticket's DRIFT candidate is excluded — even though its Jira status is still ACTIONABLE");
+
+  // Omitting the new trailing parameter entirely (every pre-V2.19 call site) is an exact no-op.
+  const omittedParam = computePersonalFocus(dccData2, dccProactive, "Alice", TODAY, undefined, dccIdx);
+  ok("V2.19 Daily Command Completion gate", omittedParam.candidates.some((c) => c.sourceId === dccDrift.id), "omitting the new parameter reproduces pre-V2.19 behavior exactly — every existing call site is unaffected");
+}
+
+// ----- assigned-work.ts — "My Assigned Work": the FULL assigned population, never a curated
+// subset (§28's non-negotiable: full assigned work != full Personal Focus). -----
+{
+  const alice = { displayName: "Alice", accountId: "acc-alice" };
+  const assignedOpen = jiraItem({ id: "wi-aw-open", key: "JPMC-1200", status: "Not Started", jiraStatusName: "To Do", ownerId: "acc-alice", owner: "Alice" });
+  const assignedInProgress = jiraItem({ id: "wi-aw-ip", key: "JPMC-1201", status: "In Progress", jiraStatusName: "In Progress", ownerId: "acc-alice", owner: "Alice" });
+  const assignedCompleted = jiraItem({ id: "wi-aw-done", key: "JPMC-1202", status: "Done", jiraStatusName: "Done", ownerId: "acc-alice", owner: "Alice" });
+  const assignedToBob = jiraItem({ id: "wi-aw-bob", key: "JPMC-1203", status: "In Progress", jiraStatusName: "In Progress", ownerId: "acc-bob", owner: "Bob" });
+  const awItems = [assignedOpen, assignedInProgress, assignedCompleted, assignedToBob];
+
+  ok("V2.19 assigned-work — full population", getAssignedWorkItems(awItems, alice).length === 3, "every item assigned to the configured identity is discoverable, regardless of status");
+  ok("V2.19 assigned-work — no identity", getAssignedWorkItems(awItems, {}).length === 0, "no identity configured at all -> empty, never a guess");
+
+  const active = getActiveAssignedWorkItems(awItems, alice, undefined);
+  ok("V2.19 assigned-work — active", active.length === 2 && active.every((w) => w.key !== assignedCompleted.key), "an OPEN and an IN PROGRESS assigned item are both active; the COMPLETED (native Done) one is not, even with no Work Relevance index");
+  const completedBucket = getCompletedAssignedWorkItems(awItems, alice, undefined);
+  ok("V2.19 assigned-work — completed", completedBucket.length === 1 && completedBucket[0].key === assignedCompleted.key, "the completed bucket contains exactly the finished item");
+
+  // 100 assigned items — all discoverable, none silently dropped by a scoring threshold.
+  const many = Array.from({ length: 100 }, (_, i) => jiraItem({ id: `wi-aw-many-${i}`, key: `JPMC-2${String(i).padStart(3, "0")}`, status: "In Progress", jiraStatusName: "In Progress", ownerId: "acc-alice", owner: "Alice" }));
+  ok("V2.19 assigned-work — full population at scale", getAssignedWorkItems(many, alice).length === 100, "100 assigned items are all discoverable — no eligibilityScore/candidate-pool threshold silently restricts this surface");
+
+  // Daily Command Completion suppresses even an otherwise-active assigned item.
+  const activeWithDcc = getActiveAssignedWorkItems(awItems, alice, undefined, new Set([assignedOpen.key]));
+  ok("V2.19 assigned-work — Daily Command Completion", !activeWithDcc.some((w) => w.key === assignedOpen.key), "a Daily-Command-completed ticket is excluded from the active bucket even though its Jira status is still open");
+  const completedWithDcc = getCompletedAssignedWorkItems(awItems, alice, undefined, new Set([assignedOpen.key]));
+  ok("V2.19 assigned-work — Daily Command Completion", completedWithDcc.some((w) => w.key === assignedOpen.key), "...and appears in the completed bucket instead");
+}
+
+// ----- recent-mentions.ts — "Recently Mentioned": a real last-24-hours rolling window, never
+// a calendar day or lifecycle-only persistence. -----
+{
+  const nowMs = new Date("2026-06-15T12:00:00.000Z").getTime();
+  const oneHourAgo = new Date(nowMs - 1 * 60 * 60 * 1000).toISOString();
+  const justUnder24h = new Date(nowMs - (24 * 60 * 60 * 1000 - 60 * 1000)).toISOString(); // 23h59m
+  const justOver24h = new Date(nowMs - (24 * 60 * 60 * 1000 + 60 * 1000)).toISOString(); // 24h01m
+  const rmWorkItem = jiraItem({ id: "wi-rm-1", key: "JPMC-1300", jiraStatusName: "In Progress" });
+
+  const windowEvents = [
+    { issueKey: "JPMC-1300", commentId: "c-1h", excerpt: "recent", mentionedAt: oneHourAgo },
+    { issueKey: "JPMC-1301", commentId: "c-23h59", excerpt: "borderline-in", mentionedAt: justUnder24h },
+    { issueKey: "JPMC-1302", commentId: "c-24h01", excerpt: "borderline-out", mentionedAt: justOver24h },
+  ];
+  const windowResult = selectRecentMentions(windowEvents, [rmWorkItem], {}, nowMs);
+  ok("V2.19 recent-mentions — window", windowResult.some((m) => m.issueKey === "JPMC-1300"), "a mention 1 hour ago is shown");
+  ok("V2.19 recent-mentions — window", windowResult.some((m) => m.issueKey === "JPMC-1301"), "a mention 23h59m ago is shown — inside the 24h window");
+  ok("V2.19 recent-mentions — window", !windowResult.some((m) => m.issueKey === "JPMC-1302"), "a mention 24h01m ago is NOT shown — outside the 24h window");
+  ok("V2.19 recent-mentions — constant", RECENT_MENTION_WINDOW_HOURS === 24, "the documented window is exactly 24 hours");
+
+  // Dedup — multiple mentions on the same ticket within the window fold into one, latest wins.
+  const dupeEvents = [
+    { issueKey: "JPMC-1400", commentId: "c-early", excerpt: "first", mentionedAt: new Date(nowMs - 3 * 60 * 60 * 1000).toISOString() },
+    { issueKey: "JPMC-1400", commentId: "c-late", excerpt: "second, most recent", mentionedAt: new Date(nowMs - 1 * 60 * 60 * 1000).toISOString() },
+  ];
+  const dupeResult = selectRecentMentions(dupeEvents, [], {}, nowMs);
+  ok("V2.19 recent-mentions — dedupe", dupeResult.filter((m) => m.issueKey === "JPMC-1400").length === 1, "the same ticket mentioned twice within the window shows once, not as two cards");
+  const dupeCard = dupeResult.find((m) => m.issueKey === "JPMC-1400");
+  ok("V2.19 recent-mentions — dedupe", dupeCard?.commentId === "c-late" && dupeCard?.groupCount === 2, "the folded card represents the LATEST mention and reports the real count (2)");
+
+  // A resolved/snoozed attention item suppresses its mention here too.
+  const suppressEvents = [{ issueKey: "JPMC-1500", commentId: "c-resolved", excerpt: "x", mentionedAt: oneHourAgo }];
+  const resolvedState = { [`MENTION:${slug("JPMC-1500")}:${slug("c-resolved")}`]: { lifecycle: "RESOLVED" as const, firstSeenDate: TODAY, lastSeenDate: TODAY, resolvedManually: true } };
+  ok("V2.19 recent-mentions — resolved suppression", selectRecentMentions(suppressEvents, [], resolvedState, nowMs).length === 0, "a mention already Resolved on the Attention Queue does not also surface here");
+
+  // Different project from another mention — this function has no scope concept of its own
+  // (the caller is responsible for pre-scoping via scopeMentionEvents, same as every other
+  // engine in this codebase); verify it simply passes through whatever it's given.
+  ok("V2.19 recent-mentions — no built-in scope", selectRecentMentions([{ issueKey: "UBS-1", commentId: "c-1", excerpt: "x", mentionedAt: oneHourAgo }], [], {}, nowMs).length === 1, "selectRecentMentions itself has no project-scope filtering — callers pre-scope via scopeMentionEvents, same discipline as every other engine");
+
+  // Empty state.
+  ok("V2.19 recent-mentions — empty state", selectRecentMentions([], [], {}, nowMs).length === 0, "no mention events at all -> empty result, rendered as an honest empty state, never a fabricated 'nothing happened'");
+}
+
+// ----- recent-mentions.ts — Daily Command Completion reactivation (§14 Reactivation Rule):
+// completing a ticket suppresses its mentions, but a genuinely NEW mention after the
+// completion timestamp reactivates it here — and ONLY here (never auto-creating an Action). ---
+{
+  const nowMs2 = new Date("2026-06-15T18:00:00.000Z").getTime();
+  const completedAt = new Date(nowMs2 - 5 * 60 * 60 * 1000).toISOString(); // completed 5h ago
+  const oldMentionBeforeCompletion = new Date(nowMs2 - 6 * 60 * 60 * 1000).toISOString(); // 1h before completion
+  const newMentionAfterCompletion = new Date(nowMs2 - 1 * 60 * 60 * 1000).toISOString(); // 4h after completion
+
+  const completions: Record<string, DailyCommandCompletion> = { "JPMC-1600": { ticketKey: "JPMC-1600", completedAt } };
+
+  const beforeReactivation = selectRecentMentions([{ issueKey: "JPMC-1600", commentId: "c-old", excerpt: "old", mentionedAt: oldMentionBeforeCompletion }], [], {}, nowMs2, { dailyCommandCompletions: completions });
+  ok("V2.19 recent-mentions — Daily Command Completion suppression", beforeReactivation.length === 0, "a mention from BEFORE the Daily Command completion stays suppressed");
+
+  const afterReactivation = selectRecentMentions([{ issueKey: "JPMC-1600", commentId: "c-new", excerpt: "new", mentionedAt: newMentionAfterCompletion }], [], {}, nowMs2, { dailyCommandCompletions: completions });
+  ok("V2.19 recent-mentions — reactivation", afterReactivation.length === 1 && afterReactivation[0].commentId === "c-new", "a genuinely NEW mention strictly after the completion timestamp reactivates the ticket into Recently Mentioned");
+
+  // Both an old (suppressed) and a new (reactivating) mention on the same ticket — only the
+  // new one surfaces, and the group count reflects only what's actually shown.
+  const mixed = selectRecentMentions(
+    [
+      { issueKey: "JPMC-1600", commentId: "c-old", excerpt: "old", mentionedAt: oldMentionBeforeCompletion },
+      { issueKey: "JPMC-1600", commentId: "c-new", excerpt: "new", mentionedAt: newMentionAfterCompletion },
+    ],
+    [],
+    {},
+    nowMs2,
+    { dailyCommandCompletions: completions }
+  );
+  ok("V2.19 recent-mentions — reactivation", mixed.length === 1 && mixed[0].groupCount === 1, "only the reactivating mention is shown — the pre-completion one never counts toward the group");
+}
+
+// ----- assigned-work.ts / recent-mentions.ts source wiring — confirms the new surfaces are
+// actually mounted on the main dashboard, not stranded as dead code only this test file
+// exercises. -----
+{
+  const repoRoot = path.resolve(process.cwd());
+  const pageSrc2 = fs.readFileSync(path.join(repoRoot, "src/app/page.tsx"), "utf8");
+  ok("V2.19 UI wiring", /<MyAssignedWork \/>/.test(pageSrc2), "My Assigned Work is rendered on the main Command Center page");
+  ok("V2.19 UI wiring", /<RecentlyMentioned \/>/.test(pageSrc2), "Recently Mentioned is rendered on the main Command Center page");
+
+  const myAssignedSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/MyAssignedWork.tsx"), "utf8");
+  ok("V2.19 UI wiring", /No active Jira work is currently assigned to you/.test(myAssignedSrc), "My Assigned Work has the documented empty state, not a silent 'nothing happened' implication");
+  ok("V2.19 UI wiring", /getActiveAssignedWorkItems/.test(myAssignedSrc) && /getCompletedAssignedWorkItems/.test(myAssignedSrc), "the component reuses the shared selector, not a second inline ownership/completion check");
+
+  const recentMentionedSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/RecentlyMentioned.tsx"), "utf8");
+  ok("V2.19 UI wiring", /No Jira mentions in the last 24 hours/.test(recentMentionedSrc), "Recently Mentioned has the documented empty state");
+  ok("V2.19 UI wiring", /selectRecentMentions/.test(recentMentionedSrc), "the component reuses the shared selector, not a second inline window/dedupe implementation");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

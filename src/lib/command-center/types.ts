@@ -1558,4 +1558,25 @@ export interface MyActionItemsOnlyByPage {
   priorities: boolean;
 }
 
+// ===== V2.19 — Daily Command Completion =====
+// A Daily Command Completion is a distinct execution fact from Jira Completion (the Jira
+// issue's own Work Relevance) and from Action Completion (a user-created Action's own
+// `status`, see Action.completedAt above): the user has told Daily Command "I'm done with
+// this ticket here", independent of whether Jira's own status ever changes and independent of
+// any one specific Action/Mention/attention signal tied to it. Keyed by the Jira issue KEY
+// (never an internal WorkItem.id, which is source-specific and would break across a re-sync
+// — see jira/normalize.ts's `jira-${issue.key}` id derivation) so the same identity used by
+// WorkItem.key, MentionEvent.issueKey, AttentionItem.ticketKey, and
+// PersonalFocusCandidate.ticketKey applies here too, with no second identity scheme. Never
+// mutates Jira, never mutates an existing Action — see personal-focus.ts/assigned-work.ts/
+// recent-mentions.ts for where this suppresses a ticket from active surfaces, and
+// recent-mentions.ts's own comment for the one deliberate exception (a genuinely new mention
+// after `completedAt` still reactivates the ticket into Recently Mentioned, never into an
+// Action).
+export interface DailyCommandCompletion {
+  ticketKey: string;
+  completedAt: string; // ISO datetime (not just a date — same precision as MentionEvent.mentionedAt, needed for reactivation comparisons)
+  completedBy?: string; // PersonalIdentity.displayName at the moment of completion, when configured
+}
+
 export const DATA_SCHEMA_VERSION = 5;

@@ -296,7 +296,8 @@ function candidateFromAttentionItem(
   workRelevanceIndex: WorkRelevanceIndex | undefined,
   allRisks: Risk[] | undefined,
   relationIdentity: PersonalRelationIdentity,
-  mentionedIssueKeys: ReadonlySet<string>
+  mentionedIssueKeys: ReadonlySet<string>,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
   const entity = resolveAttentionEntity(item, data, allRisks ?? data.risks);
   // V2.17 §1b — reverses V2.13 §1's "option 3b" for MENTION specifically: a mention always
@@ -307,8 +308,10 @@ function candidateFromAttentionItem(
   // COMPLETED/EXCLUDED ticket's mention is still excluded from My Day, just via a different
   // mechanism: attention-queue.ts auto-resolves it (RESOLVED lifecycle), and this file's own
   // `eligibleAttention` filter (see computePersonalFocus) already drops RESOLVED items before
-  // they ever reach this function.
-  const relevanceGate = item.category === "MENTION" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex);
+  // they ever reach this function. The same forceResolved mechanism also covers a
+  // Daily-Command-completed ticket's mention (see proactive.ts's completedOrExcludedWorkItemIds),
+  // so MENTION never needs to consult `dailyCommandCompletedWorkItemIds` directly here either.
+  const relevanceGate = item.category === "MENTION" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   if (relevanceGate === "EXCLUDE") return null;
   const resolution = resolveOwner(entity, data);
   const { label: ownerLabel } = resolution;
@@ -402,7 +405,21 @@ function candidateFromAttentionItem(
  *  is produced at all — matching action-plan.ts's full exclusion for the same statuses. */
 type RelevanceGate = "PASS" | "FORCE_WATCH" | "EXCLUDE";
 
-function evaluateWorkRelevanceGate(workItemIds: string[], data: CommandCenterData, workRelevanceIndex: WorkRelevanceIndex | undefined): RelevanceGate {
+/** V2.19 — `dailyCommandCompletedWorkItemIds` is an additive/optional trailing parameter: a
+ *  work item the user has explicitly marked completed IN DAILY COMMAND (a fact distinct from
+ *  its Jira status — see types.ts's DailyCommandCompletion) is excluded from active personal
+ *  work the same way a Jira-COMPLETED/EXCLUDED item already is. Checked independently of
+ *  Work Relevance (not merged into `relevances` below) so it applies even when no
+ *  workRelevanceIndex is configured at all, or when the item's Jira status is still
+ *  ACTIONABLE — Daily Command Completion is a standalone suppression, not a reclassification
+ *  of the ticket's Jira-derived relevance. */
+function evaluateWorkRelevanceGate(
+  workItemIds: string[],
+  data: CommandCenterData,
+  workRelevanceIndex: WorkRelevanceIndex | undefined,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): RelevanceGate {
+  if (dailyCommandCompletedWorkItemIds && workItemIds.length > 0 && workItemIds.every((id) => dailyCommandCompletedWorkItemIds.has(id))) return "EXCLUDE";
   if (!workRelevanceIndex || workItemIds.length === 0) return "PASS";
   const items = workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
   if (items.length === 0) return "PASS";
@@ -438,7 +455,8 @@ function candidateFromLoop(
   today: string,
   workRelevanceIndex: WorkRelevanceIndex | undefined,
   relationIdentity: PersonalRelationIdentity,
-  mentionedIssueKeys: ReadonlySet<string>
+  mentionedIssueKeys: ReadonlySet<string>,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
   if (loop.id.startsWith("radar-")) return null;
   if (attentionDecisionIds.has(loop.id)) return null;
@@ -452,7 +470,7 @@ function candidateFromLoop(
 
   // V2.13 §1 — same Work Relevance gate as candidateFromAttentionItem above, applied to the
   // one work item (if any) this loop resolves to.
-  const relevanceGate = evaluateWorkRelevanceGate(workItem ? [workItem.id] : [], data, workRelevanceIndex);
+  const relevanceGate = evaluateWorkRelevanceGate(workItem ? [workItem.id] : [], data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   if (relevanceGate === "EXCLUDE") return null;
 
   // V1.7 §15 — the action owner and the work item's owner can legitimately disagree (e.g.
@@ -622,7 +640,13 @@ export function computePersonalFocus(
   ownerId?: string,
   workRelevanceIndex?: WorkRelevanceIndex,
   allRisks?: Risk[],
-  mentionEvents?: MentionEvent[]
+  mentionEvents?: MentionEvent[],
+  // V2.19 — additive/optional trailing parameter, same no-op-when-omitted contract as every
+  // parameter above: WorkItem ids the user has explicitly marked completed IN DAILY COMMAND
+  // (see types.ts's DailyCommandCompletion / store.ts's dailyCommandCompletions, keyed by
+  // ticket key there and resolved to WorkItem ids by the caller). Omitting it reproduces
+  // pre-V2.19 behavior exactly — nothing is ever excluded on this basis.
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusResult {
   const identity: IdentityRef = { displayName: ownerName, ownerId };
   // V2.14 §1 — built once per render (never re-scanned per candidate), per Task 1.
@@ -632,10 +656,10 @@ export function computePersonalFocus(
   const attentionDecisionIds = new Set(eligibleAttention.filter((i) => i.category === "DECISION" && i.sourceRef?.type === "decision").map((i) => i.sourceRef!.id));
 
   const fromAttention = eligibleAttention
-    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks, relationIdentity, mentionedIssueKeys))
+    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds))
     .filter((c): c is PersonalFocusCandidate => c !== null);
   const fromLoops = proactive.deliveryLoops
-    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex, relationIdentity, mentionedIssueKeys))
+    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds))
     .filter((c): c is PersonalFocusCandidate => c !== null);
 
   const candidates = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);

@@ -43,6 +43,7 @@ import type {
   AttentionLifecycle,
   CommandCenterData,
   Communication,
+  DailyCommandCompletion,
   DailyReportSnapshot,
   DailySnapshot,
   DataSourceType,
@@ -178,6 +179,12 @@ export interface StoreState {
   // Bounded like snapshotHistory (oldest evicted first), same discipline as every other
   // history-shaped field in this file.
   dailyReports: Record<string, DailyReportSnapshot>;
+  // V2.19 — Daily Command Completion. Keyed by Jira issue KEY (see DailyCommandCompletion's
+  // own comment for why), local-only (deliberately not added to app-state.ts's SyncedAppState
+  // in this pass — see completeTicketInDailyCommand/reopenTicketInDailyCommand below). A
+  // ticket present here is suppressed from active personal-work surfaces regardless of its
+  // Jira status; removed only by an explicit reopen.
+  dailyCommandCompletions: Record<string, DailyCommandCompletion>;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -214,6 +221,7 @@ function initialState(): StoreState {
     myActionItemsOnly: initialMyActionItemsOnly(),
     lastAppStateSyncIso: undefined,
     dailyReports: {},
+    dailyCommandCompletions: {},
   };
 }
 
@@ -353,6 +361,24 @@ function asDailyReports(v: unknown): Record<string, DailyReportSnapshot> {
   return out;
 }
 
+// V2.19 — same discipline as every other parsed field here: a malformed entry (or a corrupted
+// map) is dropped rather than trusted; a missing/invalid entry just means that ticket has no
+// Daily Command Completion recorded, never a crash.
+function isDailyCommandCompletionShape(v: unknown): v is DailyCommandCompletion {
+  if (typeof v !== "object" || v === null) return false;
+  const c = v as Partial<DailyCommandCompletion>;
+  return typeof c.ticketKey === "string" && typeof c.completedAt === "string" && (c.completedBy === undefined || typeof c.completedBy === "string");
+}
+
+function asDailyCommandCompletions(v: unknown): Record<string, DailyCommandCompletion> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailyCommandCompletion> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (isDailyCommandCompletionShape(value)) out[key] = value;
+  }
+  return out;
+}
+
 // V2.14 §4 — same discipline as every other parsed field here: a malformed/missing entry
 // falls back to its safe default (false — "Everything") rather than being trusted as-is.
 function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
@@ -401,6 +427,7 @@ export function parseStoredState(raw: string): StoreState {
       myActionItemsOnly: asMyActionItemsOnly(parsed.myActionItemsOnly),
       lastAppStateSyncIso: typeof parsed.lastAppStateSyncIso === "string" ? parsed.lastAppStateSyncIso : undefined,
       dailyReports: asDailyReports(parsed.dailyReports),
+      dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
     };
   } catch {
     return initialState();
@@ -650,6 +677,31 @@ export class CommandCenterStore {
   }
   resolveAttentionItem(id: string) {
     this.setAttentionLifecycle(id, { lifecycle: "RESOLVED", resolvedManually: true });
+  }
+
+  /** V2.19 — Daily Command Completion: "I'm done with this ticket here", independent of the
+   *  Jira issue's own status and of any specific Action/Mention. Never touches Jira, never
+   *  mutates data.workItems or any existing Action — see types.ts's DailyCommandCompletion for
+   *  the full reasoning and personal-focus.ts/assigned-work.ts/recent-mentions.ts for where
+   *  this suppresses the ticket. `completedBy` defaults to the configured identity's display
+   *  name, when set, matching every other "who did this" field in this codebase. */
+  completeTicketInDailyCommand(ticketKey: string) {
+    const completion: DailyCommandCompletion = {
+      ticketKey,
+      completedAt: new Date().toISOString(),
+      completedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
+    };
+    this.set({ ...this.state, dailyCommandCompletions: { ...this.state.dailyCommandCompletions, [ticketKey]: completion } });
+  }
+
+  /** The only way back once a ticket is Daily-Command-completed — never automatic (§14
+   *  Reactivation Rule: even a genuinely new mention only reactivates Recently Mentioned, it
+   *  never clears this record on its own). */
+  reopenTicketInDailyCommand(ticketKey: string) {
+    if (!(ticketKey in this.state.dailyCommandCompletions)) return;
+    const next = { ...this.state.dailyCommandCompletions };
+    delete next[ticketKey];
+    this.set({ ...this.state, dailyCommandCompletions: next });
   }
 
   setFilters(patch: Partial<GlobalFilters>) {

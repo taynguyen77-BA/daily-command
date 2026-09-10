@@ -20,6 +20,8 @@ import { FilterBar } from "@/components/command-center/FilterBar";
 import { CommandBar } from "@/components/command-center/CommandBar";
 import { ControlTower } from "@/components/command-center/ControlTower";
 import { YourDeliveryFocus } from "@/components/command-center/YourDeliveryFocus";
+import { MyAssignedWork } from "@/components/command-center/MyAssignedWork";
+import { RecentlyMentioned } from "@/components/command-center/RecentlyMentioned";
 import { AttentionQueuePanel } from "@/components/command-center/AttentionQueuePanel";
 import { ClientAttentionMap } from "@/components/command-center/ClientAttentionMap";
 import { BeforeYouTrustThisData } from "@/components/command-center/BeforeYouTrustThisData";
@@ -113,6 +115,13 @@ export default function CommandCenterPage() {
 
       {/* V1.6 §43 — the personal layer sits on top of project intelligence, never hiding it. */}
       {personalFocus && <YourDeliveryFocus personalFocus={personalFocus} compact />}
+
+      {/* V2.19 — WHAT AM I RESPONSIBLE FOR? / WHAT RECENTLY INVOLVED ME? Both distinct from
+          Your Delivery Focus above (curated) — see the hardening spec's own IA guidance. */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <MyAssignedWork />
+        <RecentlyMentioned />
+      </div>
 
       <div className="flex items-center justify-between">
         <MorningBriefHeading />

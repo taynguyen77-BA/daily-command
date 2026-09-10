@@ -106,6 +106,17 @@ export function useCommandCenter() {
     [state.jiraWorkRelevancePolicy]
   );
 
+  // V2.19 — Daily Command Completion, resolved to WorkItem ids (for the engines below, which
+  // key on internal ids) once per render. state.dailyCommandCompletions itself stays keyed by
+  // ticket KEY (see its own comment) — this is purely a lookup-shape conversion, never a second
+  // source of truth.
+  const dailyCommandCompletedWorkItemIds = useMemo(() => {
+    const keys = new Set(Object.keys(state.dailyCommandCompletions));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.dailyCommandCompletions, scopedData.workItems]);
+
   // V1.4 — one composed bundle for every proactive engine, mirroring `derived` above.
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
   const proactive = useMemo(
@@ -122,11 +133,12 @@ export function useCommandCenter() {
             workRelevanceIndex,
             scopedMentionEvents,
             state.personalIdentity?.accountId,
-            state.ownerName
+            state.ownerName,
+            dailyCommandCompletedWorkItemIds
           )
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -170,16 +182,32 @@ export function useCommandCenter() {
   // V1.6 — deterministic Personal Focus Engine, composed the same way `proactive` is
   // composed above. No AI calls; recomputed fresh every render from live project state.
   const personalFocus = useMemo(
-    () => (proactive ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents) : null),
+    () =>
+      proactive
+        ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds)
+        : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents]
+    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds]
   );
 
   // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
   // control (FilterBar) reads the scope-enforced set, not raw `state.data`. `filteredData`
   // can't serve that purpose: it also has the CURRENT client/project filter selection
   // already applied, which would hide every other in-scope option from its own picker.
-  return { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, scopedData, workRelevanceIndex, store: commandCenterStore };
+  return {
+    state,
+    today,
+    derived,
+    proactive,
+    personalFocus,
+    previousSnapshot,
+    filteredData,
+    scopedData,
+    workRelevanceIndex,
+    scopedMentionEvents,
+    dailyCommandCompletedWorkItemIds,
+    store: commandCenterStore,
+  };
 }
 
 /** V2.4 §19-20, §23 — Command Bar / Meeting Mode explicit project override. Runs the exact
