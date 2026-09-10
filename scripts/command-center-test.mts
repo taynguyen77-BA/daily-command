@@ -7771,6 +7771,16 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.18 sync-auth", neitherValid.ok === false && neitherValid.status === 401, "both configured: a request bearing neither valid secret is rejected");
   const noHeaderBothConfigured = checkSyncRequestAuth(null, "cron-secret", "app-state-secret");
   ok("V2.18 sync-auth", noHeaderBothConfigured.ok === false && noHeaderBothConfigured.status === 401, "both configured: no header at all is rejected");
+
+  // V2.20 — a trailing newline/space in the configured env var (a real-world gotcha: pasting
+  // `openssl rand -hex 32` terminal output straight into a deployment's env var UI often
+  // carries one) must never make an otherwise-correct paired secret 401 forever.
+  const trimmedCronSecret = checkSyncRequestAuth("Bearer cron-secret", "cron-secret\n", undefined);
+  ok("V2.20 sync-auth secret trimming", trimmedCronSecret.ok === true, "CRON_SECRET env var with a trailing newline still authorizes a header sent without one");
+  const trimmedAppStateSecret = checkSyncRequestAuth("Bearer app-state-secret", undefined, "  app-state-secret  ");
+  ok("V2.20 sync-auth secret trimming", trimmedAppStateSecret.ok === true, "APP_STATE_SECRET env var with surrounding whitespace still authorizes a header sent without it");
+  const whitespaceOnlyBothUnconfigured = checkSyncRequestAuth(null, "  ", "\n");
+  ok("V2.20 sync-auth secret trimming", whitespaceOnlyBothUnconfigured.ok === false && whitespaceOnlyBothUnconfigured.status === 503, "whitespace-only env vars are treated as unset, not as configured-but-unmatchable secrets");
 }
 
 // ===== V2.18 — Security hardening: consistent auth across every sensitive route =====
@@ -7824,6 +7834,13 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
   const correctHeader = checkAppStateAuth("Bearer state-secret", "state-secret");
   ok("V2.15 checkAppStateAuth", correctHeader.ok === true, "APP_STATE_SECRET configured, matching header -> authorized");
+
+  // V2.20 — same trimming fix, and for the same real-world "copy-pasted a trailing newline
+  // into the deployment's env var UI" reason, as checkSyncRequestAuth above.
+  const trimmedSecret = checkAppStateAuth("Bearer state-secret", "state-secret\n");
+  ok("V2.20 checkAppStateAuth secret trimming", trimmedSecret.ok === true, "APP_STATE_SECRET env var with a trailing newline still authorizes a header sent without one");
+  const whitespaceOnlyUnconfigured = checkAppStateAuth(null, "   ");
+  ok("V2.20 checkAppStateAuth secret trimming", whitespaceOnlyUnconfigured.ok === false && whitespaceOnlyUnconfigured.status === 503, "a whitespace-only env var is treated as unset (503), not as configured-but-unmatchable");
 }
 
 // --- app-state.ts: isAppStateStoreConfigured (KV env-var presence check, same pattern as

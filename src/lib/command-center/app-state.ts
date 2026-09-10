@@ -83,7 +83,11 @@ export function createInMemoryAppStateStore(initial: SyncedAppState | null = nul
  *  unconfigured" like jira/sync's CRON_SECRET gate: this synced slice is genuinely private
  *  (decision content, personal identity, interaction history), so an unconfigured
  *  APP_STATE_SECRET means sync is treated as unavailable (503), never silently open. */
-export function checkAppStateAuth(authorizationHeader: string | null, appStateSecret: string | undefined): { ok: true } | { ok: false; status: 401 | 503; error: string } {
+export function checkAppStateAuth(authorizationHeader: string | null, appStateSecretRaw: string | undefined): { ok: true } | { ok: false; status: 401 | 503; error: string } {
+  // Trimmed the same way, and for the same reason, as sync-auth.ts's checkSyncRequestAuth: a
+  // trailing newline/space picked up when the secret was pasted into the deployment's env var
+  // UI must never make an otherwise-correct pairing attempt 401 forever.
+  const appStateSecret = appStateSecretRaw?.trim();
   if (!appStateSecret) {
     return { ok: false, status: 503, error: "Cross-device sync is not configured on this server (APP_STATE_SECRET is unset)." };
   }

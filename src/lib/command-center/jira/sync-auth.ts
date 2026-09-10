@@ -26,11 +26,23 @@
 // auth check in this app, which was already correctly fail-closed (503 "not configured") in
 // the same situation — the two checks now share both the same default-closed contract and the
 // same discriminated result shape, so every sensitive route in the app is gated consistently.
+// A trailing newline/space in the env var — e.g. from copy-pasting `openssl rand -hex 32`
+// terminal output straight into Vercel's env var UI — makes the configured secret silently
+// never equal `Bearer <what the user pasted into Data & Settings>`, even though both values
+// "look" identical everywhere they're displayed. Trimmed once here (not at the env var read
+// site) so every caller of this function gets the same forgiving comparison.
+function normalizeSecret(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 export function checkSyncRequestAuth(
   authorizationHeader: string | null,
-  cronSecret: string | undefined,
-  appStateSecret: string | undefined
+  cronSecretRaw: string | undefined,
+  appStateSecretRaw: string | undefined
 ): { ok: true } | { ok: false; status: 401 | 503; error: string } {
+  const cronSecret = normalizeSecret(cronSecretRaw);
+  const appStateSecret = normalizeSecret(appStateSecretRaw);
   if (!cronSecret && !appStateSecret) {
     return {
       ok: false,
