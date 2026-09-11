@@ -7,6 +7,7 @@ import { buildWeeklyReviewFacts, type WeeklyReviewFacts } from "@/lib/command-ce
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
 import { getTodayIso } from "@/lib/command-center/store";
 import { buildWeeklyReportSummary, last7DaysEnding, weeklyReportToMarkdown } from "@/lib/command-center/daily-report";
+import { buildWeeklyClientReport, clientReportToMarkdown, downloadMarkdown } from "@/lib/command-center/client-report";
 import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 
 function renderReview(text: string) {
@@ -44,6 +45,21 @@ export default function WeeklyReviewPage() {
   async function copyWeeklyReportMarkdown() {
     await navigator.clipboard.writeText(weeklyReportToMarkdown(weeklyReport));
     setWeeklyReportCopied(true);
+  }
+
+  // Client-facing rollup over the same 7 persisted Daily Report snapshots as WEEKLY REPORT
+  // above, just grouped by Client -> Project and worded for external delivery instead of
+  // internal review.
+  const clientReport = useMemo(() => buildWeeklyClientReport(weeklyReport.dateRange, weeklyReport.snapshots), [weeklyReport]);
+  const clientReportMarkdown = useMemo(() => clientReportToMarkdown(clientReport), [clientReport]);
+  const [clientReportCopied, setClientReportCopied] = useState(false);
+
+  async function copyClientReportMarkdown() {
+    await navigator.clipboard.writeText(clientReportMarkdown);
+    setClientReportCopied(true);
+  }
+  function downloadClientReport() {
+    downloadMarkdown(`client-report-${weeklyReport.dateRange[0]}-to-${weeklyReport.dateRange[weeklyReport.dateRange.length - 1]}.md`, clientReportMarkdown);
   }
 
   // V1.6 §46-49 — "My Delivery Review". Purely deterministic — arithmetic over
@@ -122,6 +138,46 @@ export default function WeeklyReviewPage() {
                 <li key={p.projectName}>{p.projectName}: {p.count}</li>
               ))}
             </ul>
+          )}
+        </Panel>
+      </section>
+
+      <section>
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <p className="font-display text-sm text-text">CLIENT REPORT</p>
+          <div className="flex gap-2">
+            <button onClick={downloadClientReport} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+              Download .md
+            </button>
+            <button onClick={copyClientReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+              {clientReportCopied ? "Copied ✓" : "Copy as Markdown"}
+            </button>
+          </div>
+        </div>
+        <Panel className="p-5">
+          <div className="mb-2 flex items-center gap-2">
+            <TrustLabel kind="calculated" />
+            <span className="text-xs text-text3">
+              Same recorded events as WEEKLY REPORT above, grouped by client/project and worded for sending as-is — ready to paste into an email or doc.
+            </span>
+          </div>
+          {clientReport.clients.length === 0 ? (
+            <p className="py-2 text-sm text-text3">Nothing to report yet — generate a Daily Report from Close Day on at least one day this range.</p>
+          ) : (
+            <div className="space-y-3">
+              {clientReport.clients.map((client) => (
+                <div key={client.clientName}>
+                  <p className="text-sm font-semibold text-text">{client.clientName}</p>
+                  <ul className="mt-1 space-y-0.5 pl-3 text-xs text-text2">
+                    {client.projects.map((p) => (
+                      <li key={p.projectName}>
+                        <span className="text-text3">{p.projectName}:</span> {p.completed.length} completed{p.decisions.length > 0 ? `, ${p.decisions.length} decision(s)` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
           )}
         </Panel>
       </section>

@@ -11,6 +11,7 @@ import { getAIProvider } from "@/lib/command-center/ai";
 import type { EodEntry } from "@/lib/command-center/store";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
 import { dailyReportToMarkdown, summarizeDailyReport } from "@/lib/command-center/daily-report";
+import { buildDailyClientReport, clientReportToMarkdown, downloadMarkdown } from "@/lib/command-center/client-report";
 import { computeFreshness } from "@/lib/command-center/freshness";
 import { getActiveAssignedWorkItems } from "@/lib/command-center/assigned-work";
 import { selectRecentMentions } from "@/lib/command-center/recent-mentions";
@@ -53,6 +54,7 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
   // was already generated earlier this session — never silently regenerated on remount.
   const [dailyReport, setDailyReport] = useState<DailyReportSnapshot | null>(state.dailyReports[today] ?? null);
   const [reportCopied, setReportCopied] = useState(false);
+  const [clientReportCopied, setClientReportCopied] = useState(false);
 
   // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. `todaysPilotFeedback` is null until
   // a real submission exists for today, so the form is never shown twice for the same day.
@@ -90,6 +92,16 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
     if (!dailyReport) return;
     await navigator.clipboard.writeText(dailyReportToMarkdown(dailyReport));
     setReportCopied(true);
+  }
+
+  async function copyClientReportMarkdown() {
+    if (!dailyReport) return;
+    await navigator.clipboard.writeText(clientReportToMarkdown(buildDailyClientReport(dailyReport)));
+    setClientReportCopied(true);
+  }
+  function downloadClientReport() {
+    if (!dailyReport) return;
+    downloadMarkdown(`client-report-${dailyReport.date}.md`, clientReportToMarkdown(buildDailyClientReport(dailyReport)));
   }
 
   useEffect(() => {
@@ -312,15 +324,28 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
             {!dailyReport ? (
               <p className="text-xs text-text3">A point-in-time snapshot of today&apos;s completed work and decisions — stays stable even after later syncs change live ticket data.</p>
             ) : (
-              (() => {
-                const summary = summarizeDailyReport(dailyReport);
-                return (
-                  <div className="space-y-1 text-xs text-text2">
-                    <p>{summary.completed.length} completed · {summary.decisions.length} decision(s) · {summary.outcomes.length} outcome(s) recorded.</p>
-                    {summary.completed.length === 0 && summary.decisions.length === 0 && <p className="text-text3">Nothing recorded yet today.</p>}
+              <>
+                {(() => {
+                  const summary = summarizeDailyReport(dailyReport);
+                  return (
+                    <div className="space-y-1 text-xs text-text2">
+                      <p>{summary.completed.length} completed · {summary.decisions.length} decision(s) · {summary.outcomes.length} outcome(s) recorded.</p>
+                      {summary.completed.length === 0 && summary.decisions.length === 0 && <p className="text-text3">Nothing recorded yet today.</p>}
+                    </div>
+                  );
+                })()}
+                <div className="mt-2 flex items-center justify-between gap-2 border-t border-border pt-2">
+                  <span className="text-xs text-text3">Client-facing version — grouped by client/project, ready to send.</span>
+                  <div className="flex gap-2">
+                    <button onClick={downloadClientReport} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+                      Download .md
+                    </button>
+                    <button onClick={copyClientReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+                      {clientReportCopied ? "Copied ✓" : "Copy Client Report"}
+                    </button>
                   </div>
-                );
-              })()
+                </div>
+              </>
             )}
           </section>
 
