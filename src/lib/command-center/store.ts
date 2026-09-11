@@ -44,6 +44,7 @@ import type {
   CommandCenterData,
   Communication,
   DailyCommandCompletion,
+  DailyCommandSkip,
   DailyReportSnapshot,
   DailySnapshot,
   DataSourceType,
@@ -65,6 +66,7 @@ import type {
   PilotFeedbackContext,
   PilotFeedbackEntry,
   PlanItemOrigin,
+  SkipReason,
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
 } from "./types";
@@ -191,6 +193,13 @@ export interface StoreState {
   // ticket present here is suppressed from active personal-work surfaces regardless of its
   // Jira status; removed only by an explicit reopen.
   dailyCommandCompletions: Record<string, DailyCommandCompletion>;
+  // V2.23 — Daily Command Skip. Keyed by Jira issue KEY, same local-only-not-synced contract
+  // as dailyCommandCompletions above (see DailyCommandSkip's own comment in types.ts). A
+  // ticket present here is suppressed from active personal-execution surfaces (never from
+  // portfolio-level engines like scoring/risk-detection/release-health — see
+  // personal-focus.ts's evaluateWorkRelevanceGate for the enforcement point) until an explicit
+  // Reactivate (skipTicketInDailyCommand/reactivateSkippedTicket below).
+  dailyCommandSkips: Record<string, DailyCommandSkip>;
   // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. Local-only, bounded like every
   // other history-shaped field above; never synced (not part of SyncedAppState), never sent
   // anywhere. See PilotFeedbackEntry's own comment (types.ts) for the full reasoning.
@@ -232,6 +241,7 @@ function initialState(): StoreState {
     lastAppStateSyncIso: undefined,
     dailyReports: {},
     dailyCommandCompletions: {},
+    dailyCommandSkips: {},
     pilotFeedback: [],
   };
 }
@@ -390,6 +400,31 @@ function asDailyCommandCompletions(v: unknown): Record<string, DailyCommandCompl
   return out;
 }
 
+const VALID_SKIP_REASONS = new Set<SkipReason>(["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"]);
+
+// V2.23 — same discipline as isDailyCommandCompletionShape above: a malformed entry (or a
+// corrupted map) is dropped rather than trusted; a missing/invalid entry just means that
+// ticket has no Daily Command Skip recorded, never a crash.
+function isDailyCommandSkipShape(v: unknown): v is DailyCommandSkip {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Partial<DailyCommandSkip>;
+  return (
+    typeof s.ticketKey === "string" &&
+    typeof s.skippedAt === "string" &&
+    (s.skippedBy === undefined || typeof s.skippedBy === "string") &&
+    (s.reason === undefined || (typeof s.reason === "string" && VALID_SKIP_REASONS.has(s.reason)))
+  );
+}
+
+function asDailyCommandSkips(v: unknown): Record<string, DailyCommandSkip> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailyCommandSkip> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (isDailyCommandSkipShape(value)) out[key] = value;
+  }
+  return out;
+}
+
 // V2.22 §3 — same discipline as every other parsed field here: a malformed entry is dropped
 // rather than trusted or crashing the parse.
 function isPilotScore(v: unknown): v is 0 | 1 | 2 {
@@ -478,6 +513,7 @@ export function parseStoredState(raw: string): StoreState {
       lastAppStateSyncIso: typeof parsed.lastAppStateSyncIso === "string" ? parsed.lastAppStateSyncIso : undefined,
       dailyReports: asDailyReports(parsed.dailyReports),
       dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
+      dailyCommandSkips: asDailyCommandSkips(parsed.dailyCommandSkips),
       pilotFeedback: asPilotFeedback(parsed.pilotFeedback),
     };
   } catch {
@@ -742,7 +778,12 @@ export class CommandCenterStore {
       completedAt: new Date().toISOString(),
       completedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
     };
-    this.set({ ...this.state, dailyCommandCompletions: { ...this.state.dailyCommandCompletions, [ticketKey]: completion } });
+    // V2.23 — mutual exclusion: completing a ticket also clears any Daily Command Skip on it
+    // (this is the one defined SKIPPED -> COMPLETED transition, §11) so a ticketKey is never
+    // simultaneously "Completed" and "Skipped".
+    const dailyCommandSkips = { ...this.state.dailyCommandSkips };
+    delete dailyCommandSkips[ticketKey];
+    this.set({ ...this.state, dailyCommandCompletions: { ...this.state.dailyCommandCompletions, [ticketKey]: completion }, dailyCommandSkips });
   }
 
   /** The only way back once a ticket is Daily-Command-completed — never automatic (§14
@@ -753,6 +794,38 @@ export class CommandCenterStore {
     const next = { ...this.state.dailyCommandCompletions };
     delete next[ticketKey];
     this.set({ ...this.state, dailyCommandCompletions: next });
+  }
+
+  /** V2.23 — Daily Command Skip: "this work is relevant, but I am intentionally not
+   *  executing it right now" (e.g. another team owns it) — a PERSONAL EXECUTION STATE,
+   *  distinct from Work Relevance EXCLUDED (a policy/project-truth concept) and from Daily
+   *  Command Completion (types.ts's DailyCommandSkip has the full reasoning). Never touches
+   *  Jira, never mutates data.workItems or any existing Action. `reason` is always optional —
+   *  never required to skip an item (§7). Skipping an ACTIVE ticket is the only defined
+   *  entry point (§11); skipping an already-completed ticket is not offered by any UI action,
+   *  but is still made safe here by mutual exclusion with dailyCommandCompletions, same as
+   *  completeTicketInDailyCommand's own guarantee in the other direction. */
+  skipTicketInDailyCommand(ticketKey: string, reason?: SkipReason) {
+    const skip: DailyCommandSkip = {
+      ticketKey,
+      skippedAt: new Date().toISOString(),
+      skippedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
+      reason,
+    };
+    const dailyCommandCompletions = { ...this.state.dailyCommandCompletions };
+    delete dailyCommandCompletions[ticketKey];
+    this.set({ ...this.state, dailyCommandSkips: { ...this.state.dailyCommandSkips, [ticketKey]: skip }, dailyCommandCompletions });
+  }
+
+  /** The explicit "Reactivate" action (§9) — the only way back from SKIPPED to ACTIVE. Never
+   *  automatic: an ordinary Jira sync, status change, or comment must never clear this record
+   *  on its own (§8) — only this call, or completeTicketInDailyCommand's own mutual-exclusion
+   *  clear (the SKIPPED -> COMPLETED transition), ever removes a skip. */
+  reactivateSkippedTicket(ticketKey: string) {
+    if (!(ticketKey in this.state.dailyCommandSkips)) return;
+    const next = { ...this.state.dailyCommandSkips };
+    delete next[ticketKey];
+    this.set({ ...this.state, dailyCommandSkips: next });
   }
 
   /** V2.22 §3-4 — records one lightweight pilot-feedback entry (3 questions, 0-2 each, plus

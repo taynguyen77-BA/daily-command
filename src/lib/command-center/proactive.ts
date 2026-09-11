@@ -79,7 +79,14 @@ export function computeProactiveIntelligence(
   // WorkItem ids by the caller — use-command-center.ts) — a fact distinct from the Jira
   // issue's own status. Folded into the same forceResolved/exclusion mechanisms as a
   // Jira-COMPLETED/EXCLUDED ticket below, never a second suppression system.
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  // V2.23 — same additive/optional-trailing-parameter, no-op-when-omitted contract: work item
+  // ids the user has explicitly SKIPPED in Daily Command (types.ts's DailyCommandSkip). Folded
+  // into the SAME mentionAutoResolveWorkItemIds set below as completion — from a MENTION
+  // attention item's perspective, both mean "nothing currently needs your attention on this
+  // ticket", and both correctly un-suppress (RESOLVED -> REOPENED) the moment the ticket is
+  // reactivated (removed from the caller-supplied set) — never a second lifecycle mechanism.
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
 
@@ -122,8 +129,13 @@ export function computeProactiveIntelligence(
   // that function's own comment). A Daily-Command-completed ticket (§ Daily Command
   // Completion) is folded into the same set — from the ticket's perspective, both are "there
   // is nothing left to do here", so both use the identical forceResolved mechanism.
-  const completedOrExcludedWorkItemIds = new Set(
-    data.workItems.filter((w) => isWorkItemDoneOrExcluded(w, workRelevanceIndex) || dailyCommandCompletedWorkItemIds?.has(w.id)).map((w) => w.id)
+  // V2.23 — a Daily-Command-SKIPPED ticket is folded in too: renamed from
+  // completedOrExcludedWorkItemIds to reflect that this set now also drives skip suppression
+  // (this is purely a local-variable rename for accuracy — attention-queue.ts's own field name
+  // is unchanged, see that file's comment). Skip and completion are mutually exclusive by
+  // construction (store.ts), so no ticket is ever double-counted here.
+  const mentionAutoResolveWorkItemIds = new Set(
+    data.workItems.filter((w) => isWorkItemDoneOrExcluded(w, workRelevanceIndex) || dailyCommandCompletedWorkItemIds?.has(w.id) || dailyCommandSkippedWorkItemIds?.has(w.id)).map((w) => w.id)
   );
 
   const { items: attentionQueue, nextAttentionState } = buildAttentionQueue(
@@ -140,7 +152,7 @@ export function computeProactiveIntelligence(
       mentionEvents,
       newAssignments,
       workItems: data.workItems,
-      completedOrExcludedWorkItemIds,
+      completedOrExcludedWorkItemIds: mentionAutoResolveWorkItemIds,
     },
     attentionState,
     today
@@ -181,6 +193,18 @@ export function computeProactiveIntelligence(
       const stillLive = relevances.some((r) => r !== "COMPLETED" && r !== "EXCLUDED");
       if (relatedItems.length > 0 && !stillLive) continue;
     }
+    // V2.23 — a Daily-Command-SKIPPED ticket's RISK/DEPENDENCY/DECISION/ACTION/COMMUNICATION
+    // item must not surface in the active Attention Queue either (§5, §10). Independent of
+    // `workRelevanceIndex` existing at all (same zero-config-floor discipline as
+    // isWorkItemDoneOrExcluded elsewhere), and — like the Work Relevance check just above —
+    // deliberately NOT extended to MENTION here: a skipped ticket's mention is instead handled
+    // by the SAME forceResolved/RESOLVED-lifecycle mechanism as completion (see
+    // mentionAutoResolveWorkItemIds above), so it stays out of the default (ACTIVE_DEFAULT)
+    // Attention Queue view without a second exclusion path. This intentionally goes further
+    // than Daily Command Completion's own pre-existing Attention Queue scope (MENTION-only,
+    // unchanged here, out of scope for V2.23) — Skip's suppression is broader per this spec's
+    // explicit "active Attention Queue" requirement.
+    if (item.category !== "MENTION" && entity.workItemIds.length > 0 && dailyCommandSkippedWorkItemIds && entity.workItemIds.every((id) => dailyCommandSkippedWorkItemIds.has(id))) continue;
     if (entity.workItemIds.length === 1) {
       const workItem = data.workItems.find((w) => w.id === entity.workItemIds[0]);
       if (workItem) {
@@ -196,7 +220,7 @@ export function computeProactiveIntelligence(
     gatedAttentionQueue.push(item);
   }
 
-  const first30Minutes = buildFirst30Minutes(gatedAttentionQueue, data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const first30Minutes = buildFirst30Minutes(gatedAttentionQueue, data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds);
   // V2.1 §4 — fixes a confirmed bug: this used to pass the full-history `actionEffectiveness`
   // array (every completed action ever) into a parameter literally named "actionsToday",
   // which is why the Outcome Scorecard's counts and Close Day's ACTIONS section could

@@ -23,19 +23,27 @@ export function getAssignedWorkItems(workItems: WorkItem[], identity: PersonalRe
 
 /** Assigned work whose ticket is NOT finished — neither by Jira's own status (native "Done",
  *  or the Work Relevance Policy's explicit COMPLETED/EXCLUDED) nor by an explicit Daily
- *  Command Completion. This is the population "My Assigned Work" renders as active. */
+ *  Command Completion — and is NOT Daily-Command-SKIPPED either (V2.23). This is the
+ *  population "My Assigned Work" renders as active. `dailyCommandSkippedTicketKeys` is an
+ *  additive/optional trailing parameter, same no-op-when-omitted contract as
+ *  `dailyCommandCompletedTicketKeys`. */
 export function getActiveAssignedWorkItems(
   workItems: WorkItem[],
   identity: PersonalRelationIdentity,
   workRelevanceIndex: WorkRelevanceIndex | undefined,
-  dailyCommandCompletedTicketKeys: ReadonlySet<string> = new Set()
+  dailyCommandCompletedTicketKeys: ReadonlySet<string> = new Set(),
+  dailyCommandSkippedTicketKeys: ReadonlySet<string> = new Set()
 ): WorkItem[] {
-  return getAssignedWorkItems(workItems, identity).filter((w) => !isWorkItemDoneOrExcluded(w, workRelevanceIndex) && !dailyCommandCompletedTicketKeys.has(w.key));
+  return getAssignedWorkItems(workItems, identity).filter(
+    (w) => !isWorkItemDoneOrExcluded(w, workRelevanceIndex) && !dailyCommandCompletedTicketKeys.has(w.key) && !dailyCommandSkippedTicketKeys.has(w.key)
+  );
 }
 
-/** The complement of getActiveAssignedWorkItems — assigned work that IS finished, shown
- *  collapsed/separately per the product's own "Optionally: Completed collapsed separately"
- *  guidance, never mixed into the active list. */
+/** The complement of getActiveAssignedWorkItems for FINISHED work — assigned work that IS
+ *  finished, shown collapsed/separately per the product's own "Optionally: Completed
+ *  collapsed separately" guidance, never mixed into the active list. Deliberately excludes a
+ *  merely-SKIPPED item (see getSkippedAssignedWorkItems below) — skipping is not completing,
+ *  and the two must render in visibly distinct buckets, never folded together. */
 export function getCompletedAssignedWorkItems(
   workItems: WorkItem[],
   identity: PersonalRelationIdentity,
@@ -43,4 +51,19 @@ export function getCompletedAssignedWorkItems(
   dailyCommandCompletedTicketKeys: ReadonlySet<string> = new Set()
 ): WorkItem[] {
   return getAssignedWorkItems(workItems, identity).filter((w) => isWorkItemDoneOrExcluded(w, workRelevanceIndex) || dailyCommandCompletedTicketKeys.has(w.key));
+}
+
+/** V2.23 — the complement of getActiveAssignedWorkItems for SKIPPED work: assigned work the
+ *  user has explicitly Daily-Command-skipped, and which isn't ALSO already finished by Jira's
+ *  own status or Work Relevance (native/policy truth wins the display bucket over a
+ *  possibly-stale personal skip record — see this function's own "not otherwise finished"
+ *  condition). Shown collapsed/separately, same pattern as getCompletedAssignedWorkItems,
+ *  never mixed into either the active or the completed bucket. */
+export function getSkippedAssignedWorkItems(
+  workItems: WorkItem[],
+  identity: PersonalRelationIdentity,
+  workRelevanceIndex: WorkRelevanceIndex | undefined,
+  dailyCommandSkippedTicketKeys: ReadonlySet<string> = new Set()
+): WorkItem[] {
+  return getAssignedWorkItems(workItems, identity).filter((w) => !isWorkItemDoneOrExcluded(w, workRelevanceIndex) && dailyCommandSkippedTicketKeys.has(w.key));
 }

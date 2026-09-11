@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { evidenceForScore, factsForWorkItem } from "@/lib/command-center/evidence";
-import type { CommandCenterData, PersonalRelation, PriorityScoreResult, ReasoningTrace, WorkItem } from "@/lib/command-center/types";
+import type { CommandCenterData, PersonalRelation, PriorityScoreResult, ReasoningTrace, SkipReason, WorkItem } from "@/lib/command-center/types";
 import { clientName } from "@/lib/command-center/selectors";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
@@ -12,6 +12,8 @@ import { ConfidenceTag, MetaPill, ReasoningTraceBlock, RelationBadge, SeverityBa
 import { WhyNotATaskDrawer } from "./WhyNotATaskDrawer";
 import { ExecutionPathTrace } from "./ExecutionPathTrace";
 import { TicketLink } from "./TicketLink";
+
+const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
 
 function recommendedAction(item: WorkItem): string {
   if (item.blocked) return `Escalate the blocker: ${item.blockerReason ?? "unblock dependency"}.`;
@@ -32,6 +34,9 @@ export function PriorityCard({
   proactive,
   personalFocus,
   relation,
+  isSkipped,
+  onSkip,
+  onReactivate,
 }: {
   item: WorkItem;
   result: PriorityScoreResult;
@@ -53,9 +58,16 @@ export function PriorityCard({
   // V2.14 §3 — optional/additive, same no-op-when-absent contract as the rest of this prop
   // set: undefined renders no badge, never a fabricated relation.
   relation?: PersonalRelation;
+  // V2.23 — optional/additive: whether item.key currently has a Daily Command Skip record,
+  // plus the two callbacks to toggle it. Omitting all three (any pre-V2.23 caller) simply
+  // hides the Skip/Reactivate control.
+  isSkipped?: boolean;
+  onSkip?: (reason?: SkipReason) => void;
+  onReactivate?: () => void;
 }) {
   const [trace, setTrace] = useState<ReasoningTrace | null>(null);
   const [open, setOpen] = useState(false);
+  const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   // Bug fix (V2.13) — reflects Take Action's "Mark as handled" (now a real, persisted Action
   // record — see TakeActionPanel.tsx) back on the card itself, so completing it from the
   // panel is visible here without reopening the panel.
@@ -135,12 +147,42 @@ export function PriorityCard({
         />
       )}
 
-      <button
-        onClick={onTakeAction}
-        className="mt-3 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2"
-      >
-        Take Action
-      </button>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button onClick={onTakeAction} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2">
+          Take Action
+        </button>
+        {isSkipped ? (
+          onReactivate && (
+            <button onClick={onReactivate} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text2 hover:border-accent hover:text-text">
+              Reactivate
+            </button>
+          )
+        ) : (
+          onSkip && (
+            <>
+              <select
+                value={skipReason}
+                onChange={(e) => setSkipReason(e.target.value as SkipReason | "")}
+                aria-label="Skip reason (optional)"
+                className="rounded-md border border-border bg-surface px-1.5 py-1.5 text-xs text-text2"
+              >
+                <option value="">No reason</option>
+                {SKIP_REASONS.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => onSkip(skipReason || undefined)}
+                className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+              >
+                Skip
+              </button>
+            </>
+          )
+        )}
+      </div>
     </div>
   );
 }

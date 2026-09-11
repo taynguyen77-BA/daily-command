@@ -7,7 +7,7 @@
 // engine. Dedup reuses mention-grouping.ts's existing per-ticket folding rather than a second
 // implementation.
 
-import type { AttentionItemState, DailyCommandCompletion, MentionEvent, WorkItem } from "./types";
+import type { AttentionItemState, DailyCommandCompletion, DailyCommandSkip, MentionEvent, WorkItem } from "./types";
 import { slug } from "./attention-queue";
 import { groupMentionItems } from "./mention-grouping";
 
@@ -42,6 +42,18 @@ function suppressedByDailyCommandCompletion(issueKey: string, mentionedAt: strin
   return mentionedAt <= completion.completedAt;
 }
 
+/** V2.23 §8 — same reactivation-by-mention semantics as suppressedByDailyCommandCompletion
+ *  above, for a Daily-Command-SKIPPED ticket: a mention from before the skip stays suppressed
+ *  (nothing new happened), but a genuinely NEW mention strictly after skippedAt is a real
+ *  personal signal — the ticket is relevant again — and surfaces here, the ONE deliberate
+ *  reactivation exception (§9's explicit Reactivate button is the OTHER, broader way back;
+ *  this one only ever un-suppresses Recently Mentioned, exactly like completion's own). */
+function suppressedByDailyCommandSkip(issueKey: string, mentionedAt: string, skips: Record<string, DailyCommandSkip>): boolean {
+  const skip = skips[issueKey];
+  if (!skip) return false;
+  return mentionedAt <= skip.skippedAt;
+}
+
 /**
  * Pure function — no hidden `Date.now()` (matches jira/mentions.ts's own
  * selectRecentMentionCandidates convention of taking `nowMs` explicitly, for determinism).
@@ -54,10 +66,11 @@ export function selectRecentMentions(
   workItems: WorkItem[],
   attentionState: Record<string, AttentionItemState>,
   nowMs: number,
-  options: { windowHours?: number; dailyCommandCompletions?: Record<string, DailyCommandCompletion> } = {}
+  options: { windowHours?: number; dailyCommandCompletions?: Record<string, DailyCommandCompletion>; dailyCommandSkips?: Record<string, DailyCommandSkip> } = {}
 ): RecentMention[] {
   const windowHours = options.windowHours ?? RECENT_MENTION_WINDOW_HOURS;
   const completions = options.dailyCommandCompletions ?? {};
+  const skips = options.dailyCommandSkips ?? {};
   const cutoffMs = nowMs - windowHours * 60 * 60 * 1000;
   const workItemByKey = new Map(workItems.map((w) => [w.key, w]));
 
@@ -70,6 +83,7 @@ export function selectRecentMentions(
     // itself already applies to the same underlying attention item.
     if (state?.lifecycle === "RESOLVED" || state?.lifecycle === "SNOOZED") return false;
     if (suppressedByDailyCommandCompletion(m.issueKey, m.mentionedAt, completions)) return false;
+    if (suppressedByDailyCommandSkip(m.issueKey, m.mentionedAt, skips)) return false;
     return true;
   });
 

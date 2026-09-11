@@ -17,14 +17,20 @@ export function buildFirst30Minutes(
   data: CommandCenterData,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  // V2.23 — same additive/optional-trailing-parameter, no-op-when-omitted contract: threaded
+  // through to buildPlan's own fallback below, so a Daily-Command-skipped ticket never fills
+  // one of these recommendation slots either. `attentionQueue` here is already the
+  // proactive.ts-gated queue (skipped items already excluded), so this only matters for the
+  // action-plan.ts fallback path.
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): First30MinutesItem[] {
   const eligible = attentionQueue.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
   const top = eligible.slice(0, 5).map((i) => ({ text: `${i.nowWhat} (${i.what})`, attentionItemId: i.id }));
 
   if (top.length >= 3) return top;
 
-  const plan = buildPlan(data, today, 30, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const plan = buildPlan(data, today, 30, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds);
   const fromPlan = plan.slice(0, 5 - top.length).map((c) => ({ text: c.title }));
   return [...top, ...fromPlan];
 }

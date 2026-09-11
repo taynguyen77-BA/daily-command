@@ -7,13 +7,28 @@
 import { useMemo, useState } from "react";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
-import type { PersonalFocusCandidate } from "@/lib/command-center/types";
+import type { PersonalFocusCandidate, SkipReason } from "@/lib/command-center/types";
 import { FocusCategoryBadge, Panel, RelationBadge, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 import { TicketLink } from "./TicketLink";
 
-export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: PersonalFocusCandidate; onStartFocus: (c: PersonalFocusCandidate) => void }) {
+const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
+
+export function PersonalFocusCard({
+  candidate,
+  onStartFocus,
+  onSkip,
+}: {
+  candidate: PersonalFocusCandidate;
+  onStartFocus: (c: PersonalFocusCandidate) => void;
+  // V2.23 — optional: only a candidate that resolves to exactly one real ticket
+  // (candidate.ticketKey) can be skipped — a candidate with no single underlying ticket (e.g.
+  // overall delivery drift) has nothing to skip, same "never fabricate a link" discipline as
+  // candidate.ticketKey itself. Omitting onSkip (any pre-V2.23 caller) simply hides the button.
+  onSkip?: (candidate: PersonalFocusCandidate, reason?: SkipReason) => void;
+}) {
   const [showEvidence, setShowEvidence] = useState(false);
+  const [skipReason, setSkipReason] = useState<SkipReason | "">("");
 
   // V2.0 §4/§11 — upgrades the old ad hoc "why is this on my list?" toggle into the shared
   // Why Should I Care drawer. No AI call here — a focus candidate's why/nowWhat are already
@@ -130,10 +145,33 @@ export function PersonalFocusCard({ candidate, onStartFocus }: { candidate: Pers
         </ul>
       )}
 
-      <div className="mt-3 border-t border-border pt-3">
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
         <button onClick={() => onStartFocus(candidate)} className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2">
           Start Focus
         </button>
+        {onSkip && candidate.ticketKey && (
+          <>
+            <select
+              value={skipReason}
+              onChange={(e) => setSkipReason(e.target.value as SkipReason | "")}
+              aria-label="Skip reason (optional)"
+              className="rounded-md border border-border bg-surface px-1.5 py-1.5 text-xs text-text2"
+            >
+              <option value="">No reason</option>
+              {SKIP_REASONS.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => onSkip(candidate, skipReason || undefined)}
+              className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+            >
+              Skip
+            </button>
+          </>
+        )}
       </div>
     </Panel>
   );

@@ -6,7 +6,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import type { PersonalFocusCandidate, PersonalFocusResult } from "@/lib/command-center/types";
+import type { PersonalFocusCandidate, PersonalFocusResult, SkipReason } from "@/lib/command-center/types";
 import { isMyActionItem } from "@/lib/command-center/personal-relation";
 import { useCommandCenter } from "./use-command-center";
 import { PersonalFocusCard } from "./PersonalFocusCard";
@@ -25,6 +25,13 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
   function startFocus(candidate: PersonalFocusCandidate) {
     const planItemId = ensurePlanItemId(store, state.personalPlan, candidate, today, personalFocus.candidates.indexOf(candidate));
     setSession({ candidate, planItemId });
+  }
+
+  // V2.23 — "I am intentionally not executing this right now" for a candidate that resolves
+  // to a real ticket. Never called for a candidate with no single underlying work item.
+  function skipCandidate(candidate: PersonalFocusCandidate, reason?: SkipReason) {
+    if (!candidate.ticketKey) return;
+    store.skipTicketInDailyCommand(candidate.ticketKey, reason);
   }
 
   const top3 = myActionItemsOnly ? personalFocus.top3.filter((c) => isMyActionItem(c.relation)) : personalFocus.top3;
@@ -66,7 +73,7 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
           )}
           <div className="grid gap-3 md:grid-cols-3">
             {top3.map((c) => (
-              <PersonalFocusCard key={c.id} candidate={c} onStartFocus={startFocus} />
+              <PersonalFocusCard key={c.id} candidate={c} onStartFocus={startFocus} onSkip={skipCandidate} />
             ))}
           </div>
         </>

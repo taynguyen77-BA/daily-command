@@ -212,9 +212,9 @@ import { daysStale } from "../src/components/command-center/Header";
 
 // V2.19 — Personal Work & Reporting Hardening: My Assigned Work, Recently Mentioned, Daily
 // Command Completion
-import { getActiveAssignedWorkItems, getAssignedWorkItems, getCompletedAssignedWorkItems } from "../src/lib/command-center/assigned-work";
+import { getActiveAssignedWorkItems, getAssignedWorkItems, getCompletedAssignedWorkItems, getSkippedAssignedWorkItems } from "../src/lib/command-center/assigned-work";
 import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions } from "../src/lib/command-center/recent-mentions";
-import type { DailyCommandCompletion } from "../src/lib/command-center/types";
+import type { DailyCommandCompletion, DailyCommandSkip } from "../src/lib/command-center/types";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -8794,6 +8794,283 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 
   const noPilotFieldAtAll = parseStoredState(JSON.stringify({ loaded: true }));
   ok("V2.22 Pilot feedback parsing", noPilotFieldAtAll.pilotFeedback.length === 0, "a pre-V2.22 persisted blob with no pilotFeedback field at all degrades to empty, never a crash");
+}
+
+// ===== V2.23 — Skipped Work & Personal Execution Boundary =====
+// Daily Command Skip: "this work is relevant, but I am intentionally not executing it right
+// now" — a PERSONAL EXECUTION STATE, distinct from Work Relevance EXCLUDED (project truth)
+// and Daily Command Completion (finished responsibility). Mirrors V2.19/V2.21's own
+// DailyCommandCompletion architecture (see types.ts's DailyCommandSkip for the full mapping).
+
+// ----- store.ts: skipTicketInDailyCommand / reactivateSkippedTicket + mutual exclusion with
+// Daily Command Completion (§7-9, §11 — no Active+Skipped or Completed+Skipped ambiguity). -----
+{
+  commandCenterStore.resetAll();
+  ok("V2.23 Daily Command Skip", Object.keys(commandCenterStore.getSnapshot().dailyCommandSkips).length === 0, "starts empty — nothing skipped by default");
+
+  commandCenterStore.skipTicketInDailyCommand("JPMC-2300", "Team is handling it");
+  const afterSkip = commandCenterStore.getSnapshot().dailyCommandSkips;
+  ok("V2.23 Daily Command Skip", !!afterSkip["JPMC-2300"], "skipTicketInDailyCommand records a skip, keyed by ticket key");
+  ok("V2.23 Daily Command Skip", typeof afterSkip["JPMC-2300"].skippedAt === "string" && afterSkip["JPMC-2300"].skippedAt.length > 0, "records a real skippedAt timestamp");
+  ok("V2.23 Daily Command Skip", afterSkip["JPMC-2300"].reason === "Team is handling it", "the optional reason is recorded verbatim");
+
+  commandCenterStore.skipTicketInDailyCommand("JPMC-2301"); // no reason — never required (§7)
+  ok("V2.23 Daily Command Skip", commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2301"]?.reason === undefined, "a reason is never required to skip an item");
+
+  commandCenterStore.reactivateSkippedTicket("JPMC-2300");
+  ok("V2.23 Daily Command Skip", !commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2300"], "reactivateSkippedTicket clears the skip — the only way back, and it's always explicit (§9)");
+
+  // Reactivating something never skipped is a safe no-op.
+  commandCenterStore.reactivateSkippedTicket("JPMC-NEVER-SKIPPED");
+  ok("V2.23 Daily Command Skip", Object.keys(commandCenterStore.getSnapshot().dailyCommandSkips).length === 1, "reactivating a ticket with no recorded skip is a no-op, not a crash (only JPMC-2301 remains)");
+
+  // Mutual exclusion (§11): skip clears any prior completion; complete clears any prior skip —
+  // a ticketKey is never simultaneously Completed and Skipped, in either direction.
+  commandCenterStore.completeTicketInDailyCommand("JPMC-2302");
+  ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "sanity check — JPMC-2302 is completed");
+  commandCenterStore.skipTicketInDailyCommand("JPMC-2302", "Not my action");
+  ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2302"], "skipping a completed ticket records the skip...");
+  ok("V2.23 mutual exclusion", !commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "...and clears the prior completion — never simultaneously Completed and Skipped (§11)");
+
+  commandCenterStore.completeTicketInDailyCommand("JPMC-2302"); // the one defined SKIPPED -> COMPLETED transition (§11)
+  ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "completing a skipped ticket is the defined SKIPPED -> COMPLETED transition...");
+  ok("V2.23 mutual exclusion", !commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2302"], "...and clears the skip in the other direction too");
+  commandCenterStore.resetAll();
+}
+
+// ----- Daily Command Skip — parseStoredState round-trip + defensive parsing (§ refresh/sync
+// preserve Skipped, malformed data never trusted). -----
+{
+  const validSkipBlob = JSON.stringify({ loaded: true, dailyCommandSkips: { "JPMC-1": { ticketKey: "JPMC-1", skippedAt: "2026-06-15T10:00:00.000Z", skippedBy: "Alice", reason: "Waiting on another team" } } });
+  const parsedSkip = parseStoredState(validSkipBlob);
+  ok("V2.23 Daily Command Skip parsing", parsedSkip.dailyCommandSkips["JPMC-1"]?.reason === "Waiting on another team", "a well-formed persisted skip round-trips through parseStoredState");
+
+  const malformedSkipBlob = JSON.stringify({
+    loaded: true,
+    dailyCommandSkips: {
+      "JPMC-1": { ticketKey: "JPMC-1", skippedAt: "2026-06-15T10:00:00.000Z" }, // valid, no reason
+      "JPMC-2": { ticketKey: "JPMC-2" }, // missing skippedAt — dropped
+      "JPMC-3": { ticketKey: "JPMC-3", skippedAt: "2026-06-15T10:00:00.000Z", reason: "Not a real reason" }, // invalid reason value — dropped
+      "JPMC-4": "not-an-object", // dropped
+      "JPMC-5": null, // dropped
+    },
+  });
+  const parsedMalformedSkip = parseStoredState(malformedSkipBlob);
+  ok("V2.23 Daily Command Skip parsing", Object.keys(parsedMalformedSkip.dailyCommandSkips).length === 1 && !!parsedMalformedSkip.dailyCommandSkips["JPMC-1"], "a malformed entry is dropped rather than trusted or crashing the parse — same discipline as every other persisted field");
+
+  const noSkipFieldAtAll = parseStoredState(JSON.stringify({ loaded: true }));
+  ok("V2.23 Daily Command Skip parsing", Object.keys(noSkipFieldAtAll.dailyCommandSkips).length === 0, "a pre-V2.23 persisted blob with no dailyCommandSkips field at all degrades to empty, never a crash");
+}
+
+// ----- personal-focus.ts's evaluateWorkRelevanceGate now also excludes a Daily-Command-
+// SKIPPED ticket — independent of the ticket's own Jira status (even ACTIONABLE). This is the
+// enforcement point for "not in My Day / Personal Focus" (§5), with explicit reactivation. -----
+{
+  const skipWorkItem = jiraItem({ id: "wi-skip-focus", key: "JPMC-2310", jiraStatusName: "To Do" });
+  const skipIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
+  const skipDrift = { id: "DRIFT:skip-focus-item", category: "DRIFT" as const, severity: "HIGH" as const, what: "x", why: "x", impact: "x", nowWhat: "x", evidence: [], lifecycle: "ACTIVE" as const, firstSeenDate: TODAY, lastSeenDate: TODAY, sourceRef: { type: "workItem" as const, id: skipWorkItem.id } };
+  const skipData: CommandCenterData = { ...emptyData(), workItems: [skipWorkItem] };
+  const skipProactive = fakeProactive([skipDrift]);
+
+  const withoutSkip = computePersonalFocus(skipData, skipProactive, "Alice", TODAY, undefined, skipIdx);
+  ok("V2.23 Daily Command Skip gate", withoutSkip.candidates.some((c) => c.sourceId === skipDrift.id), "sanity check — the candidate exists before any skip is recorded");
+
+  const withSkip = computePersonalFocus(skipData, skipProactive, "Alice", TODAY, undefined, skipIdx, undefined, undefined, undefined, new Set([skipWorkItem.id]));
+  ok("V2.23 Daily Command Skip gate", !withSkip.candidates.some((c) => c.sourceId === skipDrift.id), "a Daily-Command-skipped ticket's DRIFT candidate is excluded — even though its Jira status is still ACTIONABLE");
+
+  const omittedSkipParam = computePersonalFocus(skipData, skipProactive, "Alice", TODAY, undefined, skipIdx);
+  ok("V2.23 Daily Command Skip gate", omittedSkipParam.candidates.some((c) => c.sourceId === skipDrift.id), "omitting the new trailing parameter reproduces pre-V2.23 behavior exactly — every existing call site is unaffected");
+
+  // §9, §13 Reactivation — removing the ticket from the caller-supplied set (never automatic)
+  // brings the candidate back.
+  const reactivated = computePersonalFocus(skipData, skipProactive, "Alice", TODAY, undefined, skipIdx, undefined, undefined, undefined, new Set());
+  ok("V2.23 Daily Command Skip gate — reactivation", reactivated.candidates.some((c) => c.sourceId === skipDrift.id), "reactivating the ticket (removing it from the skipped set) makes it a candidate again — reactivation is explicit, never automatic");
+
+  // Completion and Skip are independent sets — an unrelated Daily Command Completion never
+  // affects this ticket's skip suppression (no cross-contamination between the two maps).
+  const withUnrelatedCompletion = computePersonalFocus(skipData, skipProactive, "Alice", TODAY, undefined, skipIdx, undefined, undefined, new Set(["some-other-wi"]), new Set([skipWorkItem.id]));
+  ok("V2.23 Daily Command Skip gate", !withUnrelatedCompletion.candidates.some((c) => c.sourceId === skipDrift.id), "skip suppression composes correctly alongside an unrelated Daily Command Completion set");
+}
+
+// ----- action-plan.ts buildCandidates()/buildPlan(): a Daily-Command-SKIPPED WorkItem must
+// not be resurfaced as a fresh auto-suggested Today's Action Plan candidate, and First 30
+// Minutes' own fallback inherits the same suppression (§5, §10). -----
+{
+  const apSkipIdx = buildWorkRelevanceIndex(globalPolicy({ "To Do": "ACTIONABLE" }));
+  const apSkipItem = jiraItem({ id: "wi-ap-skip-230", key: "JPMC-2320", jiraStatusName: "To Do", status: "In Progress", businessImpact: 5, dueDate: TODAY, priority: "P1", blocked: true, blockerReason: "x" });
+  const apSkipData = { ...emptyData(), workItems: [apSkipItem] };
+
+  const beforeSkip230 = buildCandidates(apSkipData, TODAY, apSkipIdx);
+  ok("V2.23 Action Plan skip safety", beforeSkip230.some((c) => c.item?.id === apSkipItem.id), "sanity check — the item is a candidate before any Daily Command skip");
+
+  const afterSkip230 = buildCandidates(apSkipData, TODAY, apSkipIdx, undefined, new Set([apSkipItem.id]));
+  ok("V2.23 Action Plan skip safety", !afterSkip230.some((c) => c.item?.id === apSkipItem.id), "a Daily-Command-skipped WorkItem is never resurfaced as a fresh auto-suggested candidate");
+
+  const planAfterSkip230 = buildPlan(apSkipData, TODAY, 480, apSkipIdx, undefined, new Set([apSkipItem.id]));
+  ok("V2.23 Action Plan skip safety", !planAfterSkip230.some((c) => c.item?.id === apSkipItem.id), "buildPlan() inherits the same suppression — even with a full-day budget, the skipped item is never selected");
+
+  const afterReactivate230 = buildCandidates(apSkipData, TODAY, apSkipIdx, undefined, new Set());
+  ok("V2.23 Action Plan skip safety — reactivation", afterReactivate230.some((c) => c.item?.id === apSkipItem.id), "reactivating the ticket (removing it from the skipped set) makes it eligible again");
+
+  const omittedSkip230 = buildCandidates(apSkipData, TODAY, apSkipIdx, undefined);
+  ok("V2.23 Action Plan skip safety", omittedSkip230.some((c) => c.item?.id === apSkipItem.id), "omitting the new parameter reproduces pre-V2.23 behavior exactly");
+
+  const first30Skipped = buildFirst30Minutes([], apSkipData, TODAY, apSkipIdx, undefined, new Set([apSkipItem.id]));
+  ok("V2.23 First 30 Minutes skip safety", !first30Skipped.some((f) => f.text.includes("JPMC-2320")), "First 30 Minutes' action-plan fallback never fills a slot with a Daily-Command-skipped item");
+}
+
+// ----- assigned-work.ts — three-way Active/Completed/Skipped partition (V2.23), never mixing
+// skip into the completed bucket or vice versa. -----
+{
+  const bob = { displayName: "Bob", accountId: "acc-bob-230" };
+  const bobActive = jiraItem({ id: "wi-aw230-active", key: "JPMC-2330", status: "In Progress", jiraStatusName: "In Progress", ownerId: "acc-bob-230", owner: "Bob" });
+  const bobSkipped = jiraItem({ id: "wi-aw230-skip", key: "JPMC-2331", status: "In Progress", jiraStatusName: "In Progress", ownerId: "acc-bob-230", owner: "Bob" });
+  const bobDone = jiraItem({ id: "wi-aw230-done", key: "JPMC-2332", status: "Done", jiraStatusName: "Done", ownerId: "acc-bob-230", owner: "Bob" });
+  const bobItems = [bobActive, bobSkipped, bobDone];
+  const skipKeys230 = new Set(["JPMC-2331"]);
+
+  const activeBucket230 = getActiveAssignedWorkItems(bobItems, bob, undefined, new Set(), skipKeys230);
+  ok("V2.23 assigned-work partition", activeBucket230.length === 1 && activeBucket230[0].key === "JPMC-2330", "the active bucket contains exactly the non-finished, non-skipped item");
+
+  const skippedBucket230 = getSkippedAssignedWorkItems(bobItems, bob, undefined, skipKeys230);
+  ok("V2.23 assigned-work partition", skippedBucket230.length === 1 && skippedBucket230[0].key === "JPMC-2331", "the skipped bucket contains exactly the skipped item");
+
+  const completedBucket230 = getCompletedAssignedWorkItems(bobItems, bob, undefined);
+  ok("V2.23 assigned-work partition", completedBucket230.length === 1 && completedBucket230[0].key === "JPMC-2332", "the completed bucket contains exactly the Jira-Done item — skip never leaks into it");
+
+  // A ticket that's BOTH Jira-native-Done AND carries a stale skip record (e.g. Jira finished
+  // it after the user skipped it, with no explicit reactivation) displays as Completed, not
+  // Skipped — native/policy truth wins the display bucket over a possibly-stale skip record.
+  const staleSkipButDone = jiraItem({ id: "wi-aw230-stale", key: "JPMC-2333", status: "Done", jiraStatusName: "Done", ownerId: "acc-bob-230", owner: "Bob" });
+  const staleSkipKeys = new Set(["JPMC-2333"]);
+  ok("V2.23 assigned-work partition", getCompletedAssignedWorkItems([staleSkipButDone], bob, undefined).some((w) => w.key === "JPMC-2333"), "a ticket that's since gone Jira-Done shows as Completed even with a stale skip record present");
+  ok("V2.23 assigned-work partition", getSkippedAssignedWorkItems([staleSkipButDone], bob, undefined, staleSkipKeys).length === 0, "...and is correctly excluded from the Skipped bucket once Jira truth says it's finished");
+}
+
+// ----- recent-mentions.ts — Daily Command Skip suppression + reactivation-by-mention (§8's
+// Scenario D), mirroring the V2.19 Daily Command Completion behavior exactly. -----
+{
+  const nowMs230 = new Date("2026-06-15T18:00:00.000Z").getTime();
+  const skippedAt230 = new Date(nowMs230 - 5 * 60 * 60 * 1000).toISOString();
+  const oldMentionBeforeSkip = new Date(nowMs230 - 6 * 60 * 60 * 1000).toISOString();
+  const newMentionAfterSkip = new Date(nowMs230 - 1 * 60 * 60 * 1000).toISOString();
+  const skips230: Record<string, DailyCommandSkip> = { "JPMC-2340": { ticketKey: "JPMC-2340", skippedAt: skippedAt230 } };
+
+  const beforeReactivation230 = selectRecentMentions([{ issueKey: "JPMC-2340", commentId: "c-old", excerpt: "old", mentionedAt: oldMentionBeforeSkip }], [], {}, nowMs230, { dailyCommandSkips: skips230 });
+  ok("V2.23 recent-mentions — skip suppression", beforeReactivation230.length === 0, "a mention from BEFORE the Daily Command skip stays suppressed");
+
+  const afterReactivation230 = selectRecentMentions([{ issueKey: "JPMC-2340", commentId: "c-new", excerpt: "new", mentionedAt: newMentionAfterSkip }], [], {}, nowMs230, { dailyCommandSkips: skips230 });
+  ok("V2.23 recent-mentions — reactivation via mention", afterReactivation230.length === 1 && afterReactivation230[0].commentId === "c-new", "a genuinely NEW mention strictly after the skip timestamp reactivates the ticket into Recently Mentioned — one card, no duplicates (§8 Scenario D)");
+}
+
+// ----- proactive.ts computeProactiveIntelligence(): a Daily-Command-SKIPPED ticket's RISK
+// attention item is excluded from the active Attention Queue (§5, §10 — this goes further
+// than Daily Command Completion's own pre-existing MENTION-only Attention Queue scope, per
+// this spec's explicit requirement; that asymmetry is intentional, not a defect), and a
+// still-open MENTION on a skipped ticket auto-resolves the same way a completed ticket's does,
+// with correct reactivation. -----
+{
+  const skipFixture = makeThreeProjectFixture(); // JPMC-900 (wi-jpmc-x) is blocked, with a HIGH risk "JPMC critical risk" explicitly tied to it
+  const skipDerived = deriveData(skipFixture, null, TODAY);
+
+  const beforeQueueSkip = computeProactiveIntelligence(skipFixture, skipDerived, [], null, {}, "demo", TODAY);
+  ok("V2.23 Attention Queue skip suppression", beforeQueueSkip.attentionQueue.some((i) => i.category === "RISK" && i.sourceRef?.id === "JPMC critical risk"), "sanity check — JPMC's blocked-item risk is a real Attention Queue item before any skip");
+
+  const afterQueueSkip = computeProactiveIntelligence(skipFixture, skipDerived, [], null, {}, "demo", TODAY, undefined, undefined, undefined, undefined, undefined, new Set(["wi-jpmc-x"]));
+  ok("V2.23 Attention Queue skip suppression", !afterQueueSkip.attentionQueue.some((i) => i.category === "RISK" && i.sourceRef?.id === "JPMC critical risk"), "a Daily-Command-skipped ticket's RISK item is excluded from the Attention Queue entirely — not just demoted");
+
+  const afterQueueReactivate = computeProactiveIntelligence(skipFixture, skipDerived, [], null, {}, "demo", TODAY, undefined, undefined, undefined, undefined, undefined, new Set());
+  ok("V2.23 Attention Queue skip suppression — reactivation", afterQueueReactivate.attentionQueue.some((i) => i.category === "RISK" && i.sourceRef?.id === "JPMC critical risk"), "reactivating the ticket (removing it from the skipped set) restores its RISK item to the Attention Queue");
+
+  // MENTION forceResolve via skip — mirrors V2.17/V2.19's own completion mechanism exactly.
+  const mentionSkipWorkItem = jiraItem({ id: "wi-mention-skip-230", key: "JPMC-2350", jiraStatusName: "To Do" });
+  const mentionSkipData = { ...emptyData(), workItems: [mentionSkipWorkItem] };
+  const mentionSkipDerived = deriveData(mentionSkipData, null, TODAY);
+  const mentionSkipEvents = [{ issueKey: "JPMC-2350", commentId: "c-1", commentAuthor: "Bob", excerpt: "any update?", mentionedAt: `${TODAY}T09:00:00.000Z` }];
+
+  const beforeMentionSkip = computeProactiveIntelligence(mentionSkipData, mentionSkipDerived, [], null, {}, "demo", TODAY, undefined, mentionSkipEvents);
+  const mentionItemBefore = beforeMentionSkip.attentionQueue.find((i) => i.category === "MENTION");
+  ok("V2.23 MENTION forceResolve via skip", mentionItemBefore?.lifecycle === "NEW", "sanity check — the mention is a fresh NEW attention item before any skip");
+
+  const afterMentionSkip = computeProactiveIntelligence(mentionSkipData, mentionSkipDerived, [], null, {}, "demo", TODAY, undefined, mentionSkipEvents, undefined, undefined, undefined, new Set([mentionSkipWorkItem.id]));
+  const mentionItemAfter = afterMentionSkip.attentionQueue.find((i) => i.category === "MENTION");
+  ok("V2.23 MENTION forceResolve via skip", mentionItemAfter?.lifecycle === "RESOLVED", "the SAME still-open mention auto-resolves once its ticket is Daily-Command-skipped — no duplicate attention item, same mechanism as completion");
+
+  // Reactivation: un-skipping (removing from the set) lets the still-open mention correctly
+  // transition RESOLVED -> REOPENED via the ordinary lifecycle path, never stuck RESOLVED.
+  const afterReactivateMention = computeProactiveIntelligence(mentionSkipData, mentionSkipDerived, [], null, afterMentionSkip.nextAttentionState, "demo", TODAY, undefined, mentionSkipEvents, undefined, undefined, undefined, new Set());
+  const mentionItemReactivated = afterReactivateMention.attentionQueue.find((i) => i.category === "MENTION");
+  ok("V2.23 MENTION forceResolve via skip — reactivation", mentionItemReactivated?.lifecycle === "REOPENED", "reactivating the ticket correctly reopens the still-live mention");
+}
+
+// ----- use-command-center.ts buildProjectOverrideView(): Daily Command Skip must propagate
+// into a project-scoped Command Bar/Meeting Mode override the exact same way Daily Command
+// Completion does (V2.21 §4), with correct cross-project isolation (§12 — no leakage). -----
+{
+  const povFixture230 = makeThreeProjectFixture();
+  povFixture230.workItems = povFixture230.workItems.map((w) =>
+    w.key === "UBS-900" ? { ...w, status: "In Progress" as const, blocked: false, jiraStatusName: "In Progress", lastUpdated: "2026-06-05", owner: "Alice", ownerId: "acc-alice" } : w
+  );
+  const povState230 = makeStoreState({
+    data: povFixture230,
+    jiraProjectScope: { mode: "FOCUSED", projectKeys: ["JPMC"] },
+    jiraWorkRelevancePolicy: { "In Progress": "ACTIONABLE" },
+    ownerName: "Alice",
+    personalIdentity: { accountId: "acc-alice" },
+  });
+
+  const overrideBefore230 = buildProjectOverrideView(povState230, TODAY, "UBS");
+  ok(
+    "V2.23 project override skip propagation",
+    !!overrideBefore230.personalFocus?.candidates.some((c) => c.ticketKey === "UBS-900"),
+    "sanity check — UBS-900's stalled-item risk is a real Personal Focus candidate in the override BEFORE any Daily Command skip"
+  );
+
+  const povStateSkipped = makeStoreState({
+    ...povState230,
+    dailyCommandSkips: { "UBS-900": { ticketKey: "UBS-900", skippedAt: `${TODAY}T09:00:00.000Z` } },
+  });
+  const overrideAfter230 = buildProjectOverrideView(povStateSkipped, TODAY, "UBS");
+  ok(
+    "V2.23 project override skip propagation",
+    overrideAfter230.dailyCommandSkippedWorkItemIds?.has("wi-ubs-x") === true,
+    "the override resolves the ticket-key-keyed skip to the correct WorkItem id, scoped to the override's own data"
+  );
+  ok(
+    "V2.23 project override skip propagation",
+    !overrideAfter230.personalFocus?.candidates.some((c) => c.ticketKey === "UBS-900"),
+    "a Daily-Command-skipped ticket is suppressed from Personal Focus in a project-scoped override the same way it is in the global scope"
+  );
+
+  // Cross-project isolation (§12): skipping UBS-900 must never affect a JPMC-scoped override.
+  const overrideOtherProject230 = buildProjectOverrideView(povStateSkipped, TODAY, "JPMC");
+  ok(
+    "V2.23 project override skip propagation",
+    overrideOtherProject230.dailyCommandSkippedWorkItemIds?.has("wi-ubs-x") !== true,
+    "skip resolution is scoped to each override's own data — a JPMC override never carries a UBS ticket's WorkItem id, even though the skip set is global by ticket key"
+  );
+}
+
+// ----- V2.23 UI wiring — confirms Skip/Reactivate are actually wired into real surfaces, not
+// stranded as dead code only this test file exercises. -----
+{
+  const repoRoot230 = path.resolve(process.cwd());
+  const myAssignedSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/MyAssignedWork.tsx"), "utf8");
+  ok("V2.23 UI wiring", /getSkippedAssignedWorkItems/.test(myAssignedSrc230), "My Assigned Work reuses the shared skipped-bucket selector, not a second inline check");
+  ok("V2.23 UI wiring", /skipTicketInDailyCommand/.test(myAssignedSrc230) && /reactivateSkippedTicket/.test(myAssignedSrc230), "My Assigned Work wires Skip and Reactivate to the real store actions");
+
+  const priorityCardSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/PriorityCard.tsx"), "utf8");
+  ok("V2.23 UI wiring", /onSkip/.test(priorityCardSrc230) && /onReactivate/.test(priorityCardSrc230), "PriorityCard exposes Skip/Reactivate controls");
+
+  const prioritiesPageSrc230 = fs.readFileSync(path.join(repoRoot230, "src/app/priorities/page.tsx"), "utf8");
+  ok("V2.23 UI wiring", /"SKIPPED"/.test(prioritiesPageSrc230), "Priorities has an explicit Skipped filter tab — the §6 discoverability entry point");
+  ok("V2.23 UI wiring", /skipTicketInDailyCommand/.test(prioritiesPageSrc230) && /reactivateSkippedTicket/.test(prioritiesPageSrc230), "Priorities wires Skip/Reactivate to the real store actions");
+
+  const personalFocusCardSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/PersonalFocusCard.tsx"), "utf8");
+  ok("V2.23 UI wiring", /onSkip/.test(personalFocusCardSrc230), "My Day / Your Delivery Focus's card exposes a Skip control");
+
+  const pageSrc230 = fs.readFileSync(path.join(repoRoot230, "src/app/page.tsx"), "utf8");
+  ok("V2.23 UI wiring", /dailyCommandSkippedWorkItemIds/.test(pageSrc230), "the main dashboard's Top Priorities preview also excludes skipped items, not just the full Priorities page");
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

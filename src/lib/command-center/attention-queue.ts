@@ -95,6 +95,10 @@ export interface AttentionQueueInputs {
   // forceResolved above). Optional/additive: omitting it (every pre-existing caller) never
   // force-resolves anything, matching pre-V2.17 behavior exactly. Deliberately NOT threaded
   // to ASSIGNMENT — see this task's own scope note, that's V2.12 Task 1's territory.
+  // V2.23 — the caller (proactive.ts) also folds in Daily-Command-SKIPPED workItem ids here
+  // (its own local variable is named mentionAutoResolveWorkItemIds for that reason); this
+  // field's own name/contract is otherwise unchanged — it's still just "workItem ids a still-
+  // open MENTION should auto-resolve against".
   completedOrExcludedWorkItemIds?: ReadonlySet<string>;
 }
 

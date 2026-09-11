@@ -18,6 +18,18 @@
 // > DEFER. DONE is never produced here — it only exists in the reconciled personal plan
 // (personal-plan.ts), since a resolved/snoozed item is already excluded from the queues
 // this engine reads.
+//
+// V2.23 — Skipped Work & Personal Execution Boundary. evaluateWorkRelevanceGate below is the
+// ONE canonical gate every candidate here passes through, so it's also the single enforcement
+// point for Daily Command Skip: a WorkItem the user has explicitly skipped (types.ts's
+// DailyCommandSkip) never produces a candidate, the same way a Daily-Command-completed one
+// doesn't. This is a distinct concept from FocusSessionState's own "SKIPPED"/
+// PersonalPlanItem.status "skipped" (personal-plan.ts, FocusSession.tsx) — that is an
+// ephemeral, per-PLAN-ITEM outcome for TODAY's session (reconciled day to day, can resurface
+// as a fresh candidate tomorrow if still relevant), never a persistent suppression. Daily
+// Command Skip is ticket-level and persists across days/syncs until an explicit Reactivate,
+// regardless of whether the ticket was ever added to a plan at all — the two "skip" words
+// name genuinely different, non-overlapping mechanisms; neither reads or writes the other.
 
 import type {
   Action,
@@ -297,7 +309,8 @@ function candidateFromAttentionItem(
   allRisks: Risk[] | undefined,
   relationIdentity: PersonalRelationIdentity,
   mentionedIssueKeys: ReadonlySet<string>,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
   const entity = resolveAttentionEntity(item, data, allRisks ?? data.risks);
   // V2.17 §1b — reverses V2.13 §1's "option 3b" for MENTION specifically: a mention always
@@ -309,9 +322,12 @@ function candidateFromAttentionItem(
   // mechanism: attention-queue.ts auto-resolves it (RESOLVED lifecycle), and this file's own
   // `eligibleAttention` filter (see computePersonalFocus) already drops RESOLVED items before
   // they ever reach this function. The same forceResolved mechanism also covers a
-  // Daily-Command-completed ticket's mention (see proactive.ts's completedOrExcludedWorkItemIds),
+  // Daily-Command-completed ticket's mention (see proactive.ts's mentionAutoResolveWorkItemIds),
   // so MENTION never needs to consult `dailyCommandCompletedWorkItemIds` directly here either.
-  const relevanceGate = item.category === "MENTION" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  // V2.23 — a skipped ticket's mention is likewise handled via the same forceResolved
+  // mechanism (proactive.ts folds dailyCommandSkippedWorkItemIds into the same set), so
+  // MENTION never needs to consult `dailyCommandSkippedWorkItemIds` here either.
+  const relevanceGate = item.category === "MENTION" ? "PASS" : evaluateWorkRelevanceGate(entity.workItemIds, data, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds);
   if (relevanceGate === "EXCLUDE") return null;
   const resolution = resolveOwner(entity, data);
   const { label: ownerLabel } = resolution;
@@ -412,14 +428,26 @@ type RelevanceGate = "PASS" | "FORCE_WATCH" | "EXCLUDE";
  *  Work Relevance (not merged into `relevances` below) so it applies even when no
  *  workRelevanceIndex is configured at all, or when the item's Jira status is still
  *  ACTIONABLE — Daily Command Completion is a standalone suppression, not a reclassification
- *  of the ticket's Jira-derived relevance. */
+ *  of the ticket's Jira-derived relevance.
+ *
+ *  V2.23 — `dailyCommandSkippedWorkItemIds` is the same additive/optional-trailing-parameter,
+ *  no-op-when-omitted contract, applied the same way: a work item the user has explicitly
+ *  SKIPPED in Daily Command is excluded from active personal-work candidates — this is the ONE
+ *  gate every Personal Focus candidate (attention-sourced or loop-sourced) passes through, so
+ *  it's the single enforcement point for "a skipped item must not be treated as active personal
+ *  work/next action/priority" (§10). Deliberately NOT folded into scoring.ts's
+ *  isWorkItemOperationallyOpen: skip is a personal-execution choice, not a project-truth change
+ *  — a skipped item's risk/delivery-confidence contribution must keep reflecting reality
+ *  regardless of who is personally executing it (see this file's own top-level V2.23 note). */
 function evaluateWorkRelevanceGate(
   workItemIds: string[],
   data: CommandCenterData,
   workRelevanceIndex: WorkRelevanceIndex | undefined,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): RelevanceGate {
   if (dailyCommandCompletedWorkItemIds && workItemIds.length > 0 && workItemIds.every((id) => dailyCommandCompletedWorkItemIds.has(id))) return "EXCLUDE";
+  if (dailyCommandSkippedWorkItemIds && workItemIds.length > 0 && workItemIds.every((id) => dailyCommandSkippedWorkItemIds.has(id))) return "EXCLUDE";
   if (!workRelevanceIndex || workItemIds.length === 0) return "PASS";
   const items = workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
   if (items.length === 0) return "PASS";
@@ -456,7 +484,8 @@ function candidateFromLoop(
   workRelevanceIndex: WorkRelevanceIndex | undefined,
   relationIdentity: PersonalRelationIdentity,
   mentionedIssueKeys: ReadonlySet<string>,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
   if (loop.id.startsWith("radar-")) return null;
   if (attentionDecisionIds.has(loop.id)) return null;
@@ -469,8 +498,9 @@ function candidateFromLoop(
   const projectId = decision?.projectId ?? workItem?.projectId;
 
   // V2.13 §1 — same Work Relevance gate as candidateFromAttentionItem above, applied to the
-  // one work item (if any) this loop resolves to.
-  const relevanceGate = evaluateWorkRelevanceGate(workItem ? [workItem.id] : [], data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  // one work item (if any) this loop resolves to. V2.23 — dailyCommandSkippedWorkItemIds
+  // threaded through the same way.
+  const relevanceGate = evaluateWorkRelevanceGate(workItem ? [workItem.id] : [], data, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds);
   if (relevanceGate === "EXCLUDE") return null;
 
   // V1.7 §15 — the action owner and the work item's owner can legitimately disagree (e.g.
@@ -646,7 +676,12 @@ export function computePersonalFocus(
   // (see types.ts's DailyCommandCompletion / store.ts's dailyCommandCompletions, keyed by
   // ticket key there and resolved to WorkItem ids by the caller). Omitting it reproduces
   // pre-V2.19 behavior exactly — nothing is ever excluded on this basis.
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  // V2.23 — same additive/optional-trailing-parameter, no-op-when-omitted contract: WorkItem
+  // ids the user has explicitly SKIPPED in Daily Command (types.ts's DailyCommandSkip /
+  // store.ts's dailyCommandSkips, resolved to WorkItem ids by the caller the same way
+  // dailyCommandCompletedWorkItemIds already is — see use-command-center.ts).
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusResult {
   const identity: IdentityRef = { displayName: ownerName, ownerId };
   // V2.14 §1 — built once per render (never re-scanned per candidate), per Task 1.
@@ -656,10 +691,10 @@ export function computePersonalFocus(
   const attentionDecisionIds = new Set(eligibleAttention.filter((i) => i.category === "DECISION" && i.sourceRef?.type === "decision").map((i) => i.sourceRef!.id));
 
   const fromAttention = eligibleAttention
-    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds))
+    .map((item) => candidateFromAttentionItem(item, data, identity, today, workRelevanceIndex, allRisks, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds))
     .filter((c): c is PersonalFocusCandidate => c !== null);
   const fromLoops = proactive.deliveryLoops
-    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds))
+    .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds))
     .filter((c): c is PersonalFocusCandidate => c !== null);
 
   const candidates = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);

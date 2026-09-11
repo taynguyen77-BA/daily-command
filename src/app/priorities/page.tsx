@@ -17,6 +17,11 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "HIGH", label: "High" },
   { key: "ON_TRACK", label: "On track" },
   { key: "OVERDUE", label: "Overdue" },
+  // V2.23 §6 — the one deliberate exception to "default = active work": selecting this tab is
+  // the explicit discoverability entry point for Daily-Command-skipped work items. Every other
+  // tab above continues to exclude skipped items (see the filter logic below) — skip never
+  // pollutes the default view.
+  { key: "SKIPPED", label: "Skipped" },
 ];
 
 // V2.14 §3 — same relation filter shape/UX as Attention Queue's, for consistency.
@@ -31,7 +36,7 @@ function matchesRelationFilter(relation: PersonalRelation, filter: RelationFilte
 }
 
 function PrioritiesInner() {
-  const { state, today, derived, filteredData, store, workRelevanceIndex, dailyCommandCompletedWorkItemIds, proactive, personalFocus } = useCommandCenter();
+  const { state, today, derived, filteredData, store, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, proactive, personalFocus } = useCommandCenter();
   const searchParams = useSearchParams();
   const [filter, setFilter] = useState<string>(searchParams.get("filter") ?? "ALL");
   const [relationFilter, setRelationFilter] = useState<RelationFilter>("ALL");
@@ -55,13 +60,25 @@ function PrioritiesInner() {
     );
   }
 
+  // V2.23 §6 — Skipped is its own tab, orthogonal to severity: selecting it shows ONLY
+  // skipped items (ignoring CRITICAL/HIGH/ON_TRACK/OVERDUE entirely); every other tab
+  // (including ALL) excludes skipped items so the default view is never polluted (§6 "default
+  // behavior should remain focused on active work"). derived.scores itself still contains a
+  // scored entry for a skipped item (see personal-focus.ts's own V2.23 note) precisely so this
+  // tab has something to show — the priority scoring model itself is unchanged (§6).
   const filtered = derived.scores.filter((result) => {
     const item = itemForScore(filteredData, result);
     if (!item) return false;
-    if (filter !== "ALL") {
-      if (filter === "OVERDUE" && !isOverdue(item, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) return false;
-      if (filter === "ON_TRACK" && result.classification !== "MEDIUM" && result.classification !== "LOW") return false;
-      if (filter !== "OVERDUE" && filter !== "ON_TRACK" && result.classification !== (filter as Severity)) return false;
+    const isSkipped = !!dailyCommandSkippedWorkItemIds?.has(item.id);
+    if (filter === "SKIPPED") {
+      if (!isSkipped) return false;
+    } else {
+      if (isSkipped) return false;
+      if (filter !== "ALL") {
+        if (filter === "OVERDUE" && !isOverdue(item, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) return false;
+        if (filter === "ON_TRACK" && result.classification !== "MEDIUM" && result.classification !== "LOW") return false;
+        if (filter !== "OVERDUE" && filter !== "ON_TRACK" && result.classification !== (filter as Severity)) return false;
+      }
     }
     const relation = classifyPersonalRelation(item, relationIdentity, mentionedIssueKeys, item.key);
     if (!matchesRelationFilter(relation, relationFilter)) return false;
@@ -128,6 +145,9 @@ function PrioritiesInner() {
                 proactive={proactive}
                 personalFocus={personalFocus}
                 relation={classifyPersonalRelation(item, relationIdentity, mentionedIssueKeys, item.key)}
+                isSkipped={!!dailyCommandSkippedWorkItemIds?.has(item.id)}
+                onSkip={(reason) => store.skipTicketInDailyCommand(item.key, reason)}
+                onReactivate={() => store.reactivateSkippedTicket(item.key)}
               />
             );
           })}

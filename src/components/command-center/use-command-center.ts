@@ -111,6 +111,16 @@ export function useCommandCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.dailyCommandCompletions, scopedData.workItems]);
 
+  // V2.23 — Daily Command Skip, resolved to WorkItem ids exactly the same way
+  // dailyCommandCompletedWorkItemIds is above: state.dailyCommandSkips stays keyed by ticket
+  // KEY (see DailyCommandSkip's own comment), this is purely a lookup-shape conversion.
+  const dailyCommandSkippedWorkItemIds = useMemo(() => {
+    const keys = new Set(Object.keys(state.dailyCommandSkips ?? {}));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.dailyCommandSkips, scopedData.workItems]);
+
   // V2.21 §3 — computed AFTER workRelevanceIndex/dailyCommandCompletedWorkItemIds (moved
   // below them, was above before V2.21) and now threaded through: `derived` is the shared
   // scores/risks/kpis every screen reads (Home, Priorities, Risks), so it must apply the same
@@ -141,11 +151,12 @@ export function useCommandCenter() {
             scopedMentionEvents,
             state.personalIdentity?.accountId,
             state.ownerName,
-            dailyCommandCompletedWorkItemIds
+            dailyCommandCompletedWorkItemIds,
+            dailyCommandSkippedWorkItemIds
           )
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -191,10 +202,10 @@ export function useCommandCenter() {
   const personalFocus = useMemo(
     () =>
       proactive
-        ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds)
+        ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds)
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds]
+    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds]
   );
 
   // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
@@ -213,6 +224,7 @@ export function useCommandCenter() {
     workRelevanceIndex,
     scopedMentionEvents,
     dailyCommandCompletedWorkItemIds,
+    dailyCommandSkippedWorkItemIds,
     store: commandCenterStore,
   };
 }
@@ -251,6 +263,15 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
     if (keys.size === 0) return new Set<string>();
     return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
   })();
+  // V2.23 — same resolution as dailyCommandCompletedWorkItemIds just above, and the same
+  // §4 bug class it fixed for completion: an override pipeline that forgets to resolve/thread
+  // this would let a skipped ticket reappear as active work the moment a query/Meeting Mode
+  // session is scoped to its project.
+  const dailyCommandSkippedWorkItemIds = (() => {
+    const keys = new Set(Object.keys(state.dailyCommandSkips ?? {}));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+  })();
   const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const proactive = state.loaded
     ? computeProactiveIntelligence(
@@ -265,11 +286,12 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         scopedMentionEvents,
         state.personalIdentity?.accountId,
         state.ownerName,
-        dailyCommandCompletedWorkItemIds
+        dailyCommandCompletedWorkItemIds,
+        dailyCommandSkippedWorkItemIds
       )
     : null;
   const personalFocus = proactive
-    ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds)
+    ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds)
     : null;
-  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds };
+  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds };
 }

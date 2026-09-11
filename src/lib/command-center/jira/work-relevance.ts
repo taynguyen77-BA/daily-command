@@ -172,7 +172,7 @@ export function isPersonalWorkEligibleItem(item: Pick<WorkItem, "sourceType" | "
  *  on a genuinely Jira-Done ticket kept surfacing in Your Delivery Focus/the Attention Queue
  *  forever on any install where the user hadn't yet visited Data & Settings to classify that
  *  exact status name. This function gives that one call site (see proactive.ts's
- *  completedOrExcludedWorkItemIds) the same zero-config floor every other surface already had.
+ *  mentionAutoResolveWorkItemIds) the same zero-config floor every other surface already had.
  *  Never the reverse: an item whose native status is NOT "Done" and whose exact status name is
  *  still UNKNOWN in the policy is correctly NOT reported finished here — conservatism (§26) is
  *  preserved, this only adds a floor under it, never removes it. */

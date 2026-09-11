@@ -1579,6 +1579,27 @@ export interface DailyCommandCompletion {
   completedBy?: string; // PersonalIdentity.displayName at the moment of completion, when configured
 }
 
+// ===== V2.23 — Skipped Work & Personal Execution Boundary =====
+// A Daily Command Skip is a PERSONAL EXECUTION STATE, distinct from both Work Relevance
+// EXCLUDED (a policy/project-truth concept — "this work is outside my operational relevance")
+// and Daily Command Completion (types.ts's DailyCommandCompletion just above — "I finished my
+// personal execution responsibility"). SKIPPED means "the work is still relevant/visible, but
+// I have intentionally chosen not to execute it right now" (e.g. another team owns it). Keyed
+// by Jira issue KEY, exactly like DailyCommandCompletion, for the same identity reasons (see
+// that type's own comment) — never a second identity scheme. Never mutates Jira, never mutates
+// an existing Action/WorkItem. A ticketKey can be in AT MOST ONE of dailyCommandSkips /
+// dailyCommandCompletions at any time — store.ts's skipTicketInDailyCommand/
+// completeTicketInDailyCommand each clear the other map's entry for the same ticketKey, so
+// "Completed + Skipped" is never a representable combination.
+export type SkipReason = "Team is handling it" | "Not my action" | "Waiting on another team" | "Not relevant right now" | "Other";
+
+export interface DailyCommandSkip {
+  ticketKey: string;
+  skippedAt: string; // ISO datetime — same precision/purpose as DailyCommandCompletion.completedAt (reactivation-by-mention comparisons)
+  skippedBy?: string;
+  reason?: SkipReason; // optional — never required to skip an item
+}
+
 // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. A lightweight, local-only feedback
 // record — three simple 0/1/2 questions, never a productivity score, never sent anywhere.
 // `context` is a deterministic SNAPSHOT of state already computed elsewhere at the moment of
