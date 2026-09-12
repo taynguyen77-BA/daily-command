@@ -215,6 +215,9 @@ import { daysStale } from "../src/components/command-center/Header";
 import { getActiveAssignedWorkItems, getAssignedWorkItems, getCompletedAssignedWorkItems, getSkippedAssignedWorkItems } from "../src/lib/command-center/assigned-work";
 import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions } from "../src/lib/command-center/recent-mentions";
 import type { DailyCommandCompletion, DailyCommandSkip } from "../src/lib/command-center/types";
+// V2.24 — Attention Truth & Automatic Jira Sync Reliability
+import { shouldAutoSyncJira } from "../src/lib/command-center/auto-sync";
+import type { JiraSyncState } from "../src/lib/command-center/types";
 
 let failures = 0;
 function ok(group: string, cond: boolean, msg: string) {
@@ -1033,6 +1036,42 @@ function makeJiraIssue(overrides: Partial<JiraIssue["fields"]> & { key?: string 
   ok("Data freshness", computeFreshness(new Date(now - 90 * 60_000).toISOString(), now) === "aging", "90 minutes old is aging (30min-4h)");
   ok("Data freshness", computeFreshness(new Date(now - 5 * 3_600_000).toISOString(), now) === "stale", "5 hours old is stale (>4h)");
   ok("Data freshness", computeFreshness(undefined, now) === "unknown", "no sync timestamp at all is 'unknown', never presented as fresh");
+}
+
+// ===== V2.24 — Automatic Jira Sync Reliability: shouldAutoSyncJira's pure eligibility gate.
+// Phase 2 audit root cause: the scheduled cron (vercel.json / .github/workflows/sync.yml)
+// reaches jira/sync/route.ts and genuinely fetches live Jira data, but that route is
+// stateless-per-request (see its own top comment) — nothing persists the result anywhere the
+// browser later reads, so a cron-triggered "sync" never actually refreshed what the user
+// sees. Manual "Sync Now" only ever worked because it runs INSIDE the browser tab and calls
+// store.syncJira() directly, which merges straight into this app's one real persistent store
+// (IndexedDB/localStorage). The fix (auto-sync.ts) reuses that exact same store.syncJira()
+// call automatically, from the browser, on the schedule this gate decides — no second sync
+// implementation, no new server-side Jira data store. =====
+{
+  const now = Date.now();
+  const fresh: JiraSyncState = { lastSyncStatus: "success", lastSyncCompletedAt: new Date(now - 5 * 60_000).toISOString() };
+  const aging: JiraSyncState = { lastSyncStatus: "success", lastSyncCompletedAt: new Date(now - 90 * 60_000).toISOString() };
+  const stale: JiraSyncState = { lastSyncStatus: "success", lastSyncCompletedAt: new Date(now - 5 * 3_600_000).toISOString() };
+  const never: JiraSyncState = { lastSyncStatus: "never" };
+  const failedButPreviouslyAging: JiraSyncState = { lastSyncStatus: "failed", lastSyncCompletedAt: new Date(now - 90 * 60_000).toISOString(), lastSyncError: "network blip" };
+
+  ok("V2.24 Auto Sync gate", shouldAutoSyncJira("jira", aging, false, now) === true, "aging (30min-4h) Jira data with dataSource jira, not mid-sync, is eligible for an automatic refresh");
+  ok("V2.24 Auto Sync gate", shouldAutoSyncJira("jira", stale, false, now) === true, "stale (>4h) data is equally eligible");
+  ok("V2.24 Auto Sync gate", shouldAutoSyncJira("jira", fresh, false, now) === false, "data still 'fresh' (<30min) is NOT re-synced — reuses freshness.ts's own threshold rather than a second invented cadence, avoiding excessive Jira API calls");
+  ok("V2.24 Auto Sync gate", shouldAutoSyncJira("jira", aging, true, now) === false, "never overlaps an already-in-flight sync (manual or automatic) — isSyncing=true is always a no-op regardless of freshness");
+  ok("V2.24 Auto Sync gate", shouldAutoSyncJira("demo", aging, false, now) === false, "Demo data source is never auto-synced — this capability is Jira-only, exactly like every other Jira-specific feature in this app");
+  ok("V2.24 Auto Sync gate", shouldAutoSyncJira("local-import", aging, false, now) === false, "Local Import is never auto-synced either");
+  ok(
+    "V2.24 Auto Sync gate",
+    shouldAutoSyncJira("jira", never, false, now) === false,
+    "lastSyncStatus 'never' (this install has never completed a real Jira sync) is NEVER auto-synced — the first-ever sync against a real Jira instance stays an explicit, confirmed user action (data-settings/page.tsx's existing pendingFirstSync gate, V2.1 §8); automatic sync only ever keeps an already-consented connection fresh, never initiates the first one"
+  );
+  ok(
+    "V2.24 Auto Sync gate",
+    shouldAutoSyncJira("jira", failedButPreviouslyAging, false, now) === true,
+    "a previously FAILED sync (e.g. a transient network blip) with real aging data underneath is still eligible for the next automatic attempt — a failure must not permanently wedge auto-sync off"
+  );
 }
 
 // ===== Release readiness =====
@@ -6348,6 +6387,170 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   const aqUngated = computeProactiveIntelligence(aqData, aqDerived, [], null, {}, "jira", TODAY, undefined, aqMentionEvents);
   const ungatedByKey = (key: string, commentId: string) => aqUngated.attentionQueue.find((i) => i.id === `MENTION:${slug(key)}:${slug(commentId)}`);
   ok("V2.17 Attention Queue mention auto-resolve", ungatedByKey(completedTicket.key, `c-${completedTicket.key}`)?.lifecycle === "NEW", "omitting the Work Relevance index is a no-op — a COMPLETED ticket's mention is neither excluded nor auto-resolved without an index to classify it");
+}
+
+// ===== V2.24 — Attention Truth regression matrix. Phase 1 audit confirmed the mechanism
+// (isWorkItemDoneOrExcluded -> mentionAutoResolveWorkItemIds -> RawItem.forceResolved, all
+// already present since V2.17/V2.19/V2.21/V2.23) already implements "current ticket state
+// wins over a historical mention event" — this is a LOCK-IN regression suite over that exact
+// mechanism against the dev prompt's own 12-scenario test matrix (§10), not a new gate. Every
+// scenario below is status-based, never date-based: a mention's age never factors into the
+// forceResolved decision (see attention-queue.ts's own RawItem.forceResolved comment) — tests
+// 1-4 exist specifically to PROVE mentionedAt is irrelevant to this decision, both ways. =====
+{
+  const v24Idx = buildWorkRelevanceIndex(globalPolicy({ Done: "COMPLETED", "Won't Fix": "EXCLUDED", "To Do": "ACTIONABLE" }));
+  const oldIso = "2026-01-01T00:00:00.000Z";
+  const recentIso = TODAY + "T09:00:00.000Z";
+
+  // ----- 1 & 2: mention + OPEN ticket (old and recent) — appears normally, NEW, never
+  // suppressed by this mechanism regardless of the mention's age. -----
+  const openTicket = jiraItem({ id: "wi-v24-open", key: "JPMC-2400", jiraStatusName: "To Do" });
+  const openData: CommandCenterData = { ...emptyData(), workItems: [openTicket] };
+  const openDerived = deriveData(openData, null, TODAY);
+  const oldOnOpen: MentionEvent = { issueKey: openTicket.key, commentId: "c-old-open", excerpt: "old, ticket still open", mentionedAt: oldIso };
+  const recentOnOpen: MentionEvent = { issueKey: openTicket.key, commentId: "c-recent-open", excerpt: "recent, ticket still open", mentionedAt: recentIso };
+  const openProactive = computeProactiveIntelligence(openData, openDerived, [], null, {}, "jira", TODAY, v24Idx, [oldOnOpen, recentOnOpen]);
+  const openById = (id: string) => openProactive.attentionQueue.find((i) => i.id === id);
+  ok("V2.24 Attention Truth #1", openById(`MENTION:${slug(openTicket.key)}:c-old-open`)?.lifecycle === "NEW", "1: an OLD mention on an OPEN ticket follows existing recency-agnostic lifecycle behavior — surfaces as NEW, never suppressed");
+  ok("V2.24 Attention Truth #2", openById(`MENTION:${slug(openTicket.key)}:c-recent-open`)?.lifecycle === "NEW", "2: a RECENT mention on an OPEN ticket surfaces as NEW per existing attention rules");
+
+  // ----- 3 & 4: mention + COMPLETED ticket (old and recent) — MUST NOT appear as active,
+  // regardless of the mention's own age; current ticket state wins. -----
+  const doneTicket = jiraItem({ id: "wi-v24-done", key: "JPMC-2401", jiraStatusName: "Done" });
+  const doneData: CommandCenterData = { ...emptyData(), workItems: [doneTicket] };
+  const doneDerived = deriveData(doneData, null, TODAY);
+  const oldOnDone: MentionEvent = { issueKey: doneTicket.key, commentId: "c-old-done", excerpt: "old mention, 10 days ago", mentionedAt: oldIso };
+  const recentOnDone: MentionEvent = { issueKey: doneTicket.key, commentId: "c-recent-done", excerpt: "recent mention", mentionedAt: recentIso };
+  const doneProactive = computeProactiveIntelligence(doneData, doneDerived, [], null, {}, "jira", TODAY, v24Idx, [oldOnDone, recentOnDone]);
+  const doneById = (id: string) => doneProactive.attentionQueue.find((i) => i.id === id);
+  const activeDefault = (items: AttentionItem[]) => items.filter((i) => i.lifecycle !== "SNOOZED" && i.lifecycle !== "RESOLVED");
+  ok("V2.24 Attention Truth #3", doneById(`MENTION:${slug(doneTicket.key)}:c-old-done`)?.lifecycle === "RESOLVED", "3: an OLD mention (10 days ago) on a ticket that is CURRENTLY Completed must not appear as active attention — current state wins over the historical event");
+  ok("V2.24 Attention Truth #4", doneById(`MENTION:${slug(doneTicket.key)}:c-recent-done`)?.lifecycle === "RESOLVED", "4: a RECENT mention on a CURRENTLY Completed ticket is equally suppressed — recency never overrides completion truth");
+  ok("V2.24 Attention Truth #3/4", activeDefault(doneProactive.attentionQueue).length === 0, "neither mention on the completed ticket survives the UI's own ACTIVE_DEFAULT filter (lifecycle !== SNOOZED/RESOLVED)");
+
+  // ----- 5 & 6: Work Relevance COMPLETED/EXCLUDED (as distinct from Jira-native "Done" used by
+  // #3/#4 above) — re-confirms the same forceResolved mechanism honors the opt-in policy
+  // classification too, not just the native status floor. Already covered by the V2.17 block
+  // earlier in this file (completedTicket/excludedTicket there) — restated here with this
+  // matrix's own fixtures for direct §10 traceability. -----
+  const wrCompletedTicket = jiraItem({ id: "wi-v24-wr-completed", key: "JPMC-2403", jiraStatusName: "Deployed to Prod" });
+  const wrExcludedTicket = jiraItem({ id: "wi-v24-wr-excluded", key: "JPMC-2404", jiraStatusName: "Won't Fix" });
+  const wrIdx = buildWorkRelevanceIndex(globalPolicy({ "Deployed to Prod": "COMPLETED", "Won't Fix": "EXCLUDED", "To Do": "ACTIONABLE" }));
+  const wrData: CommandCenterData = { ...emptyData(), workItems: [wrCompletedTicket, wrExcludedTicket] };
+  const wrDerived = deriveData(wrData, null, TODAY);
+  const wrMentions: MentionEvent[] = [
+    { issueKey: wrCompletedTicket.key, commentId: "c-wr-completed", excerpt: "mention on a Work-Relevance-COMPLETED ticket", mentionedAt: oldIso },
+    { issueKey: wrExcludedTicket.key, commentId: "c-wr-excluded", excerpt: "mention on a Work-Relevance-EXCLUDED ticket", mentionedAt: oldIso },
+  ];
+  const wrProactive = computeProactiveIntelligence(wrData, wrDerived, [], null, {}, "jira", TODAY, wrIdx, wrMentions);
+  ok(
+    "V2.24 Attention Truth #5",
+    wrProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(wrCompletedTicket.key)}:c-wr-completed`)?.lifecycle === "RESOLVED",
+    "5: a mention on a ticket the Work Relevance Policy classifies COMPLETED must not appear as active attention"
+  );
+  ok(
+    "V2.24 Attention Truth #6",
+    wrProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(wrExcludedTicket.key)}:c-wr-excluded`)?.lifecycle === "RESOLVED",
+    "6: a mention on a ticket the Work Relevance Policy classifies EXCLUDED must not appear as active attention"
+  );
+
+  // ----- 7: Daily Command Completion suppresses a MENTION too — independent of any Work
+  // Relevance Policy being configured at all (mentionAutoResolveWorkItemIds folds
+  // dailyCommandCompletedWorkItemIds in unconditionally, see proactive.ts). -----
+  const dccTicket = jiraItem({ id: "wi-v24-dcc", key: "JPMC-2402", jiraStatusName: "In Progress" });
+  const dccData: CommandCenterData = { ...emptyData(), workItems: [dccTicket] };
+  const dccDerived = deriveData(dccData, null, TODAY);
+  const dccMention: MentionEvent = { issueKey: dccTicket.key, commentId: "c-dcc", excerpt: "mentioned before I marked it done in Daily Command", mentionedAt: oldIso };
+  const dccProactive = computeProactiveIntelligence(dccData, dccDerived, [], null, {}, "jira", TODAY, undefined, [dccMention], undefined, undefined, new Set([dccTicket.id]));
+  ok(
+    "V2.24 Attention Truth #7",
+    dccProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(dccTicket.key)}:c-dcc`)?.lifecycle === "RESOLVED",
+    "7: a mention on a ticket the user explicitly completed IN Daily Command (no Jira-side status change, no Work Relevance Policy configured at all) stays suppressed — the same forceResolved mechanism, not a second one"
+  );
+
+  // ----- 8: the completed ticket's mention remains in historical mentionEvents — only ACTIVE
+  // attention is suppressed, never the underlying record. Proven directly against the
+  // MentionEvent inputs this test itself constructed (never mutated/filtered by this pass) and
+  // against attention-queue.ts's own raw-item construction (the mention still produces a
+  // RawItem/AttentionItem, just RESOLVED — see forceResolved's own doc: "deliberately NOT
+  // simply omitted from raw"). -----
+  ok("V2.24 Attention Truth #8", doneById(`MENTION:${slug(doneTicket.key)}:c-old-done`) !== undefined, "8: the completed ticket's historical mention event still produces a real attention record (present, just RESOLVED) — history is preserved, not deleted");
+
+  // ----- 9: a subsequent Jira sync (i.e., re-running computeProactiveIntelligence again with
+  // the SAME persisted attentionState this run produced) does NOT resurrect the item — it
+  // stays RESOLVED, never flips to REOPENED just because `raw` still contains it every sync. -----
+  const doneProactiveAgain = computeProactiveIntelligence(doneData, doneDerived, [], null, doneProactive.nextAttentionState, "jira", TODAY, v24Idx, [oldOnDone, recentOnDone]);
+  ok(
+    "V2.24 Attention Truth #9",
+    doneProactiveAgain.attentionQueue.find((i) => i.id === `MENTION:${slug(doneTicket.key)}:c-old-done`)?.lifecycle === "RESOLVED",
+    "9: a later sync re-producing the exact same raw mention against a still-completed ticket does NOT resurrect it as REOPENED — idempotent RESOLVED, not a fresh escalation"
+  );
+
+  // ----- 10: a genuinely NEW mention comment arrives on a ticket that is STILL completed —
+  // existing reactivation semantics for the Attention Queue's MENTION category are STATUS-
+  // driven (reactivation happens when the ticket's own relevance changes away from COMPLETED/
+  // EXCLUDED — see attention-queue.ts's own comment), never "a new mention alone reactivates a
+  // completed ticket". A normal sync bringing in one more comment on still-completed work must
+  // not become an active attention item either. -----
+  const newCommentOnDone: MentionEvent = { issueKey: doneTicket.key, commentId: "c-brand-new-on-done", excerpt: "a brand new comment, ticket still Done", mentionedAt: recentIso };
+  const doneProactiveNewComment = computeProactiveIntelligence(doneData, doneDerived, [], null, doneProactive.nextAttentionState, "jira", TODAY, v24Idx, [oldOnDone, recentOnDone, newCommentOnDone]);
+  ok(
+    "V2.24 Attention Truth #10a",
+    doneProactiveNewComment.attentionQueue.find((i) => i.id === `MENTION:${slug(doneTicket.key)}:c-brand-new-on-done`)?.lifecycle === "RESOLVED",
+    "10a: a brand-new mention comment arriving while the ticket is STILL Completed is force-resolved too, exactly like the older ones — a plain sync must never reactivate completed work"
+  );
+  // ...but once the ticket's own relevance genuinely changes away from COMPLETED (e.g. reopened
+  // to "To Do"), the ordinary REOPENED path correctly brings a still-open mention back — this
+  // is the "meaningful reactivation" existing semantics already provide, driven by ticket
+  // state, not by mention recency.
+  const reopenedIdx = buildWorkRelevanceIndex(globalPolicy({ Done: "COMPLETED", "Won't Fix": "EXCLUDED", "To Do": "ACTIONABLE" }));
+  const reopenedTicket = { ...doneTicket, jiraStatusName: "To Do", status: "In Progress" };
+  const reopenedData: CommandCenterData = { ...emptyData(), workItems: [reopenedTicket] };
+  const reopenedDerived = deriveData(reopenedData, null, TODAY);
+  const doneProactiveReopened = computeProactiveIntelligence(reopenedData, reopenedDerived, [], null, doneProactive.nextAttentionState, "jira", TODAY, reopenedIdx, [oldOnDone]);
+  ok(
+    "V2.24 Attention Truth #10b",
+    doneProactiveReopened.attentionQueue.find((i) => i.id === `MENTION:${slug(doneTicket.key)}:c-old-done`)?.lifecycle === "REOPENED",
+    "10b: once the ticket's OWN status genuinely reopens (no longer Done/COMPLETED), the previously-suppressed mention correctly reappears via the ordinary RESOLVED -> REOPENED path — existing reactivation semantics, driven by ticket truth, are preserved"
+  );
+
+  // ----- 11: cross-project isolation — a Completed ticket in one project must never suppress
+  // (or an Open ticket in another project ever get accidentally suppressed by) another
+  // project's mention, even when keys/status names are otherwise similar. Lookup is by exact
+  // WorkItem key, never a project-wide/global assumption. -----
+  const projectADone = jiraItem({ id: "wi-v24-a-done", key: "ALPHA-800", projectId: "jira-project-ALPHA", jiraStatusName: "Done" });
+  const projectBOpen = jiraItem({ id: "wi-v24-b-open", key: "BETA-800", projectId: "jira-project-BETA", jiraStatusName: "To Do" });
+  const crossData: CommandCenterData = { ...emptyData(), workItems: [projectADone, projectBOpen] };
+  const crossDerived = deriveData(crossData, null, TODAY);
+  const crossMentions: MentionEvent[] = [
+    { issueKey: projectADone.key, commentId: "c-a-800", excerpt: "mention on completed Project A ticket", mentionedAt: oldIso },
+    { issueKey: projectBOpen.key, commentId: "c-b-800", excerpt: "mention on open Project B ticket", mentionedAt: oldIso },
+  ];
+  const crossProactive = computeProactiveIntelligence(crossData, crossDerived, [], null, {}, "jira", TODAY, v24Idx, crossMentions);
+  ok(
+    "V2.24 Attention Truth #11",
+    crossProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(projectADone.key)}:c-a-800`)?.lifecycle === "RESOLVED",
+    "11: Project A's completed ticket mention is suppressed independent of Project B"
+  );
+  ok(
+    "V2.24 Attention Truth #11",
+    crossProactive.attentionQueue.find((i) => i.id === `MENTION:${slug(projectBOpen.key)}:c-b-800`)?.lifecycle === "NEW",
+    "11: Project B's open ticket mention is NOT suppressed by Project A's unrelated completion — no cross-project state leakage through the shared numeric suffix (800) or the shared global Work Relevance policy"
+  );
+
+  // ----- 12: multiple historical mentions (several comments) on the SAME completed ticket
+  // never produce more than zero ACTIVE entries — each comment's own attention item resolves
+  // independently, no duplicate/active leftover. -----
+  const multiMentions: MentionEvent[] = [
+    { issueKey: doneTicket.key, commentId: "c-multi-1", excerpt: "first old comment", mentionedAt: oldIso },
+    { issueKey: doneTicket.key, commentId: "c-multi-2", excerpt: "second old comment", mentionedAt: oldIso },
+    { issueKey: doneTicket.key, commentId: "c-multi-3", excerpt: "third, more recent comment", mentionedAt: recentIso },
+  ];
+  const multiProactive = computeProactiveIntelligence(doneData, doneDerived, [], null, {}, "jira", TODAY, v24Idx, multiMentions);
+  const multiOnTicket = multiProactive.attentionQueue.filter((i) => i.id.startsWith(`MENTION:${slug(doneTicket.key)}:`));
+  ok("V2.24 Attention Truth #12", multiOnTicket.length === 3, "12: all three historical comments still produce their own individually-tracked attention record (history/count preserved)");
+  ok("V2.24 Attention Truth #12", multiOnTicket.every((i) => i.lifecycle === "RESOLVED"), "12: every one of them resolves — a completed ticket with several historical mentions produces zero active duplicates, not one-per-comment noise");
+  ok("V2.24 Attention Truth #12", activeDefault(multiOnTicket).length === 0, "12: none of the three survive the UI's ACTIVE_DEFAULT filter");
 }
 
 // ----- V2.13 (bug fix) — resolveAttentionEntity's RISK lookup previously checked only

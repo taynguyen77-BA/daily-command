@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { initAppStateSync } from "@/lib/command-center/app-state-sync";
+import { initAutoJiraSync } from "@/lib/command-center/auto-sync";
 
 interface NavLink {
   href: string;
@@ -57,6 +58,15 @@ export function Nav() {
   // is harmless.
   useEffect(() => {
     void initAppStateSync(commandCenterStore);
+  }, []);
+
+  // V2.24 — same single-init-point reasoning as above, for automatic Jira sync: this is the
+  // one place already guaranteed to mount exactly once app-wide, so it's the natural place to
+  // start the background freshness check too. initAutoJiraSync is itself idempotent (a
+  // module-level guard, same pattern as initAppStateSync), so a StrictMode dev double-invoke
+  // is equally harmless here.
+  useEffect(() => {
+    initAutoJiraSync(commandCenterStore);
   }, []);
 
   return (
