@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { commandCenterStore } from "@/lib/command-center/store";
@@ -39,6 +39,76 @@ const LINKS: NavLink[] = [
   { href: "/data-settings", label: "Data & Settings" },
 ];
 
+// V2.24 follow-up — a header shortcut for the exact same incremental sync data-settings/
+// page.tsx's "Sync Jira" button already calls (store.syncJira({ full: false })): zero
+// duplicated sync logic, same read-only guarantee. Deliberately never available until
+// lastSyncStatus is no longer "never" — the first-ever contact with a real Jira instance
+// stays gated behind Data & Settings' explicit read-only confirmation dialog (V2.1 §8);
+// this shortcut only ever keeps an already-consented connection fresh, same boundary
+// auto-sync.ts's shouldAutoSyncJira already enforces for the automatic path.
+function SyncJiraHeaderButton() {
+  const dataSource = useSyncExternalStore(
+    commandCenterStore.subscribe,
+    () => commandCenterStore.getSnapshot().dataSource,
+    () => commandCenterStore.getServerSnapshot().dataSource
+  );
+  const jiraSync = useSyncExternalStore(
+    commandCenterStore.subscribe,
+    () => commandCenterStore.getSnapshot().jiraSync,
+    () => commandCenterStore.getServerSnapshot().jiraSync
+  );
+  const [syncing, setSyncing] = useState(false);
+  const [result, setResult] = useState<"ok" | "error" | null>(null);
+  const resultTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (resultTimeout.current) clearTimeout(resultTimeout.current);
+  }, []);
+
+  if (dataSource !== "jira") return null;
+
+  if (jiraSync.lastSyncStatus === "never") {
+    return (
+      <Link href="/data-settings" className="rounded-md border border-border px-2.5 py-1.5 text-xs text-text3 hover:text-text2">
+        Connect Jira
+      </Link>
+    );
+  }
+
+  async function handleClick() {
+    if (syncing) return;
+    setSyncing(true);
+    setResult(null);
+    const outcome = await commandCenterStore.syncJira({ full: false });
+    setSyncing(false);
+    setResult(outcome.ok ? "ok" : "error");
+    if (resultTimeout.current) clearTimeout(resultTimeout.current);
+    resultTimeout.current = setTimeout(() => setResult(null), 4000);
+  }
+
+  const lastSyncedLabel = jiraSync.lastSyncCompletedAt ? new Date(jiraSync.lastSyncCompletedAt).toLocaleTimeString() : "never";
+
+  return (
+    <button
+      onClick={handleClick}
+      disabled={syncing}
+      title={`Last synced: ${lastSyncedLabel}`}
+      className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-text2 hover:border-accent hover:text-text disabled:opacity-60"
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className={syncing ? "animate-spin" : undefined}>
+        <path
+          d="M10.5 6a4.5 4.5 0 1 1-1.318-3.182M10.5 1.5v3h-3"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      {syncing ? "Syncing…" : result === "ok" ? "Synced" : result === "error" ? "Sync failed" : "Sync Jira"}
+    </button>
+  );
+}
+
 export function Nav() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
@@ -75,28 +145,31 @@ export function Nav() {
           entire mobile screen before any real content appeared, and long link labels
           overflowed the viewport width. Collapsed behind a toggle showing the current
           page; the full flat flex-wrap layout is unchanged at md and above. */}
-      <div className="flex items-center justify-between px-4 py-2.5 md:hidden">
+      <div className="flex items-center justify-between gap-2 px-4 py-2.5 md:hidden">
         <span className="text-sm font-medium text-text">{activeLink.label}</span>
-        <button
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          aria-controls="mobile-nav-links"
-          aria-label={open ? "Close navigation menu" : "Open navigation menu"}
-          className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-text2"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-            {open ? (
-              <path d="M2 2L12 12M12 2L2 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            ) : (
-              <path d="M1 3.5H13M1 7H13M1 10.5H13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            )}
-          </svg>
-          {open ? "Close" : "Menu"}
-        </button>
+        <div className="flex items-center gap-2">
+          <SyncJiraHeaderButton />
+          <button
+            onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            aria-controls="mobile-nav-links"
+            aria-label={open ? "Close navigation menu" : "Open navigation menu"}
+            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-text2"
+          >
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              {open ? (
+                <path d="M2 2L12 12M12 2L2 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              ) : (
+                <path d="M1 3.5H13M1 7H13M1 10.5H13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              )}
+            </svg>
+            {open ? "Close" : "Menu"}
+          </button>
+        </div>
       </div>
       <div
         id="mobile-nav-links"
-        className={`${open ? "flex" : "hidden"} flex-col gap-0.5 px-4 pb-3 md:flex md:flex-row md:flex-wrap md:gap-1 md:px-6 md:py-2 md:pb-2`}
+        className={`${open ? "flex" : "hidden"} flex-col gap-0.5 px-4 pb-3 md:flex md:flex-row md:flex-wrap md:items-center md:gap-1 md:px-6 md:py-2 md:pb-2`}
       >
         {links.map((link) => {
           const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
@@ -113,6 +186,9 @@ export function Nav() {
             </Link>
           );
         })}
+        <div className="hidden md:ml-auto md:block">
+          <SyncJiraHeaderButton />
+        </div>
       </div>
     </nav>
   );
