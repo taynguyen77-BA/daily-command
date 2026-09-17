@@ -26,6 +26,8 @@ import { computeDecisionRadar } from "./decision-radar";
 import { computeDeliveryDrift } from "./delivery-drift";
 import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
+import { detectJiraStatusCompletions } from "./jira-completion-detection";
+import { DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS, type StaleAssignedTicketThresholds } from "./personal-staleness";
 import { computeRiskEscalations } from "./risk-escalation";
 import { computeAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
@@ -204,6 +206,11 @@ export interface StoreState {
   // other history-shaped field above; never synced (not part of SyncedAppState), never sent
   // anywhere. See PilotFeedbackEntry's own comment (types.ts) for the full reasoning.
   pilotFeedback: PilotFeedbackEntry[];
+  // V2.25 Task 3 — Stale Assigned Ticket detector thresholds (personal-staleness.ts),
+  // user-configurable in Data & Settings rather than hardcoded — a BA/PO covering fast-moving
+  // vs. slow-moving projects needs different tolerances for "how long is too long with no
+  // activity". Defaults to DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS.
+  staleAssignedTicketThresholds: StaleAssignedTicketThresholds;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -243,6 +250,7 @@ function initialState(): StoreState {
     dailyCommandCompletions: {},
     dailyCommandSkips: {},
     pilotFeedback: [],
+    staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
   };
 }
 
@@ -464,6 +472,23 @@ function asPilotFeedback(v: unknown): PilotFeedbackEntry[] {
   return v.filter(isPilotFeedbackEntryShape);
 }
 
+// V2.25 Task 3 — same discipline as every other parsed field here: a malformed/missing value
+// falls back to the safe default rather than being trusted as-is. escalateBusinessDays is
+// additionally clamped to never be below warnBusinessDays — otherwise ESCALATE could fire
+// before WARN, an invalid severity ordering no code path should ever have to handle.
+function asStaleAssignedTicketThresholds(v: unknown): StaleAssignedTicketThresholds {
+  const obj = asPlainObject<Partial<StaleAssignedTicketThresholds>>(v, {});
+  const warnBusinessDays =
+    typeof obj.warnBusinessDays === "number" && Number.isFinite(obj.warnBusinessDays) && obj.warnBusinessDays > 0
+      ? Math.round(obj.warnBusinessDays)
+      : DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS.warnBusinessDays;
+  const escalateBusinessDaysRaw =
+    typeof obj.escalateBusinessDays === "number" && Number.isFinite(obj.escalateBusinessDays) && obj.escalateBusinessDays > 0
+      ? Math.round(obj.escalateBusinessDays)
+      : DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS.escalateBusinessDays;
+  return { warnBusinessDays, escalateBusinessDays: Math.max(escalateBusinessDaysRaw, warnBusinessDays) };
+}
+
 // V2.14 §4 — same discipline as every other parsed field here: a malformed/missing entry
 // falls back to its safe default (false — "Everything") rather than being trusted as-is.
 function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
@@ -515,6 +540,7 @@ export function parseStoredState(raw: string): StoreState {
       dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
       dailyCommandSkips: asDailyCommandSkips(parsed.dailyCommandSkips),
       pilotFeedback: asPilotFeedback(parsed.pilotFeedback),
+      staleAssignedTicketThresholds: asStaleAssignedTicketThresholds(parsed.staleAssignedTicketThresholds),
     };
   } catch {
     return initialState();
@@ -842,6 +868,15 @@ export class CommandCenterStore {
     this.set({ ...this.state, filters: { ...this.state.filters, ...patch } });
   }
 
+  /** V2.25 Task 3 — Data & Settings' Stale Assigned Ticket thresholds control. Same clamp as
+   *  asStaleAssignedTicketThresholds (parse-time): escalateBusinessDays is never allowed below
+   *  warnBusinessDays, so a user can't accidentally configure ESCALATE to fire before WARN. */
+  setStaleAssignedTicketThresholds(warnBusinessDays: number, escalateBusinessDays: number) {
+    const safeWarn = Number.isFinite(warnBusinessDays) && warnBusinessDays > 0 ? Math.round(warnBusinessDays) : this.state.staleAssignedTicketThresholds.warnBusinessDays;
+    const safeEscalateRaw = Number.isFinite(escalateBusinessDays) && escalateBusinessDays > 0 ? Math.round(escalateBusinessDays) : this.state.staleAssignedTicketThresholds.escalateBusinessDays;
+    this.set({ ...this.state, staleAssignedTicketThresholds: { warnBusinessDays: safeWarn, escalateBusinessDays: Math.max(safeEscalateRaw, safeWarn) } });
+  }
+
   /** V2.11 §3B — the ONLY place the advanced-settings visibility toggle is ever set. Purely
    *  a UI display preference (never deletes or gates any underlying computation). */
   setShowAdvancedSettings(value: boolean) {
@@ -1071,6 +1106,30 @@ export class CommandCenterStore {
 
     const newMemoryEvents = prevSnapshot ? this.computeMemoryEvents(merged, this.state.snapshotHistory, getTodayIso()) : [];
 
+    // V2.25 Task 2 — Jira-side completions (a Dev/QA closing a ticket directly in Jira, not
+    // any in-app action) are diffed the same way detectNewAssignments already diffs ownerId,
+    // and turned into their own memoryEvent kind so Daily/Weekly Report stops silently missing
+    // real completed work just because nobody clicked anything in this app. See
+    // jira-completion-detection.ts for why isWorkItemDoneOrExcluded (not the broader
+    // isWorkItemOperationallyOpen) is the right gate here.
+    const jiraCompletions = prevSnapshot ? detectJiraStatusCompletions(merged, prevSnapshot, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy)) : [];
+    const jiraCompletionEvents: MemoryEvent[] = jiraCompletions.map((c) => {
+      const project = merged.projects.find((p) => p.id === c.projectId);
+      const client = project ? merged.clients.find((cl) => cl.id === project.clientId) : undefined;
+      return {
+        id: `memory-event-JIRA_STATUS_COMPLETED-${c.workItemId}-${Date.now()}`,
+        date: getTodayIso(),
+        kind: "JIRA_STATUS_COMPLETED",
+        title: `Completed in Jira: ${c.title}`,
+        impact: "Detected via Jira sync — no in-app action was taken.",
+        evidence: [],
+        projectId: c.projectId,
+        ticketKey: c.issueKey,
+        projectName: project?.name,
+        clientName: client?.name,
+      };
+    });
+
     // V2.10 §2, revised V2.17 §1a — mentionEvents are cumulative across syncs (like
     // workItems/dependencies above), now keyed by COMMENT id, not issue key: each incremental
     // sync's mention search only covers issues updated since the last sync, so a mention seen
@@ -1102,7 +1161,10 @@ export class CommandCenterStore {
       loaded: true,
       isDemo: false,
       snapshotHistory: prevSnapshot ? [...this.state.snapshotHistory, prevSnapshot].slice(-MAX_SNAPSHOT_HISTORY) : this.state.snapshotHistory,
-      memoryEvents: newMemoryEvents.length > 0 ? [...this.state.memoryEvents, ...newMemoryEvents].slice(-MAX_MEMORY_EVENTS) : this.state.memoryEvents,
+      memoryEvents:
+        newMemoryEvents.length > 0 || jiraCompletionEvents.length > 0
+          ? [...this.state.memoryEvents, ...newMemoryEvents, ...jiraCompletionEvents].slice(-MAX_MEMORY_EVENTS)
+          : this.state.memoryEvents,
       mentionEvents: mergedMentionEvents,
       workItemCalibrationHistory,
       jiraSync: {
@@ -1134,6 +1196,19 @@ export class CommandCenterStore {
         focusedProjects: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
       },
     });
+
+    // V2.25 Task 2 — a Daily Report must exist without requiring the user to ever open Close
+    // Day (see auto-daily-report.ts's own top comment for the two-trigger design). This is the
+    // "on sync" trigger, and deliberately unconditional (force:true on every successful sync,
+    // not just when the day has rolled over): `this.state` already reflects the `this.set()`
+    // just above (synchronous — see this file's own `set()`), so generateDailyReport reads
+    // memoryEvents that already include this sync's own newMemoryEvents/jiraCompletionEvents.
+    // Gating this by day-change too would defeat the actual point for the common case — a
+    // user who syncs several times in one workday — since a Jira-detected completion from the
+    // 2nd/3rd sync of the day would never make it into an already-generated today's report
+    // until the user happened to open Close Day again. generateDailyReport's own cost is a
+    // cheap filter over memoryEvents, so regenerating on every sync is not wasteful.
+    this.generateDailyReport(getTodayIso(), true);
     return { ok: true };
   }
 
@@ -1357,28 +1432,47 @@ export class CommandCenterStore {
     this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, entry].slice(-MAX_MEMORY_EVENTS) });
   }
 
+  /** V2.25 — the exact ticket-key -> WorkItem-id resolution use-command-center.ts's own
+   *  dailyCommandCompletedWorkItemIds/buildProjectOverrideView already apply, named once so
+   *  the store's own internal engine calls (computeMemoryEvents/closeDay below) thread the
+   *  same Daily Command Completion signal every other completion-aware engine now uses,
+   *  instead of silently omitting it just because they run server-of-truth-side rather than
+   *  through the React hook. */
+  private resolveDailyCommandCompletedWorkItemIds(data: CommandCenterData): ReadonlySet<string> {
+    const keys = new Set(Object.keys(this.state.dailyCommandCompletions ?? {}));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(data.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+  }
+
   /** V1.4 §41 — derives the small set of meaningful proactive-intelligence events for a
    *  data transition, comparing drift/escalation/dependency/release state just before vs.
    *  just after. `historyBeforeAppend` is snapshotHistory as it stood before this
    *  transition's own snapshot is pushed onto it. */
   private computeMemoryEvents(dataAfter: CommandCenterData, historyBeforeAppend: DailySnapshot[], today: string): MemoryEvent[] {
-    const currentMetrics = buildDailySnapshot(dataAfter, today, 0).metrics!;
+    // V2.25 — built once, threaded into every completion-aware engine below (see this file's
+    // own resolveDailyCommandCompletedWorkItemIds and the audit note on dependency-radar.ts/
+    // action-effectiveness.ts/memory.ts), closing the same gap use-command-center.ts's engines
+    // already had fixed — a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item
+    // no longer generates a fresh memory event here as if it were still open/blocked.
+    const workRelevanceIndex = buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy);
+    const dailyCommandCompletedWorkItemIds = this.resolveDailyCommandCompletedWorkItemIds(dataAfter);
+    const currentMetrics = buildDailySnapshot(dataAfter, today, 0, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds).metrics!;
     const currentDrift = computeDeliveryDrift(historyBeforeAppend, currentMetrics);
 
     const lastPrior = historyBeforeAppend[historyBeforeAppend.length - 1];
     const previousDrift = lastPrior?.metrics ? computeDeliveryDrift(historyBeforeAppend.slice(0, -1), lastPrior.metrics) : null;
 
-    const openRisks = dedupeRisks(dataAfter.risks, detectRisks(dataAfter, today));
+    const openRisks = dedupeRisks(dataAfter.risks, detectRisks(dataAfter, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
     const riskEscalations = computeRiskEscalations(openRisks, historyBeforeAppend, today);
-    const dependencyRadar = computeDependencyRadar(dataAfter, openRisks, today);
-    const releaseHealths = computeAllReleaseHealth(dataAfter, today);
+    const dependencyRadar = computeDependencyRadar(dataAfter, openRisks, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+    const releaseHealths = computeAllReleaseHealth(dataAfter, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
     const releaseDrift = computeReleaseDrift(releaseHealths, lastPrior ?? null, today);
 
     const events = deriveMemoryEvents(previousDrift, currentDrift, riskEscalations, dependencyRadar, releaseDrift, today, dataAfter);
 
     // V1.5 §44 — LOOP_STALLED, computed at the same once-per-close/sync cadence as the
     // events above (never continuously — avoids daily-repeat noise beyond that cadence).
-    const actionEffectiveness = computeActionEffectiveness(dataAfter);
+    const actionEffectiveness = computeActionEffectiveness(dataAfter, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
     const ineffectiveWorkItemIds = new Set(
       actionEffectiveness.filter((r) => r.classification === "INEFFECTIVE").map((r) => dataAfter.actions.find((a) => a.id === r.actionId)?.relatedWorkItemId).filter((id): id is string => !!id)
     );
@@ -1667,9 +1761,14 @@ export class CommandCenterStore {
     // diff (detectChanges) and the archival snapshot (buildDailySnapshot) so day-over-day
     // risk history actually contains what detectRisks live-computes — see change-detection.ts
     // and memory.ts's own comments for the persistence gap this closes.
-    const unscopedOpenRisks = dedupeRisks(data.risks, detectRisks(data, today));
-    const meaningfulChangeCount = detectChanges(previous, data, today, unscopedOpenRisks).length;
-    const todaySnapshot = buildDailySnapshot(data, today, meaningfulChangeCount, unscopedOpenRisks);
+    // V2.25 — same completion-aware threading as computeMemoryEvents below: built once here
+    // so detectChanges/buildDailySnapshot agree with every other engine on what counts as
+    // "done" (native Jira status, Work Relevance Policy, and Daily Command Completion).
+    const workRelevanceIndex = buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy);
+    const dailyCommandCompletedWorkItemIds = this.resolveDailyCommandCompletedWorkItemIds(data);
+    const unscopedOpenRisks = dedupeRisks(data.risks, detectRisks(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
+    const meaningfulChangeCount = detectChanges(previous, data, today, unscopedOpenRisks, workRelevanceIndex).length;
+    const todaySnapshot = buildDailySnapshot(data, today, meaningfulChangeCount, unscopedOpenRisks, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
     const newMemoryEvents = this.computeMemoryEvents(data, snapshotHistory, today);
 
     this.set({

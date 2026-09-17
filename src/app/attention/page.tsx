@@ -19,7 +19,8 @@ type LifecycleFilter = AttentionLifecycle | "ALL" | "ACTIVE_DEFAULT";
 type RelationFilter = "ALL" | "ASSIGNED" | "MENTIONED" | "FOLLOWING";
 
 // V2.10 §5 — MENTION/ASSIGNMENT appended, never inserted among the original six.
-const CATEGORIES: (AttentionCategory | "ALL")[] = ["ALL", "DRIFT", "RISK", "DEPENDENCY", "DECISION", "ACTION", "COMMUNICATION", "MENTION", "ASSIGNMENT"];
+// V2.25 Task 3 — STALE appended the same way.
+const CATEGORIES: (AttentionCategory | "ALL")[] = ["ALL", "DRIFT", "RISK", "DEPENDENCY", "DECISION", "ACTION", "COMMUNICATION", "MENTION", "ASSIGNMENT", "STALE"];
 const SEVERITIES: (AttentionSeverity | "ALL")[] = ["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
 const LIFECYCLES: LifecycleFilter[] = ["ACTIVE_DEFAULT", "NEW", "ACTIVE", "ACKNOWLEDGED", "SNOOZED", "RESOLVED", "REOPENED", "ALL"];
 const RELATIONS: RelationFilter[] = ["ALL", "ASSIGNED", "MENTIONED", "FOLLOWING"];
@@ -76,7 +77,7 @@ export default function AttentionPage() {
             value={category}
             options={CATEGORIES}
             onChange={(v) => setCategory(v as AttentionCategory | "ALL")}
-            labels={{ MENTION: "Mentioned me", ASSIGNMENT: "Assigned to me" }}
+            labels={{ MENTION: "Mentioned me", ASSIGNMENT: "Assigned to me", STALE: "Stale ticket" }}
           />
           <Filter label="Severity" value={severity} options={SEVERITIES} onChange={(v) => setSeverity(v as AttentionSeverity | "ALL")} />
           <Filter label="Lifecycle" value={lifecycle} options={LIFECYCLES} onChange={setLifecycle} labels={{ ACTIVE_DEFAULT: "Active (default)" }} />

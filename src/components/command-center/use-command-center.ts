@@ -152,11 +152,12 @@ export function useCommandCenter() {
             state.personalIdentity?.accountId,
             state.ownerName,
             dailyCommandCompletedWorkItemIds,
-            dailyCommandSkippedWorkItemIds
+            dailyCommandSkippedWorkItemIds,
+            state.staleAssignedTicketThresholds
           )
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, state.staleAssignedTicketThresholds]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -287,7 +288,8 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         state.personalIdentity?.accountId,
         state.ownerName,
         dailyCommandCompletedWorkItemIds,
-        dailyCommandSkippedWorkItemIds
+        dailyCommandSkippedWorkItemIds,
+        state.staleAssignedTicketThresholds
       )
     : null;
   const personalFocus = proactive

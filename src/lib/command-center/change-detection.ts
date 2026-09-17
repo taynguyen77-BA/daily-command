@@ -1,6 +1,19 @@
 // Deterministic diff engine (BUILD REQUEST §8 "WHAT CHANGED?").
 // Compares current data against the last DailySnapshot and emits only meaningful changes.
+//
+// V2.25 — audit fix: the Status-change impact text used a raw `item.status === "Done"` check
+// to decide whether to describe a transition as "Completed.", so a ticket whose Jira status
+// changed to something the Work Relevance Policy classifies COMPLETED (but whose native
+// status field isn't literally "Done") was reported with the generic "Status moved forward or
+// backward." instead — the one place in this engine that still disagreed with the canonical
+// isWorkItemDoneOrExcluded gate every other completion-aware engine in this pass now uses.
+// dailyCommandCompletedWorkItemIds is deliberately NOT threaded here (unlike the
+// isWorkItemOperationallyOpen call sites elsewhere): this branch describes a raw Jira-side
+// status transition event, not a personal-execution exclusion filter, so only the two
+// Jira-side completion signals (native Done, Work Relevance Policy) apply. Additive/optional
+// trailing parameter, same no-op-when-omitted contract as elsewhere.
 
+import { isWorkItemDoneOrExcluded, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { riskFingerprint } from "./risk-detection";
 import type { CommandCenterData, ChangeEvent, DailySnapshot, Risk } from "./types";
 
@@ -15,7 +28,13 @@ function changeId() {
  *  dedupeRisks(data.risks, detectRisks(data, today)) set that gets persisted into
  *  DailySnapshot.risks (see toSnapshot's own risksOverride below) — so this stays in sync
  *  with whatever `previous.risks` actually contains once auto risks are included in it. */
-export function detectChanges(previous: DailySnapshot | null, current: CommandCenterData, today: string, currentRisks: Risk[] = current.risks): ChangeEvent[] {
+export function detectChanges(
+  previous: DailySnapshot | null,
+  current: CommandCenterData,
+  today: string,
+  currentRisks: Risk[] = current.risks,
+  workRelevanceIndex?: WorkRelevanceIndex
+): ChangeEvent[] {
   if (!previous) return [];
   const out: ChangeEvent[] = [];
   const push = (e: Omit<ChangeEvent, "id" | "detectedAt">) => out.push({ ...e, id: changeId(), detectedAt: today });
@@ -39,7 +58,7 @@ export function detectChanges(previous: DailySnapshot | null, current: CommandCe
       push({
         entityType: "WorkItem", entityId: item.id, entityLabel: item.key, field: "Status",
         before: prev.status, after: item.status,
-        impact: item.status === "Blocked" ? "New blocker — may need escalation." : item.status === "Done" ? "Completed." : "Status moved forward or backward.",
+        impact: item.status === "Blocked" ? "New blocker — may need escalation." : isWorkItemDoneOrExcluded(item, workRelevanceIndex) ? "Completed." : "Status moved forward or backward.",
       });
     }
     if (prev.priority !== item.priority) {

@@ -5,7 +5,17 @@
 // V1.5 §17-19 upgrade: when the user has explicitly recorded action.outcomeStatus (the
 // "Did It Work?" capture), that ground truth is preferred over the blocked/done heuristic
 // below, which remains only as a fallback for actions with no recorded outcome status.
+//
+// V2.25 — audit fix: the fallback heuristic's `isDone` used a raw `relatedItem.status ===
+// "Done"` check, so an action targeting a ticket the user had classified COMPLETED/EXCLUDED
+// in the Work Relevance Policy (or completed in Daily Command) but whose native status wasn't
+// literally "Done" was reported PARTIALLY_EFFECTIVE/UNKNOWN forever instead of EFFECTIVE — the
+// action loop looked stuck even though the underlying work was actually finished. Now derived
+// from isWorkItemOperationallyOpen (the negation is exactly "done or excluded, by any of the
+// three completion signals"). Additive/optional trailing parameters, same no-op-when-omitted
+// contract as elsewhere.
 
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { Action, ActionEffectivenessClass, ActionEffectivenessResult, ActionOutcomeStatus, CommandCenterData } from "./types";
 
 const OUTCOME_STATUS_TO_CLASS: Record<ActionOutcomeStatus, ActionEffectivenessClass> = {
@@ -17,7 +27,11 @@ const OUTCOME_STATUS_TO_CLASS: Record<ActionOutcomeStatus, ActionEffectivenessCl
   UNKNOWN: "UNKNOWN",
 };
 
-export function computeActionEffectiveness(data: CommandCenterData): ActionEffectivenessResult[] {
+export function computeActionEffectiveness(
+  data: CommandCenterData,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): ActionEffectivenessResult[] {
   const completed = data.actions.filter((a) => a.status === "completed");
 
   // Repeated actions: same relatedWorkItemId targeted by 2+ completed actions is itself a
@@ -48,7 +62,7 @@ export function computeActionEffectiveness(data: CommandCenterData): ActionEffec
     } else {
       if (relatedItem) {
         const stillBlocked = relatedItem.blocked;
-        const isDone = relatedItem.status === "Done";
+        const isDone = !isWorkItemOperationallyOpen(relatedItem, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
         evidence.push(`${relatedItem.key} is currently ${relatedItem.status}${stillBlocked ? " (blocked)" : ""}.`);
 
         if (isDone && !stillBlocked) {

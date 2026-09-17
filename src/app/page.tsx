@@ -26,6 +26,7 @@ import { WaitingFor } from "@/components/command-center/WaitingFor";
 import { AttentionQueuePanel } from "@/components/command-center/AttentionQueuePanel";
 import { ClientAttentionMap } from "@/components/command-center/ClientAttentionMap";
 import { BeforeYouTrustThisData } from "@/components/command-center/BeforeYouTrustThisData";
+import { SetupHealthBanner } from "@/components/command-center/SetupHealthBanner";
 import { itemForScore } from "@/lib/command-center/selectors";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
 import { computeFreshness } from "@/lib/command-center/freshness";
@@ -68,7 +69,7 @@ export default function CommandCenterPage() {
   const topRisks = derived.risks.slice(0, 4);
   const openComms = filteredData.communications.filter((c) => c.status === "open").slice(0, 4);
 
-  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length);
+  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics);
   const confidenceDelta = trend.deltas.find((d) => d.label === "Delivery confidence")?.delta;
   const escalatingRisks = proactive?.riskEscalations.filter((r) => r.trend === "worsening" || r.reopened).slice(0, 4) ?? [];
@@ -79,6 +80,8 @@ export default function CommandCenterPage() {
 
   return (
     <div className="space-y-8 pb-16">
+      <SetupHealthBanner />
+
       {state.isDemo && (
         <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent2">
           DEMO DATA — fictional clients, for demonstration only. Import your own data anytime from Data & Settings.
@@ -329,7 +332,7 @@ export default function CommandCenterPage() {
             )}
           </section>
 
-          <WaitingFor data={filteredData} proactive={proactive} />
+          <WaitingFor data={filteredData} proactive={proactive} workRelevanceIndex={workRelevanceIndex} dailyCommandCompletedWorkItemIds={dailyCommandCompletedWorkItemIds} />
 
           <section>
             <SectionHeading

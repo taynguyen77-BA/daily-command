@@ -5,7 +5,9 @@
 
 import { computeActionEffectiveness, ineffectiveActions } from "./action-effectiveness";
 import { detectNewAssignments } from "./assignment-detection";
+import { getAssignedWorkItems } from "./assigned-work";
 import { buildAttentionQueue } from "./attention-queue";
+import { computeStaleAssignedTickets, DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS, type StaleAssignedTicketThresholds } from "./personal-staleness";
 import { resolveAttentionEntity } from "./personal-focus";
 import { classifyPersonalRelation, type PersonalRelationIdentity } from "./personal-relation";
 import { computeClientAttentionMap } from "./client-attention-map";
@@ -15,7 +17,7 @@ import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
 import { computeDeliveryDrift, computeTrajectory } from "./delivery-drift";
 import { buildFirst30Minutes } from "./first-30-minutes";
-import { isWorkItemDoneOrExcluded, resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { isWorkItemDoneOrExcluded, isWorkItemOperationallyOpen, resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { buildDailySnapshot, dailyCanonicalSnapshots } from "./memory";
 import { computeOutcomeScorecard } from "./outcome-scorecard";
 import { computeAllReleaseHealth } from "./release-health";
@@ -86,9 +88,14 @@ export function computeProactiveIntelligence(
   // attention item's perspective, both mean "nothing currently needs your attention on this
   // ticket", and both correctly un-suppress (RESOLVED -> REOPENED) the moment the ticket is
   // reactivated (removed from the caller-supplied set) — never a second lifecycle mechanism.
-  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>,
+  // V2.25 Task 3 — same additive/optional-trailing-parameter, no-op-when-omitted contract:
+  // omitting this reproduces DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS exactly, matching what
+  // an install that has never opened Data & Settings' Stale Assigned Ticket control already
+  // gets by default.
+  staleAssignedTicketThresholds: StaleAssignedTicketThresholds = DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS
 ): ProactiveIntelligence {
-  const currentMetrics = buildDailySnapshot(data, today, derived.changes.length).metrics!;
+  const currentMetrics = buildDailySnapshot(data, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds).metrics!;
 
   // V2.18 §10 — snapshotHistory is the raw, frequent operational record (appended to on
   // every sync/import/close-day, possibly several times per day). Genuine day-over-day
@@ -100,10 +107,10 @@ export function computeProactiveIntelligence(
   const drift = computeDeliveryDrift(dailyHistory, currentMetrics);
   const trajectory = computeTrajectory(dailyHistory, currentMetrics);
   const riskEscalations = computeRiskEscalations(derived.risks, dailyHistory, today);
-  const dependencyRadar = computeDependencyRadar(data, derived.risks, today);
+  const dependencyRadar = computeDependencyRadar(data, derived.risks, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const releaseHealths = computeAllReleaseHealth(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today);
-  const actionEffectiveness = computeActionEffectiveness(data);
+  const actionEffectiveness = computeActionEffectiveness(data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const ineffective = ineffectiveActions(actionEffectiveness, data.actions);
   const ineffectiveActionWorkItemIds = new Set(ineffective.map(({ action }) => action.relatedWorkItemId).filter((id): id is string => !!id));
 
@@ -113,9 +120,9 @@ export function computeProactiveIntelligence(
     .map((d) => computeDecisionEffectiveness(d, dailyHistory, currentMetrics, actionEffectiveness.filter((r) => (d.relatedActionIds ?? []).includes(r.actionId))));
   const deliveryLoops = computeDeliveryLoops(data, decisionRadar, actionEffectiveness, today);
 
-  const stakeholderAttention = computeStakeholderAttention(data, dependencyRadar, decisionRadar);
+  const stakeholderAttention = computeStakeholderAttention(data, dependencyRadar, decisionRadar, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const communicationPriority = rankCommunicationPriority(data.communications, data, riskEscalations, dependencyRadar);
-  const clientAttentionMap = computeClientAttentionMap(data, derived, dependencyRadar, previousSnapshot, today);
+  const clientAttentionMap = computeClientAttentionMap(data, derived, dependencyRadar, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
 
   const newAssignments = detectNewAssignments(data, previousSnapshot, identityOwnerId);
 
@@ -138,6 +145,20 @@ export function computeProactiveIntelligence(
     data.workItems.filter((w) => isWorkItemDoneOrExcluded(w, workRelevanceIndex) || dailyCommandCompletedWorkItemIds?.has(w.id) || dailyCommandSkippedWorkItemIds?.has(w.id)).map((w) => w.id)
   );
 
+  // V2.25 Task 3 — Stale Assigned Ticket detector. Reuses getAssignedWorkItems (the real
+  // identity-matching primitive assigned-work.ts's own getActiveAssignedWorkItems is itself
+  // built on) plus the same isWorkItemOperationallyOpen gate every other engine in this pass
+  // uses, composed inline with the ID-based dailyCommandSkippedWorkItemIds set this function
+  // already carries — functionally the exact same "assigned to me, still active, not skipped"
+  // population getActiveAssignedWorkItems defines, without a key<->id round trip through this
+  // function's own ID-keyed sets (assigned-work.ts's own version takes ticket-KEY sets, which
+  // this function doesn't otherwise have).
+  const staleCandidateIdentity: PersonalRelationIdentity = { accountId: identityOwnerId, displayName: identityDisplayName };
+  const activeAssignedForStaleness = getAssignedWorkItems(data.workItems, staleCandidateIdentity).filter(
+    (w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) && !dailyCommandSkippedWorkItemIds?.has(w.id)
+  );
+  const staleAssignedTickets = computeStaleAssignedTickets(activeAssignedForStaleness, today, staleAssignedTicketThresholds);
+
   const { items: attentionQueue, nextAttentionState } = buildAttentionQueue(
     {
       drift,
@@ -153,6 +174,7 @@ export function computeProactiveIntelligence(
       newAssignments,
       workItems: data.workItems,
       completedOrExcludedWorkItemIds: mentionAutoResolveWorkItemIds,
+      staleAssignedTickets,
     },
     attentionState,
     today

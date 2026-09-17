@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.15
+**Current version:** V2.25
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version-line reconciliation (again):** this line had drifted stale at V2.10 even though several real passes (V2.10.1's cold-start fix, V2.11's global Work Relevance Policy, V2.12's signal-splitting fixes, and an earlier same-day V2.13 pass covering My Day's Work Relevance gate/hidden sections/ticket links) had already shipped without ever updating it here — the same class of gap this README already flagged and fixed once before (see the V2.10 section below). Corrected to V2.13 as part of this pass, which itself adds the separate "Server-Side Real-Time Notify" capability described below.
+**Version-line reconciliation (yet again):** this line had drifted stale at V2.15 even though nine real passes (V2.16's IndexedDB persistence backend, V2.17's Daily/Weekly Reports and Delivery Artifacts hardening, V2.18 through V2.24's various sync/trust/attention-truth/automatic-Jira-sync fixes) had already shipped without ever updating it here — the same class of gap this README has now flagged and fixed three times (see the V2.10 and V2.13 sections below for the two prior occurrences). Corrected to V2.25 as part of this pass, which itself adds the "is this ticket done?" consistency audit, Jira-aware Daily/Weekly Reports, the Stale Assigned Ticket detector, and the Setup Health checklist described below.
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -137,6 +137,177 @@ Project Settings → Environment Variables → add the ones you need for the **P
 Live Jira and Live Claude validation should be the **first thing done after deployment**, once real credentials are configured in Vercel.
 
 ---
+
+# V2.25 — Completion-Truth Audit, Jira-Aware Daily Report, Stale-Ticket Detector, Setup Health
+
+Four independent pieces of work, each its own task below, followed by a consolidated summary.
+
+**Task 1 — "is this ticket done?" consistency audit.** `jira/work-relevance.ts`'s own
+`isWorkItemDoneOrExcluded`/`isWorkItemOperationallyOpen` doc (V2.19/V2.21) already named the bug
+class this closes: a scattered raw `work item.status === "Done"` / `!== "Done"` check silently
+disagrees with the Work Relevance Policy's COMPLETED/EXCLUDED classification and with Daily
+Command Completion. Task 1's own audit comment named seven remaining call sites that still used
+the raw check instead of the canonical gate: `dependency-radar.ts` (blocked-item counting behind
+Dependency Heat), `waiting-for.ts` (its own local "what's still blocking" list), `client-attention-map.ts`
+(Delivery Confidence's overdue count, both the per-client and per-project formulas),
+`stakeholder-radar.ts` (unowned-high-priority and ownership-concentration scans),
+`memory.ts` (`buildSnapshotMetrics`'s `openItems` — feeding every persisted `DailySnapshot`'s
+blocked/overdue/deliveryConfidence, and so every day-over-day drift/trajectory/weekly-review
+comparison built on it), `action-effectiveness.ts` (the no-outcome-recorded fallback heuristic's
+`isDone`), and `change-detection.ts` (the Status-change diff's "Completed." impact text). Fixed by
+threading `workRelevanceIndex`/`dailyCommandCompletedWorkItemIds` as additive/optional trailing
+parameters into all seven (same no-op-when-omitted contract every other engine using this gate
+already follows), and threading them through the full call chain from
+`use-command-center.ts`/`ExecutiveView.tsx`/`WaitingFor.tsx`/`CloseDayModal.tsx` down to
+`proactive.ts`, `selectors.ts`, and `store.ts`'s own internal `closeDay()`/`computeMemoryEvents()`
+(which build the index directly from `state.jiraWorkRelevancePolicy`/`state.dailyCommandCompletions`
+via a new small `resolveDailyCommandCompletedWorkItemIds` helper, since those run outside the React
+hook tree). `change-detection.ts` deliberately does NOT thread Daily Command Completion — it
+describes a raw Jira-side status transition event, not a personal-execution exclusion filter, so
+only the two Jira-side completion signals (native Done, Work Relevance Policy) apply there.
+14 new regression tests (one pair — "index omitted reproduces old behavior" / "index passed fixes
+it" — per file, `scripts/command-center-test.mts`, `V2.25 <file>` group) confirm each engine now
+agrees with the canonical gate on a work item whose native status isn't literally "Done" but whose
+real Jira status name is classified COMPLETED in the policy. `ai-context.ts`'s `buildAIContext`
+and `demo-data.ts` were deliberately left untouched — the former has no caller wiring
+`workRelevanceIndex` through it at all today (out of scope for this audit), and the latter
+generates synthetic historical data with no user-configured policy to apply; both already
+reproduce their pre-existing behavior exactly via the additive/optional parameter's own
+no-op-when-omitted contract.
+
+**Task 2 — Daily/Weekly Report reflects real Jira activity, not only manual actions.**
+Confirmed real gap: `daily-report.ts`/`store.ts`'s `generateDailyReport` only ever read
+`memoryEvents`, and every `memoryEvents` entry before this pass was appended by an explicit
+in-app action (completing an Action, finishing a Focus session, a Decision made/outcome
+recorded). A ticket a Dev/QA closed directly in Jira produced no `memoryEvent` at all, so it
+silently disappeared from both the Daily and Weekly Report even though real work genuinely
+finished. Fixed with a new `jira-completion-detection.ts`, using the exact same
+diff-against-the-previous-`DailySnapshot` pattern `assignment-detection.ts` already uses for "did
+ownerId become mine since the last snapshot" — narrowed to "did this Jira work item's completion
+state (native status or Work Relevance Policy) flip from open to done since the last snapshot".
+Each detected transition becomes a new `MemoryEvent` kind, `JIRA_STATUS_COMPLETED`, captured at
+sync time with the same point-in-time ticket/project/client context discipline every other
+`MemoryEvent` already follows. `daily-report.ts`'s `COMPLETED_KINDS` now folds this new kind into
+"Completed" for both reports — but never blended into one undifferentiated list: `completedInApp`
+("Completed via Daily Command") and `completedInJira` ("Completed in Jira") are separate buckets
+in `DailyReportSummary`/`WeeklyReportSummary`, both rendered as distinctly-labeled sections in
+`dailyReportToMarkdown`/`weeklyReportToMarkdown`, so a reader never mistakes "the app observed
+this in Jira" for "you did this in the app". A report's existence no longer depends on the user
+opening Close Day: a new `auto-daily-report.ts` (mirroring V2.24's `auto-sync.ts` structure — a
+pure eligibility function plus a thin, module-guarded orchestrator) generates today's report from
+`Nav.tsx`'s single app-wide mount point on load, covering Demo/Local Import installs and a Jira
+install whose data is still "fresh" enough that auto-sync's own tick is a no-op; `store.ts`'s
+`syncJira()` itself also force-regenerates today's report at the end of every successful sync
+(deliberately unconditional, not gated by day-change, so a second/third same-day sync's newly
+detected Jira completions are reflected immediately — see that method's own comment for why
+gating this by day-change would defeat the point for the common multiple-syncs-per-day case).
+Close Day keeps its exact existing role — review and confirm, calling the same
+`generateDailyReport` — this pass only removes the requirement that it be the sole entry point.
+21 new tests (`scripts/command-center-test.mts`, `V2.25 jira-completion-detection`/`V2.25
+daily-report label split`/`V2.25 Daily Report e2e`/`V2.25 Auto Daily Report gate` groups) cover
+the pure diff function (open→done, no-change, first-sync-has-no-history, already-done-not-
+re-reported, non-Jira items excluded, policy-COMPLETED-without-native-Done), the label-split
+aggregation and markdown rendering at both daily and weekly granularity, the eligibility gate,
+and a full end-to-end scenario: two mocked syncs against the real `commandCenterStore` — the
+first with an open ticket, the second with the same ticket now Done and zero in-app actions
+taken — after which today's Daily Report genuinely lists it under "Completed in Jira".
+
+**Task 3 — Stale Assigned Ticket detector (miss-ticket safety net).** No mechanism previously
+existed to answer "a ticket is assigned to me, still open, but nobody has touched it in days" —
+the most common way a BA/PO/PM covering several parallel projects genuinely misses a ticket, since
+nothing else (no mention, no fresh risk, no drift) would surface it. Added `personal-staleness.ts`
+with `computeStaleAssignedTickets`, a pure function over the candidate population
+`getActiveAssignedWorkItems` (assigned-work.ts) already defines — no second "what's mine and
+still open" concept — using `WorkItem.lastUpdated` (already the Jira `updated` field, already
+the exact signal `scoring.ts`'s own Aging factor reads) as "the last time anyone observably
+touched this ticket." A new `businessDaysBetween` helper (`date-utils.ts`) counts only weekdays,
+so a ticket untouched over a weekend isn't treated the same as one untouched for two weekdays.
+Thresholds are genuinely user-configurable, never hardcoded: a new `staleAssignedTicketThresholds`
+field on the store (default `{ warnBusinessDays: 3, escalateBusinessDays: 5 }`), with a
+`setStaleAssignedTicketThresholds` setter and a new "Stale Assigned Ticket thresholds" control in
+Data & Settings — both the setter and the persisted-state parser clamp `escalateBusinessDays` to
+never fall below `warnBusinessDays`, so severity ordering can never invert. Wired into the
+Attention Queue as a new `STALE` category (`AttentionCategory`, `attention-queue.ts`'s
+`buildRawItems`) — appended after `ASSIGNMENT`, never inserted, exactly the precedent V2.10's
+MENTION/ASSIGNMENT categories set — reusing the existing NEW/ACTIVE/ACKNOWLEDGED lifecycle
+machinery verbatim, no second lifecycle mechanism. Computed in `proactive.ts` from
+`getAssignedWorkItems` (the real identity-matching primitive) composed with the same
+`isWorkItemOperationallyOpen` gate this whole pass's Task 1 audit standardized on, and threaded
+through `use-command-center.ts`'s two `computeProactiveIntelligence` call sites. Deliberately
+scoped to the Attention Queue only (not Personal Focus/My Day, per this task's own spec) —
+`personal-focus.ts`'s `candidateFromAttentionItem` explicitly excludes `STALE` early rather than
+needing its own `FocusCategory`/scoring wiring. 26 new tests cover `businessDaysBetween`'s pure
+math (including weekend exclusion), `computeStaleAssignedTickets` (default thresholds, WARN vs.
+ESCALATE boundaries, below-threshold exclusion, custom/tighter thresholds, a missing
+`lastUpdated` never guessed as infinitely stale), the Attention Queue's STALE wiring (severity
+mapping, lifecycle reuse, additive/optional no-op-when-omitted), and the store's threshold
+setter/persistence (defaults, clamp, JSON round-trip, malformed-value fallback).
+
+**Task 4 — Setup Health checklist, closing fail-silent configuration gaps.** Several
+capabilities were failing silently with no visible signal: no Jira account ID configured meant
+Mention/Assignment tracking was a complete no-op; an unclassified ("UNKNOWN") Jira status meant
+its tickets were correctly excluded from Action Plan/Priorities but looked like they'd simply
+vanished; no `SLACK_WEBHOOK_URL` (or no `PERSONAL_JIRA_ACCOUNT_ID` + Vercel KV) meant real-time
+notify silently stayed tab-dependent. Added a new `SetupHealthBanner` component, rendered at the
+top of the Command Center page (`src/app/page.tsx`), that surfaces exactly the unresolved items
+— never a static list, never a new source of truth: it reads the same store/derived data every
+other trust surface already reads (`state.personalIdentity`, `workRelevanceIndex` over
+`filteredData` via the existing `countUnclassifiedJiraStatuses`/`listUnclassifiedJiraStatuses`,
+and the existing `/api/command-center/notify` status endpoint via `checkSlackNotifyStatus` —
+the same call `data-settings/page.tsx` already makes). The actual show/hide decision is a pure,
+exported `computeSetupHealthRows` function — same "decision function separate from the thin
+UI/orchestration wrapper" discipline `auto-sync.ts`'s `shouldAutoSyncJira` and
+`auto-daily-report.ts`'s `shouldAutoGenerateDailyReport` already established — so every
+condition is directly unit-testable without a DOM/React renderer. The unclassified-status row
+lists up to 5 real status names (never more, per this task's own spec) and honestly signals
+when the true count exceeds that. A companion "Stale Assigned Ticket thresholds" control was
+added to Data & Settings for Task 3's own configurable thresholds, landing in the same pass.
+18 new tests cover every row's independent show/hide condition (identity present/absent,
+demo/local-import never showing the Jira-only unclassified-status row, the display cap and its
+honest "more exist" signal, the notify row's two distinct wordings depending on whether Slack
+itself vs. only the server-side path is unconfigured, a still-loading notify status never
+producing a false-positive row) and their combination (zero rows when everything is resolved,
+all three appearing together when nothing is).
+
+## Summary — What was found, what was fixed, evidence
+
+**What was found:** four independent, real gaps, each confirmed before any fix — (1) seven
+engines used a raw `status !== "Done"` check that silently disagreed with the Work Relevance
+Policy and Daily Command Completion, the exact bug class `work-relevance.ts`'s own
+`isWorkItemDoneOrExcluded` doc had already named but not fully closed; (2) Daily/Weekly Report
+only ever reflected explicit in-app actions, so a ticket closed directly in Jira by Dev/QA
+silently disappeared from both reports; (3) no mechanism existed to catch "assigned to me, still
+open, untouched for days" — the most common way a BA/PO/PM covering several parallel projects
+genuinely misses a ticket; (4) several capabilities (mention/assignment tracking, personal-work
+visibility, real-time notify) failed silently on missing configuration, with no signal anywhere
+in the UI.
+
+**What was fixed:** (1) `isWorkItemOperationallyOpen`/`isWorkItemDoneOrExcluded` threaded as
+additive/optional parameters through `dependency-radar.ts`, `waiting-for.ts`,
+`client-attention-map.ts`, `stakeholder-radar.ts`, `memory.ts`, `action-effectiveness.ts`, and
+`change-detection.ts`, and through their full call chains (`proactive.ts`, `selectors.ts`,
+`store.ts`'s internal `closeDay`/`computeMemoryEvents`, `ExecutiveView.tsx`, `WaitingFor.tsx`,
+`CloseDayModal.tsx`) — every existing caller that omits the new parameters reproduces the exact
+old behavior, so nothing else in the app changed. (2) A new `jira-completion-detection.ts`
+diffs Jira-side completion state against the previous sync snapshot (same pattern
+`assignment-detection.ts` already uses for ownership), emitting a new `JIRA_STATUS_COMPLETED`
+memory-event kind, labeled distinctly from in-app completions ("Completed in Jira" vs.
+"Completed via Daily Command") in both reports; a new `auto-daily-report.ts` plus a
+`store.syncJira()` hook mean a report exists and stays current without ever requiring Close Day.
+(3) A new `personal-staleness.ts` + `businessDaysBetween` (`date-utils.ts`) detect a stale
+assigned ticket using user-configurable thresholds (`store.ts`'s `staleAssignedTicketThresholds`,
+a new Data & Settings control), surfaced as a new `STALE` Attention Queue category reusing the
+existing lifecycle machinery. (4) A new `SetupHealthBanner` (`src/app/page.tsx`) surfaces every
+unresolved configuration gap live, self-hiding each row the moment it's resolved.
+
+**Test evidence:** typecheck (`npx tsc --noEmit`) and `npm run build` both clean; the full
+deterministic-engine suite (`npm test`) went from 1967 checks (V2.24's own count) to 2045 — 78
+new checks across all four tasks, zero regressions in the pre-existing suite. No new data model
+or "completion" concept was introduced anywhere in this pass — every fix reuses
+`isWorkItemOperationallyOpen`/`isWorkItemDoneOrExcluded` as the one canonical truth for "is this
+ticket done," exactly as the dev prompt required.
+
+**Current version:** V2.25.
 
 # V2.13 — Server-Side Real-Time Notify (Option B) + Five Bug Fixes
 

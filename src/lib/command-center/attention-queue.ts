@@ -40,6 +40,7 @@ import type {
   WorkItem,
 } from "./types";
 import type { NewAssignmentEvent } from "./assignment-detection";
+import type { StaleAssignedTicket } from "./personal-staleness";
 
 export function slug(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 60);
@@ -47,7 +48,8 @@ export function slug(input: string): string {
 
 // V2.10 §2 — MENTION/ASSIGNMENT are appended after COMMUNICATION, never inserted; the six
 // pre-existing categories keep their exact original order values.
-const CATEGORY_ORDER: Record<AttentionCategory, number> = { DRIFT: 0, RISK: 1, DEPENDENCY: 2, DECISION: 3, ACTION: 4, COMMUNICATION: 5, MENTION: 6, ASSIGNMENT: 7 };
+// V2.25 Task 3 — STALE appended the same way, after ASSIGNMENT.
+const CATEGORY_ORDER: Record<AttentionCategory, number> = { DRIFT: 0, RISK: 1, DEPENDENCY: 2, DECISION: 3, ACTION: 4, COMMUNICATION: 5, MENTION: 6, ASSIGNMENT: 7, STALE: 8 };
 const SEVERITY_ORDER: Record<AttentionSeverity, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4 };
 
 interface RawItem {
@@ -90,6 +92,10 @@ export interface AttentionQueueInputs {
   mentionEvents?: MentionEvent[];
   newAssignments?: NewAssignmentEvent[];
   workItems?: WorkItem[];
+  // V2.25 Task 3 — additive/optional, same no-op-when-omitted contract as mentionEvents/
+  // newAssignments above: every pre-existing caller/test that never passes this produces zero
+  // STALE items, exactly as before this pass.
+  staleAssignedTickets?: StaleAssignedTicket[];
   // V2.17 §1a point 5 — workItem ids whose Work Relevance has resolved to COMPLETED or
   // EXCLUDED, so a still-open MENTION tied to one of them can auto-resolve (see RawItem.
   // forceResolved above). Optional/additive: omitting it (every pre-existing caller) never
@@ -286,6 +292,28 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
       nowWhat: "Review this item and plan the work.",
       evidence: [`${a.issueKey} — assignee changed to you`],
       sourceRef: { type: "workItem", id: a.workItemId },
+      ownershipExplicit: true,
+    });
+  }
+
+  // V2.25 Task 3 — Stale Assigned Ticket: a ticket assigned to the configured identity with no
+  // observable activity for N business days (personal-staleness.ts). Same explicit-by-
+  // construction reasoning as MENTION/ASSIGNMENT above — the candidate population is already
+  // "assigned to me" by the time it reaches here (getActiveAssignedWorkItems), so ownership is
+  // never re-derived/guessed. ESCALATE maps to HIGH, WARN to MEDIUM — proportionate to a
+  // possible-miss safety net, not a proven risk/blocker (which is why this never reaches
+  // CRITICAL the way a SEVERE drift or a reopened HIGH risk does).
+  for (const s of inputs.staleAssignedTickets ?? []) {
+    out.push({
+      id: `STALE:${slug(s.workItemId)}`,
+      category: "STALE",
+      severity: s.severity === "ESCALATE" ? "HIGH" : "MEDIUM",
+      what: `No activity in ${s.businessDaysSinceUpdate} business day(s): ${s.title}`,
+      why: `${s.issueKey} is assigned to you and still active, but nobody has updated it in ${s.businessDaysSinceUpdate} business day(s).`,
+      impact: "This ticket may have been missed — silence is not the same as no action needed.",
+      nowWhat: s.severity === "ESCALATE" ? "Check on this ticket today — it's been silent for a while." : "Take a look — activity has slowed on this ticket.",
+      evidence: [`${s.issueKey} last updated ${s.businessDaysSinceUpdate} business day(s) ago`],
+      sourceRef: { type: "workItem", id: s.workItemId },
       ownershipExplicit: true,
     });
   }

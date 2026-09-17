@@ -19,8 +19,16 @@
 // Command Bar's "what is waiting?"); folding it in here would mean guessing a "who" from the
 // ticket's own assignee, which is often the person DOING the work, not who it's waiting on —
 // exactly the ownership-inference this feature must never do.
+//
+// V2.25 — same audit/fix as dependency-radar.ts: the local `blockedItems` filter here (used
+// only for this view's own `projectNames` column) used a raw `w.status !== "Done"` check
+// independent of dependencyRadar's own (already-fixed) blockedItemCount, so a Work-Relevance-
+// COMPLETED/EXCLUDED or Daily-Command-completed item could still show its project listed here
+// even though it no longer counts toward blockedItemCount. Now isWorkItemOperationallyOpen,
+// additive/optional trailing parameters, same no-op-when-omitted contract as elsewhere.
 
 import { projectName as lookupProjectName } from "./selectors";
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, DependencyHeat, DependencyRadarItem } from "./types";
 
 export interface WaitingForItem {
@@ -40,7 +48,12 @@ export interface WaitingForItem {
  *  `data.dependencies` it was built from — no new detection, no new scoring. Order matches
  *  dependencyRadar's own (heat, then age) since that's already the right "most urgent first"
  *  ordering for a waiting list. */
-export function buildWaitingFor(data: CommandCenterData, dependencyRadar: DependencyRadarItem[]): WaitingForItem[] {
+export function buildWaitingFor(
+  data: CommandCenterData,
+  dependencyRadar: DependencyRadarItem[],
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): WaitingForItem[] {
   const depById = new Map(data.dependencies.map((d) => [d.id, d]));
   const out: WaitingForItem[] = [];
 
@@ -48,7 +61,9 @@ export function buildWaitingFor(data: CommandCenterData, dependencyRadar: Depend
     const dep = depById.get(radarItem.dependencyId);
     if (!dep) continue; // defensive — radar is always derived from data.dependencies, never out of sync
 
-    const blockedItems = data.workItems.filter((w) => w.dependencyIds.includes(dep.id) && w.status !== "Done");
+    const blockedItems = data.workItems.filter(
+      (w) => w.dependencyIds.includes(dep.id) && isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds)
+    );
     const projectNames = Array.from(new Set(blockedItems.map((w) => lookupProjectName(data, w.projectId))));
 
     out.push({

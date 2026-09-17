@@ -886,6 +886,43 @@ export default function DataSettingsPage() {
       </Panel>
 
       <Panel className="p-5">
+        <SectionHeading title="Stale Assigned Ticket thresholds" subtitle="Attention Queue flags a ticket assigned to you with no observable activity for this many business days (weekends never count as silence). A miss-ticket safety net, not a proven risk — tune it to how fast your projects actually move." />
+        <div className="flex max-w-md flex-wrap items-end gap-4">
+          <label className="flex flex-col gap-1 text-xs text-text2">
+            Warn after
+            <input
+              type="number"
+              min={1}
+              defaultValue={state.staleAssignedTicketThresholds.warnBusinessDays}
+              onBlur={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isFinite(value) && value > 0) store.setStaleAssignedTicketThresholds(value, state.staleAssignedTicketThresholds.escalateBusinessDays);
+                else e.target.value = String(state.staleAssignedTicketThresholds.warnBusinessDays);
+              }}
+              className="w-24 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text"
+            />
+            <span className="text-text3">business day(s)</span>
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-text2">
+            Escalate after
+            <input
+              type="number"
+              min={1}
+              defaultValue={state.staleAssignedTicketThresholds.escalateBusinessDays}
+              onBlur={(e) => {
+                const value = Number(e.target.value);
+                if (Number.isFinite(value) && value > 0) store.setStaleAssignedTicketThresholds(state.staleAssignedTicketThresholds.warnBusinessDays, value);
+                else e.target.value = String(state.staleAssignedTicketThresholds.escalateBusinessDays);
+              }}
+              className="w-24 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text"
+            />
+            <span className="text-text3">business day(s)</span>
+          </label>
+        </div>
+        <p className="mt-2 text-xs text-text3">Escalate is never allowed below Warn — an out-of-order value is automatically raised to match.</p>
+      </Panel>
+
+      <Panel className="p-5">
         <SectionHeading title="Current dataset" action={state.isDemo ? (
           <span className="rounded border border-accent/30 bg-accent/10 px-2 py-0.5 text-xs text-accent2">DEMO DATA</span>
         ) : undefined} />

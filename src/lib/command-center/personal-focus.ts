@@ -312,6 +312,12 @@ function candidateFromAttentionItem(
   dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
   dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
 ): PersonalFocusCandidate | null {
+  // V2.25 Task 3 — STALE is deliberately Attention-Queue-only for this pass (the task's own
+  // scope: "Đưa kết quả này vào Attention Queue"), never a Personal Focus/My Day candidate.
+  // Folding it in here would need its own FocusCategory/buildFactors/ESTIMATE_HEURISTICS
+  // wiring, a bigger surface than what was asked; excluded early, same "return null" shape
+  // every other explicit exclusion in this function already uses.
+  if (item.category === "STALE") return null;
   const entity = resolveAttentionEntity(item, data, allRisks ?? data.risks);
   // V2.17 §1b — reverses V2.13 §1's "option 3b" for MENTION specifically: a mention always
   // surfaces regardless of the underlying ticket's Work Relevance classification, because a

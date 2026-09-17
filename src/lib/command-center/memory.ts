@@ -1,9 +1,19 @@
 // Project Memory (BUILD REQUEST V1.2 §2-4). Snapshots are built from data the app already
 // computes elsewhere — scoring, risk detection, executive confidence — never recalculated
 // with different logic. This module only captures and compares, it never invents a number.
+//
+// V2.25 — audit fix: `openItems` (feeding blockedCount/overdueCount/deliveryConfidence, and
+// so every historical DailySnapshot ever persisted) used a raw `w.status !== "Done"` check,
+// so a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item kept inflating the
+// very metrics day-over-day drift/trajectory/weekly-review are built from. Now
+// isWorkItemOperationallyOpen, additive/optional trailing parameters on both
+// buildSnapshotMetrics/buildDailySnapshot — every existing caller that never passes them
+// (demo-data.ts, ai-context.ts) reproduces the exact old behavior; callers that already have
+// the index in scope (proactive.ts, store.ts) now thread it through.
 
 import { toSnapshot } from "./change-detection";
 import { computeDeliveryConfidence } from "./executive";
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { detectRisks, RISK_LEVEL_ORDER } from "./risk-detection";
 import { dedupeRisks } from "./selectors";
 import { isOverdue, scoreAllWorkItems } from "./scoring";
@@ -13,11 +23,18 @@ import type { CommandCenterData, DailySnapshot, HealthTrend, MetricDelta, Risk, 
  *  dedupeRisks(data.risks, detectRisks(data, today)) here — this used to have its own
  *  separate, title-only dedupe (a second, drifted implementation of the same concern
  *  selectors.ts's dedupeRisks already owns); now reuses that single source of truth. */
-export function buildSnapshotMetrics(data: CommandCenterData, today: string, meaningfulChangeCount: number, risksOverride?: Risk[]): SnapshotMetrics {
-  const scores = scoreAllWorkItems(data, today);
-  const dedupedRisks = risksOverride ?? dedupeRisks(data.risks, detectRisks(data, today));
+export function buildSnapshotMetrics(
+  data: CommandCenterData,
+  today: string,
+  meaningfulChangeCount: number,
+  risksOverride?: Risk[],
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): SnapshotMetrics {
+  const scores = scoreAllWorkItems(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const dedupedRisks = risksOverride ?? dedupeRisks(data.risks, detectRisks(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
   const highRisks = dedupedRisks.filter((r) => r.level === "HIGH").sort((a, b) => RISK_LEVEL_ORDER[a.level] - RISK_LEVEL_ORDER[b.level]);
-  const openItems = data.workItems.filter((w) => w.status !== "Done");
+  const openItems = data.workItems.filter((w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
   const unresolvedDeps = data.dependencies.filter((d) => d.status === "unresolved");
 
   return {
@@ -25,8 +42,8 @@ export function buildSnapshotMetrics(data: CommandCenterData, today: string, mea
     criticalCount: scores.filter((s) => s.classification === "CRITICAL").length,
     highRiskCount: highRisks.length,
     blockedCount: openItems.filter((w) => w.blocked).length,
-    overdueCount: openItems.filter((w) => isOverdue(w, today)).length,
-    deliveryConfidence: computeDeliveryConfidence(scores, dedupedRisks, openItems.filter((w) => isOverdue(w, today)).length),
+    overdueCount: openItems.filter((w) => isOverdue(w, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds)).length,
+    deliveryConfidence: computeDeliveryConfidence(scores, dedupedRisks, openItems.filter((w) => isOverdue(w, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds)).length),
     openDecisionsCount: data.decisions.filter((d) => d.status === "pending" || d.status === "ACTIVE" || d.status === "AT_RISK" || d.status === "REVISIT_REQUIRED").length,
     unresolvedDependenciesCount: unresolvedDeps.length,
     majorRiskTitles: highRisks.slice(0, 5).map((r) => r.title),
@@ -39,8 +56,18 @@ export function buildSnapshotMetrics(data: CommandCenterData, today: string, mea
  *  change-detection.ts — never duplicated) plus computed metrics. risksOverride, when
  *  passed, flows into both — the persisted snapshot's `.risks` and its `.metrics` stay
  *  consistent with each other, never computed from two different risk sets. */
-export function buildDailySnapshot(data: CommandCenterData, today: string, meaningfulChangeCount: number, risksOverride?: Risk[]): DailySnapshot {
-  return { ...toSnapshot(data, today, risksOverride), metrics: buildSnapshotMetrics(data, today, meaningfulChangeCount, risksOverride) };
+export function buildDailySnapshot(
+  data: CommandCenterData,
+  today: string,
+  meaningfulChangeCount: number,
+  risksOverride?: Risk[],
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): DailySnapshot {
+  return {
+    ...toSnapshot(data, today, risksOverride),
+    metrics: buildSnapshotMetrics(data, today, meaningfulChangeCount, risksOverride, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
+  };
 }
 
 /** V2.18 §10 — confirmed real gap: snapshotHistory is appended to on EVERY sync/import/

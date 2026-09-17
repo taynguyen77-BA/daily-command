@@ -44,7 +44,7 @@ function PilotScoreRow({ label, value, onChange }: { label: string; value: 0 | 1
 }
 
 export function CloseDayModal({ onClose }: { onClose: () => void }) {
-  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, scopedMentionEvents, store } = useCommandCenter();
+  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scopedMentionEvents, store } = useCommandCenter();
   const [entry, setEntry] = useState<EodEntry | null>(null);
   const [entryMode, setEntryMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
@@ -69,7 +69,7 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
     const identity = { displayName: state.ownerName, accountId: state.personalIdentity?.accountId };
     const assignedWorkActiveCount = getActiveAssignedWorkItems(filteredData.workItems, identity, workRelevanceIndex, new Set(Object.keys(state.dailyCommandCompletions))).length;
     const recentMentionsCount = selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, Date.now(), { dailyCommandCompletions: state.dailyCommandCompletions }).length;
-    const waitingForCount = proactive ? buildWaitingFor(filteredData, proactive.dependencyRadar).length : 0;
+    const waitingForCount = proactive ? buildWaitingFor(filteredData, proactive.dependencyRadar, workRelevanceIndex, dailyCommandCompletedWorkItemIds).length : 0;
     const attentionQueueActiveCount = proactive ? proactive.attentionQueue.filter((a) => a.lifecycle !== "SNOOZED" && a.lifecycle !== "RESOLVED").length : 0;
     const context = buildPilotFeedbackContext({
       isJira: state.dataSource === "jira",
@@ -137,7 +137,7 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
   const newPriorityTomorrow = personalFocus?.top3 ?? [];
   const watchTomorrow = personalFocus?.byCategory.WATCH.slice(0, 3) ?? [];
 
-  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length);
+  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics);
   const stableMetricsCount = trend.deltas.filter((d) => d.direction === "stable").length;
 

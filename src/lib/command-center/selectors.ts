@@ -57,7 +57,7 @@ export function deriveData(
   const scoreByItemId = new Map(scores.map((s) => [s.itemId, s]));
 
   const risks = dedupeRisks(data.risks, detectRisks(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
-  const changes = detectChanges(previous, data, today);
+  const changes = detectChanges(previous, data, today, undefined, workRelevanceIndex);
 
   const openItems = data.workItems.filter((w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
   const kpis: Kpis = {

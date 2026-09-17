@@ -5,9 +5,18 @@
 //
 // V2.4 §17 adds computeProjectAttentionMap below — the identical formula, grouped by
 // Project instead of Client, for Executive Mode's Portfolio View. Not a second engine.
+//
+// V2.25 — audit fix: both `overdue` computations below used a raw `w.status !== "Done"`
+// check (Delivery Confidence's own overdue-count input), ignoring Work Relevance Policy
+// COMPLETED/EXCLUDED and Daily Command Completion — so a client/project whose finished-but-
+// not-native-Done tickets carried a past-due date had its Delivery Confidence dragged down
+// forever. Now isWorkItemOperationallyOpen, additive/optional trailing parameters threaded
+// through confidenceForClient/computeClientAttentionMap/computeProjectAttentionMap, same
+// no-op-when-omitted contract as every other engine using this gate.
 
 import { computeDeliveryConfidence, deliveryConfidenceBand } from "./executive";
 import { scoreAllWorkItems } from "./scoring";
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { ClientAttentionRow, CommandCenterData, DailySnapshot, DependencyRadarItem, ProjectAttentionRow, TrendDirection } from "./types";
 import type { DerivedData } from "./selectors";
 
@@ -17,12 +26,22 @@ function decisionClientId(data: CommandCenterData, decision: { clientId?: string
   return decision.clientId ?? data.projects.find((p) => p.id === decision.projectId)?.clientId;
 }
 
-function confidenceForClient(workItems: CommandCenterData["workItems"], risks: CommandCenterData["risks"], data: CommandCenterData, clientId: string, today: string): number {
+function confidenceForClient(
+  workItems: CommandCenterData["workItems"],
+  risks: CommandCenterData["risks"],
+  data: CommandCenterData,
+  clientId: string,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): number {
   const clientData: CommandCenterData = { ...data, workItems: workItems.filter((w) => w.clientId === clientId) };
   const scores = scoreAllWorkItems(clientData, today);
   const clientItemIds = new Set(clientData.workItems.map((w) => w.id));
   const clientRisks = risks.filter((r) => r.status === "open" && r.sourceWorkItemIds.some((id) => clientItemIds.has(id)));
-  const overdue = clientData.workItems.filter((w) => w.status !== "Done" && w.dueDate && w.dueDate < today).length;
+  const overdue = clientData.workItems.filter(
+    (w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) && w.dueDate && w.dueDate < today
+  ).length;
   return computeDeliveryConfidence(scores, clientRisks, overdue);
 }
 
@@ -31,7 +50,9 @@ export function computeClientAttentionMap(
   derived: DerivedData,
   dependencyRadar: DependencyRadarItem[],
   previousSnapshot: DailySnapshot | null,
-  today: string
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): ClientAttentionRow[] {
   const criticalDependencyIds = new Set(dependencyRadar.filter((d) => d.heat === "CRITICAL" || d.heat === "HIGH").map((d) => d.dependencyId));
 
@@ -41,7 +62,7 @@ export function computeClientAttentionMap(
       const clientRisks = derived.risks.filter((r) => r.sourceWorkItemIds.some((id) => clientItemIds.has(id)));
       const topRiskTitle = clientRisks[0]?.title;
 
-      const deliveryConfidence = confidenceForClient(data.workItems, data.risks, data, client.id, today);
+      const deliveryConfidence = confidenceForClient(data.workItems, data.risks, data, client.id, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
 
       const openDecisionsCount = data.decisions.filter((d) => OPEN_DECISION_STATUSES.has(d.status) && decisionClientId(data, d) === client.id).length;
 
@@ -52,7 +73,7 @@ export function computeClientAttentionMap(
 
       let trend: TrendDirection = "stable";
       if (previousSnapshot) {
-        const previousConfidence = confidenceForClient(previousSnapshot.workItems, previousSnapshot.risks, data, client.id, today);
+        const previousConfidence = confidenceForClient(previousSnapshot.workItems, previousSnapshot.risks, data, client.id, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
         trend = deliveryConfidence > previousConfidence ? "improving" : deliveryConfidence < previousConfidence ? "deteriorating" : "stable";
       }
 
@@ -75,7 +96,12 @@ export function computeClientAttentionMap(
  *  expected to already be the caller's SCOPED view (filteredData), so this only ever
  *  produces one row per project currently in scope; the caller is responsible for listing
  *  any excluded-by-scope project separately (see knownJiraProjects in jira/project-scope.ts). */
-export function computeProjectAttentionMap(data: CommandCenterData, today: string): ProjectAttentionRow[] {
+export function computeProjectAttentionMap(
+  data: CommandCenterData,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): ProjectAttentionRow[] {
   return data.projects
     .filter((p) => p.sourceType === "jira" && p.sourceId)
     .map((project) => {
@@ -83,7 +109,9 @@ export function computeProjectAttentionMap(data: CommandCenterData, today: strin
       const projectItemIds = new Set(projectItems.map((w) => w.id));
       const scores = scoreAllWorkItems({ ...data, workItems: projectItems }, today);
       const projectRisks = data.risks.filter((r) => r.status === "open" && r.sourceWorkItemIds.some((id) => projectItemIds.has(id)));
-      const overdue = projectItems.filter((w) => w.status !== "Done" && w.dueDate && w.dueDate < today).length;
+      const overdue = projectItems.filter(
+        (w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) && w.dueDate && w.dueDate < today
+      ).length;
       const deliveryConfidence = computeDeliveryConfidence(scores, projectRisks, overdue);
 
       return {

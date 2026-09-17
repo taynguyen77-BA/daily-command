@@ -2,7 +2,14 @@
 // layer over ownership fields already on the model — never a CRM, never an inferred
 // org hierarchy. "Owner" here always means the literal field on the record (owner /
 // decision.owner / dependency.ownerId / action.owner), nothing derived.
+//
+// V2.25 — audit fix: the "unowned high-priority item" and "ownership concentration" scans
+// below both used a raw `w.status !== "Done"` check, so a Work-Relevance-COMPLETED/EXCLUDED
+// or Daily-Command-completed item kept generating "no assigned owner" / bottleneck warnings
+// forever, exactly like every other engine this same pass closes. Now isWorkItemOperationallyOpen,
+// additive/optional trailing parameters, same no-op-when-omitted contract as elsewhere.
 
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type {
   CommandCenterData,
   Communication,
@@ -17,11 +24,15 @@ import type {
 export function computeStakeholderAttention(
   data: CommandCenterData,
   dependencyRadar: DependencyRadarItem[],
-  decisionRadar: DecisionRadarItem[]
+  decisionRadar: DecisionRadarItem[],
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): StakeholderAttentionItem[] {
   const out: StakeholderAttentionItem[] = [];
 
-  const unownedHighPriority = data.workItems.filter((w) => w.status !== "Done" && (w.priority === "P1" || w.priority === "P2") && !w.owner);
+  const unownedHighPriority = data.workItems.filter(
+    (w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) && (w.priority === "P1" || w.priority === "P2") && !w.owner
+  );
   for (const w of unownedHighPriority) {
     out.push({ ownerKey: "unassigned", ownerLabel: "Unassigned", role: "OWNER", reason: `${w.key} (${w.priority}) has no assigned owner.`, relatedIds: [w.id] });
   }
@@ -46,7 +57,7 @@ export function computeStakeholderAttention(
     if (!owner) return;
     counts.set(owner, [...(counts.get(owner) ?? []), { role, ids: [id] }]);
   };
-  for (const w of data.workItems) if (w.status !== "Done") record(w.owner, "OWNER", w.id);
+  for (const w of data.workItems) if (isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) record(w.owner, "OWNER", w.id);
   for (const dep of dependencyRadar) record(dep.ownerId, "DEPENDENCY_OWNER", dep.dependencyId);
   for (const d of decisionRadar) record(d.decision.owner, "DECISION_MAKER", d.decisionId);
   for (const a of data.actions) if (a.status !== "completed") record(a.owner, "ACTION_OWNER", a.id);

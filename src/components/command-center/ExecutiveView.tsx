@@ -26,11 +26,11 @@ export function ExecutiveView({
   // V2.4 §16-17 — `data` here is already the caller's scoped `filteredData`; `state` is
   // only needed for the full (unscoped) project list, to name any project the current scope
   // excludes, and for the scope label itself.
-  const { state, today } = useCommandCenter();
+  const { state, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const view = buildExecutiveView(data, derived.scores, derived.risks, derived.changes, derived.kpis.overdue);
   const confidenceColor = view.deliveryConfidence >= 80 ? "text-green" : view.deliveryConfidence >= 60 ? "text-yellow" : view.deliveryConfidence >= 40 ? "text-orange" : "text-red";
 
-  const portfolio = computeProjectAttentionMap(data, today);
+  const portfolio = computeProjectAttentionMap(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const inScopeKeys = new Set(portfolio.map((p) => p.jiraKey));
   const excludedProjects = knownJiraProjects(state.data).filter((p) => !inScopeKeys.has(p.key));
 

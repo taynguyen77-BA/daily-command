@@ -115,6 +115,8 @@ const CATEGORY_LABELS: Record<AttentionCategory, string> = {
   // V2.10 §2 — appended, never inserted into the original six.
   MENTION: "Mentioned",
   ASSIGNMENT: "Assigned",
+  // V2.25 Task 3 — appended the same way.
+  STALE: "Stale ticket",
 };
 
 export function CategoryBadge({ category }: { category: AttentionCategory }) {

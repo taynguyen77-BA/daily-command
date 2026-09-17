@@ -720,7 +720,11 @@ export interface CommunicationPriorityResult {
 
 // V2.10 §2 — MENTION and ASSIGNMENT are appended, never inserted: the original six
 // categories keep their exact identity and CATEGORY_ORDER position in attention-queue.ts.
-export type AttentionCategory = "RISK" | "DRIFT" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION" | "MENTION" | "ASSIGNMENT";
+// V2.25 Task 3 — STALE appended the same way: a work item assigned to the configured identity
+// with no observable activity for N business days (personal-staleness.ts) — a distinct signal
+// from every existing category (not a risk, not a dependency, not an ineffective action), so a
+// dedicated category rather than folding into ACTION keeps its filter/label honest.
+export type AttentionCategory = "RISK" | "DRIFT" | "DEPENDENCY" | "DECISION" | "ACTION" | "COMMUNICATION" | "MENTION" | "ASSIGNMENT" | "STALE";
 export type AttentionSeverity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW" | "INFO";
 // V2.14 §1 — "Is this mine to act on?" A second, orthogonal classification from
 // AttentionCategory/FocusCategory (see personal-relation.ts's top comment): those answer
@@ -868,7 +872,12 @@ export interface MemoryEvent {
     | "FOCUS_SKIPPED"
     | "DAILY_PLAN_CREATED"
     | "DAILY_PLAN_UPDATED"
-    | "DAILY_FOCUS_REVIEWED";
+    | "DAILY_FOCUS_REVIEWED"
+    // V2.25 Task 2 — a work item detected as newly completed IN JIRA during a sync (native
+    // status or Work Relevance Policy COMPLETED/EXCLUDED), independent of any in-app action.
+    // See jira-completion-detection.ts and daily-report.ts's "Completed in Jira" vs "Completed
+    // via Daily Command" label split.
+    | "JIRA_STATUS_COMPLETED";
   title: string;
   impact: string;
   evidence: string[];

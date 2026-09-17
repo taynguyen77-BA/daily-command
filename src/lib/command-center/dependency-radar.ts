@@ -9,8 +9,20 @@
 //   Release proximity:      +20 if <=3 days to a linked release, +10 if <=14 days
 //   Linked risk severity:   +15 HIGH, +7 MEDIUM
 // LEVELS: CRITICAL >= 70, HIGH >= 45, MEDIUM >= 20, else LOW.
+//
+// V2.25 — audit closing out work-relevance.ts's own "confirmed bug" note (§ isWorkItemDoneOrExcluded
+// doc): `blockedItems` used a raw `w.status !== "Done"` check, so a work item the user had
+// classified COMPLETED/EXCLUDED in the Work Relevance Policy (but whose native Jira status
+// isn't literally "Done") kept inflating blockedItemCount/blockedHighPriorityCount/heat/
+// releaseProximity forever. Now uses isWorkItemOperationallyOpen — the same canonical gate
+// risk-detection.ts/scoring.ts/release-health.ts/execution-path.ts already apply — folding in
+// Daily Command Completion too. Additive/optional trailing parameters, same no-op-when-omitted
+// contract as every other engine using this gate: an existing caller that never passes them
+// reproduces the old (pre-fix) `status !== "Done"` behavior via isWorkItemOperationallyOpen's
+// own no-op-when-omitted floor.
 
 import { daysBetween } from "./scoring";
+import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, DependencyHeat, DependencyRadarItem, Risk, RiskLevel } from "./types";
 
 const RISK_ORDER: Record<RiskLevel, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
@@ -22,7 +34,13 @@ function classifyHeat(score: number): DependencyHeat {
   return "LOW";
 }
 
-export function computeDependencyRadar(data: CommandCenterData, risks: Risk[], today: string): DependencyRadarItem[] {
+export function computeDependencyRadar(
+  data: CommandCenterData,
+  risks: Risk[],
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): DependencyRadarItem[] {
   const openRisksByWorkItem = new Map<string, Risk[]>();
   for (const r of risks) {
     if (r.status !== "open") continue;
@@ -32,7 +50,9 @@ export function computeDependencyRadar(data: CommandCenterData, risks: Risk[], t
   return data.dependencies
     .filter((dep) => dep.status === "unresolved")
     .map((dep) => {
-      const blockedItems = data.workItems.filter((w) => w.dependencyIds.includes(dep.id) && w.status !== "Done");
+      const blockedItems = data.workItems.filter(
+        (w) => w.dependencyIds.includes(dep.id) && isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds)
+      );
       const blockedItemCount = blockedItems.length;
       const blockedHighPriorityCount = blockedItems.filter((w) => w.priority === "P1" || w.priority === "P2").length;
       const ageDays = daysBetween(dep.raisedDate, today);

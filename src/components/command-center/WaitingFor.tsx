@@ -6,13 +6,28 @@
 
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { buildWaitingFor } from "@/lib/command-center/waiting-for";
+import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { CommandCenterData, DependencyHeat } from "@/lib/command-center/types";
 import { HeatBadge, Panel, SectionHeading, TrustLabel } from "./ui";
 
 const HEAT_ORDER: Record<DependencyHeat, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 
-export function WaitingFor({ data, proactive }: { data: CommandCenterData; proactive: ProactiveIntelligence | null }) {
-  const items = proactive ? buildWaitingFor(data, proactive.dependencyRadar) : [];
+// V2.25 — workRelevanceIndex/dailyCommandCompletedWorkItemIds are additive/optional props,
+// same no-op-when-omitted contract as waiting-for.ts's own parameters: threaded from
+// page.tsx's useCommandCenter() so a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-
+// completed item's project stops showing as still "blocking" here (see waiting-for.ts).
+export function WaitingFor({
+  data,
+  proactive,
+  workRelevanceIndex,
+  dailyCommandCompletedWorkItemIds,
+}: {
+  data: CommandCenterData;
+  proactive: ProactiveIntelligence | null;
+  workRelevanceIndex?: WorkRelevanceIndex;
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
+}) {
+  const items = proactive ? buildWaitingFor(data, proactive.dependencyRadar, workRelevanceIndex, dailyCommandCompletedWorkItemIds) : [];
 
   return (
     <section>

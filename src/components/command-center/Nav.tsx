@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { initAppStateSync } from "@/lib/command-center/app-state-sync";
 import { initAutoJiraSync } from "@/lib/command-center/auto-sync";
+import { initAutoDailyReport } from "@/lib/command-center/auto-daily-report";
 
 interface NavLink {
   href: string;
@@ -137,6 +138,15 @@ export function Nav() {
   // is equally harmless here.
   useEffect(() => {
     initAutoJiraSync(commandCenterStore);
+  }, []);
+
+  // V2.25 Task 2 — same single-init-point reasoning as above: ensures today's Daily Report
+  // exists (Demo/Local Import installs, or a Jira install whose data is still "fresh" enough
+  // that initAutoJiraSync's own tick is a no-op) without requiring the user to open Close Day.
+  // A real Jira sync's own completion also triggers this (see store.ts's syncJira), so this
+  // on-load check is specifically the safety net for the paths that never sync at all.
+  useEffect(() => {
+    initAutoDailyReport(commandCenterStore);
   }, []);
 
   return (

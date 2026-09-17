@@ -14,14 +14,31 @@ export function last7DaysEnding(todayIso: string): string[] {
 }
 
 type MemoryEventKind = MemoryEvent["kind"];
-const COMPLETED_KINDS: ReadonlySet<MemoryEventKind> = new Set<MemoryEventKind>(["ACTION_COMPLETED", "FOCUS_COMPLETED"]);
+// V2.25 Task 2 — confirmed real gap: this used to be one COMPLETED_KINDS set covering only
+// explicit in-app actions (ACTION_COMPLETED, FOCUS_COMPLETED), so a ticket a Dev/QA closed
+// directly in Jira never appeared here even though it's genuinely finished work.
+// JIRA_STATUS_COMPLETED (jira-completion-detection.ts, emitted from store.ts's syncJira) is
+// now folded into "Completed" too — but kept in its own bucket, never blended into one
+// undifferentiated list, so a reader never mistakes "the app observed this in Jira" for "you
+// did this in the app".
+const COMPLETED_IN_APP_KINDS: ReadonlySet<MemoryEventKind> = new Set<MemoryEventKind>(["ACTION_COMPLETED", "FOCUS_COMPLETED"]);
+const COMPLETED_IN_JIRA_KINDS: ReadonlySet<MemoryEventKind> = new Set<MemoryEventKind>(["JIRA_STATUS_COMPLETED"]);
 const DECISION_KINDS: ReadonlySet<MemoryEventKind> = new Set<MemoryEventKind>(["DECISION_MADE", "DECISION_OUTCOME"]);
 const OUTCOME_KINDS: ReadonlySet<MemoryEventKind> = new Set<MemoryEventKind>(["ACTION_OUTCOME"]);
 
 export interface DailyReportSummary {
   date: string;
   generatedAt: string;
+  /** Every completed-work event, in-app and Jira-detected combined — for a caller that only
+   *  needs a total (e.g. buildWeeklyReportSummary's byProject rollup). Prefer
+   *  completedInApp/completedInJira below when the distinction matters for display. */
   completed: MemoryEvent[];
+  /** Completed via an explicit action the user took inside this app (finished an Action,
+   *  completed a Focus session). */
+  completedInApp: MemoryEvent[];
+  /** Completed in Jira — detected during a sync diff (jira-completion-detection.ts), with no
+   *  corresponding in-app action. Never blended with completedInApp above. */
+  completedInJira: MemoryEvent[];
   decisions: MemoryEvent[];
   outcomes: MemoryEvent[];
   /** Everything else recorded that day (drift/risk/loop/plan-housekeeping events) — still
@@ -32,17 +49,28 @@ export interface DailyReportSummary {
 /** Pure grouping over an already-frozen snapshot's events — never re-derives anything from
  *  live state. */
 export function summarizeDailyReport(snapshot: DailyReportSnapshot): DailyReportSummary {
-  const completed: MemoryEvent[] = [];
+  const completedInApp: MemoryEvent[] = [];
+  const completedInJira: MemoryEvent[] = [];
   const decisions: MemoryEvent[] = [];
   const outcomes: MemoryEvent[] = [];
   const other: MemoryEvent[] = [];
   for (const event of snapshot.events) {
-    if (COMPLETED_KINDS.has(event.kind)) completed.push(event);
+    if (COMPLETED_IN_APP_KINDS.has(event.kind)) completedInApp.push(event);
+    else if (COMPLETED_IN_JIRA_KINDS.has(event.kind)) completedInJira.push(event);
     else if (DECISION_KINDS.has(event.kind)) decisions.push(event);
     else if (OUTCOME_KINDS.has(event.kind)) outcomes.push(event);
     else other.push(event);
   }
-  return { date: snapshot.date, generatedAt: snapshot.generatedAt, completed, decisions, outcomes, other };
+  return {
+    date: snapshot.date,
+    generatedAt: snapshot.generatedAt,
+    completed: [...completedInApp, ...completedInJira],
+    completedInApp,
+    completedInJira,
+    decisions,
+    outcomes,
+    other,
+  };
 }
 
 /** `title (ticketKey) — client/project — outcome note`, omitting any part the event doesn't
@@ -62,8 +90,22 @@ export function dailyReportToMarkdown(snapshot: DailyReportSnapshot): string {
   const summary = summarizeDailyReport(snapshot);
   const lines: string[] = [`# Daily Report — ${summary.date}`, ""];
 
+  // V2.25 Task 2 — the two completion sources are labeled separately (never blended into one
+  // undifferentiated list) so a reader never mistakes "the app observed this in Jira" for "you
+  // did this in the app" — see this file's own top comment.
   lines.push(`## Completed (${summary.completed.length})`);
-  lines.push(...(summary.completed.length === 0 ? ["- None."] : summary.completed.map((e) => `- ${formatEventLine(e)}`)), "");
+  if (summary.completed.length === 0) {
+    lines.push("- None.", "");
+  } else {
+    if (summary.completedInApp.length > 0) {
+      lines.push(`**Completed via Daily Command (${summary.completedInApp.length})**`);
+      lines.push(...summary.completedInApp.map((e) => `- ${formatEventLine(e)}`), "");
+    }
+    if (summary.completedInJira.length > 0) {
+      lines.push(`**Completed in Jira (${summary.completedInJira.length})**`);
+      lines.push(...summary.completedInJira.map((e) => `- ${formatEventLine(e)}`), "");
+    }
+  }
 
   lines.push(`## Decisions (${summary.decisions.length})`);
   lines.push(...(summary.decisions.length === 0 ? ["- None."] : summary.decisions.map((e) => `- ${formatEventLine(e)}`)), "");
@@ -91,6 +133,10 @@ export interface WeeklyReportSummary {
    *  no snapshot yet is simply absent here (never a fabricated empty placeholder). */
   snapshots: DailyReportSnapshot[];
   totalCompleted: number;
+  /** V2.25 Task 2 — the same in-app/Jira-detected split summarizeDailyReport applies per day,
+   *  rolled up over the week. totalCompleted === totalCompletedInApp + totalCompletedInJira. */
+  totalCompletedInApp: number;
+  totalCompletedInJira: number;
   totalDecisions: number;
   totalOutcomes: number;
   /** Per-project completed-work counts, computed only from events that actually carry a
@@ -106,7 +152,9 @@ export interface WeeklyReportSummary {
 export function buildWeeklyReportSummary(dateRange: string[], dailyReports: Record<string, DailyReportSnapshot>): WeeklyReportSummary {
   const snapshots = dateRange.map((d) => dailyReports[d]).filter((s): s is DailyReportSnapshot => !!s);
   const allEvents = snapshots.flatMap((s) => s.events);
-  const completed = allEvents.filter((e) => COMPLETED_KINDS.has(e.kind));
+  const completedInApp = allEvents.filter((e) => COMPLETED_IN_APP_KINDS.has(e.kind));
+  const completedInJira = allEvents.filter((e) => COMPLETED_IN_JIRA_KINDS.has(e.kind));
+  const completed = [...completedInApp, ...completedInJira];
   const decisions = allEvents.filter((e) => DECISION_KINDS.has(e.kind));
   const outcomes = allEvents.filter((e) => OUTCOME_KINDS.has(e.kind));
 
@@ -123,6 +171,8 @@ export function buildWeeklyReportSummary(dateRange: string[], dailyReports: Reco
     dateRange,
     snapshots,
     totalCompleted: completed.length,
+    totalCompletedInApp: completedInApp.length,
+    totalCompletedInJira: completedInJira.length,
     totalDecisions: decisions.length,
     totalOutcomes: outcomes.length,
     byProject,
@@ -136,7 +186,7 @@ export function weeklyReportToMarkdown(summary: WeeklyReportSummary): string {
     `${summary.snapshots.length} of ${summary.dateRange.length} day(s) in this range have a Daily Report.`,
     "",
     `## Totals`,
-    `- Completed: ${summary.totalCompleted}`,
+    `- Completed: ${summary.totalCompleted} (${summary.totalCompletedInApp} via Daily Command, ${summary.totalCompletedInJira} in Jira)`,
     `- Decisions: ${summary.totalDecisions}`,
     `- Outcomes recorded: ${summary.totalOutcomes}`,
     "",
