@@ -155,7 +155,18 @@ export function computeProactiveIntelligence(
   // this function doesn't otherwise have).
   const staleCandidateIdentity: PersonalRelationIdentity = { accountId: identityOwnerId, displayName: identityDisplayName };
   const activeAssignedForStaleness = getAssignedWorkItems(data.workItems, staleCandidateIdentity).filter(
-    (w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) && !dailyCommandSkippedWorkItemIds?.has(w.id)
+    (w) =>
+      isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) &&
+      !dailyCommandSkippedWorkItemIds?.has(w.id) &&
+      // V2.25 Task 3 (bug fix) — a ticket the Work Relevance Policy classifies WAITING is
+      // explicitly blocked on someone else, not on the assignee; the assignee going quiet on
+      // it is not a "possible miss" signal the way silence on an ACTIONABLE ticket is. This
+      // stays an explicit filter step here (relevance-aware), not inside
+      // personal-staleness.ts itself, which correctly stays a pure "is this old" function
+      // with no relevance concept of its own. Guarded on workRelevanceIndex existing at all —
+      // same no-op-when-omitted contract as isWorkItemOperationallyOpen just above: an install
+      // with no Work Relevance Policy configured has no WAITING classification to exclude.
+      (!workRelevanceIndex || resolveWorkRelevance(w, workRelevanceIndex) !== "WAITING")
   );
   const staleAssignedTickets = computeStaleAssignedTickets(activeAssignedForStaleness, today, staleAssignedTicketThresholds);
 

@@ -1664,6 +1664,35 @@ function makeAttentionItem(overrides: Partial<AttentionItem> = {}): AttentionIte
   ok("V2.25 personal-staleness", computeStaleAssignedTickets([noLastUpdated], TODAY).length === 0, "an item with no lastUpdated at all is never treated as infinitely stale — skipped rather than guessed");
 }
 
+// ===== V2.25 Task 3 (bug fix) — proactive.ts's activeAssignedForStaleness must exclude a
+// WAITING-classified ticket before it ever reaches computeStaleAssignedTickets: a ticket
+// blocked on someone else going quiet is not a "possible miss" signal, unlike an ACTIONABLE
+// ticket with the identical staleness profile. The exclusion lives in proactive.ts (relevance-
+// aware), never inside personal-staleness.ts itself (which stays a pure "is this old"
+// function) — this test exercises the real composed pipeline via computeProactiveIntelligence,
+// not a hand-rolled reproduction of the filter. =====
+{
+  const waitingPolicyIdx = buildWorkRelevanceIndex(globalPolicy({ "Blocked on Client": "WAITING", "To Do": "ACTIONABLE" }));
+  const tenBusinessDaysAgo = "2026-06-01"; // 10 business days before TODAY (2026-06-15, a Monday)
+
+  const waitingStaleItem = jiraItem({ id: "wsl-waiting-1", key: "WSL-WAIT-1", owner: "Alice", ownerId: "acc-alice-wsl", jiraStatusName: "Blocked on Client", status: "In Progress", lastUpdated: tenBusinessDaysAgo });
+  const actionableStaleItem = jiraItem({ id: "wsl-actionable-1", key: "WSL-ACT-1", owner: "Alice", ownerId: "acc-alice-wsl", jiraStatusName: "To Do", status: "In Progress", lastUpdated: tenBusinessDaysAgo });
+  const wslData = { ...emptyData(), workItems: [waitingStaleItem, actionableStaleItem] };
+  const wslDerived = deriveData(wslData, null, TODAY, waitingPolicyIdx);
+  const wslProactive = computeProactiveIntelligence(wslData, wslDerived, [], null, {}, "jira", TODAY, waitingPolicyIdx, undefined, "acc-alice-wsl", "Alice");
+
+  ok(
+    "V2.25 Stale WAITING exclusion",
+    !wslProactive.attentionQueue.some((i) => i.category === "STALE" && i.sourceRef?.id === "wsl-waiting-1"),
+    "a WAITING-classified ticket with a 10-business-day-stale profile is NOT flagged STALE — it's blocked on someone else, not a signal about the assignee"
+  );
+  ok(
+    "V2.25 Stale WAITING exclusion",
+    wslProactive.attentionQueue.some((i) => i.category === "STALE" && i.sourceRef?.id === "wsl-actionable-1"),
+    "an ACTIONABLE ticket with the IDENTICAL staleness profile still gets flagged STALE — proves the fix is scoped to WAITING specifically, not a broad staleness suppression"
+  );
+}
+
 // ===== V2.25 Task 3 — Attention Queue: STALE category wiring (attention-queue.ts). =====
 {
   const stableDriftForStale = computeDeliveryDrift([], yesterdayMetrics);
