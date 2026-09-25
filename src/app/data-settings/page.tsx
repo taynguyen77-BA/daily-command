@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
@@ -655,7 +655,11 @@ export default function DataSettingsPage() {
   const [confirmingReset, setConfirmingReset] = useState(false);
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
+  // Local `syncing` only drives this page's own button label/elapsed timer; the real guard
+  // against overlapping syncs is inside store.syncJira() (see sync-lock.ts).
   const [syncing, setSyncing] = useState(false);
+  const syncActivity = useSyncExternalStore(store.subscribe, store.getJiraSyncActivity, store.getServerJiraSyncActivity);
+  const syncingElsewhere = syncActivity.inProgress && !syncing;
   const [syncElapsedSec, setSyncElapsedSec] = useState(0);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [conformance, setConformance] = useState<JiraConformanceReport | null>(null);
@@ -812,8 +816,12 @@ export default function DataSettingsPage() {
   async function runSync(full: boolean) {
     setSyncing(true);
     setSyncMessage(null);
-    const result = await store.syncJira({ full });
+    const result = await store.syncJira({ full, trigger: "settings" });
     setSyncing(false);
+    if (result.errorKind === "sync-in-progress") {
+      setSyncMessage(`${result.error} Its results will appear here when it finishes — no second request was sent.`);
+      return;
+    }
     if (!result.ok) {
       setSyncMessage(`Sync failed: ${result.error ?? "unknown error"}`);
       return;
@@ -1052,14 +1060,14 @@ export default function DataSettingsPage() {
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
                     onClick={() => requestSync(false)}
-                    disabled={syncing}
+                    disabled={syncing || syncingElsewhere}
                     className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
                   >
-                    {syncing ? `Syncing… (${syncElapsedSec}s)` : "Sync Jira"}
+                    {syncing ? `Syncing… (${syncElapsedSec}s)` : syncingElsewhere ? "Syncing… (started elsewhere)" : "Sync Jira"}
                   </button>
                   <button
                     onClick={() => requestSync(true)}
-                    disabled={syncing}
+                    disabled={syncing || syncingElsewhere}
                     className="rounded-md border border-border px-3 py-1.5 text-xs text-text2 hover:border-accent hover:text-text disabled:opacity-60"
                   >
                     Full re-sync

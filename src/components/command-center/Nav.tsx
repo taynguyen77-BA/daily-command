@@ -58,8 +58,11 @@ function SyncJiraHeaderButton() {
     () => commandCenterStore.getSnapshot().jiraSync,
     () => commandCenterStore.getServerSnapshot().jiraSync
   );
+  // The store owns the real in-progress state (syncJira() refuses overlapping calls itself);
+  // local `syncing` only drives this button's own spinner/result label.
+  const syncActivity = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getJiraSyncActivity, commandCenterStore.getServerJiraSyncActivity);
   const [syncing, setSyncing] = useState(false);
-  const [result, setResult] = useState<"ok" | "error" | null>(null);
+  const [result, setResult] = useState<"ok" | "error" | "busy" | null>(null);
   const resultTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => () => {
@@ -76,13 +79,15 @@ function SyncJiraHeaderButton() {
     );
   }
 
+  const syncingElsewhere = syncActivity.inProgress && !syncing;
+
   async function handleClick() {
-    if (syncing) return;
+    if (syncing || syncActivity.inProgress) return;
     setSyncing(true);
     setResult(null);
-    const outcome = await commandCenterStore.syncJira({ full: false });
+    const outcome = await commandCenterStore.syncJira({ full: false, trigger: "header" });
     setSyncing(false);
-    setResult(outcome.ok ? "ok" : "error");
+    setResult(outcome.ok ? "ok" : outcome.errorKind === "sync-in-progress" ? "busy" : "error");
     if (resultTimeout.current) clearTimeout(resultTimeout.current);
     resultTimeout.current = setTimeout(() => setResult(null), 4000);
   }
@@ -92,11 +97,11 @@ function SyncJiraHeaderButton() {
   return (
     <button
       onClick={handleClick}
-      disabled={syncing}
+      disabled={syncing || syncingElsewhere}
       title={`Last synced: ${lastSyncedLabel}`}
       className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-text2 hover:border-accent hover:text-text disabled:opacity-60"
     >
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className={syncing ? "animate-spin" : undefined}>
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className={syncing || syncingElsewhere ? "animate-spin" : undefined}>
         <path
           d="M10.5 6a4.5 4.5 0 1 1-1.318-3.182M10.5 1.5v3h-3"
           stroke="currentColor"
@@ -105,7 +110,17 @@ function SyncJiraHeaderButton() {
           strokeLinejoin="round"
         />
       </svg>
-      {syncing ? "Syncing…" : result === "ok" ? "Synced" : result === "error" ? "Sync failed" : "Sync Jira"}
+      {syncing
+        ? "Syncing…"
+        : syncingElsewhere
+          ? "Syncing… (started elsewhere)"
+          : result === "ok"
+            ? "Synced"
+            : result === "busy"
+              ? "Sync already running in another tab"
+              : result === "error"
+                ? "Sync failed"
+                : "Sync Jira"}
     </button>
   );
 }

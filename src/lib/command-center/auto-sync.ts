@@ -46,7 +46,11 @@ import type { DataSourceType, JiraSyncState } from "./types";
 /**
  * Pure eligibility check for one automatic-sync tick.
  *
- * - `isSyncing` — never overlap with an in-flight sync (manual or automatic).
+ * - `isSyncing` — skip the tick when this tab already has a sync in flight (manual or
+ *   automatic), read from store.getJiraSyncActivity(). This is only a cheap early-out, not
+ *   the guard: the actual mutual exclusion lives inside store.syncJira() itself (a Web Locks
+ *   lock that also spans tabs — see sync-lock.ts), which refuses an overlapping call with
+ *   errorKind "sync-in-progress" no matter which trigger made it.
  * - `dataSource !== "jira"` — auto-sync only ever applies once this install has real Jira
  *   data flowing at all; it is a complete no-op for Demo/Local Import, exactly like every
  *   other Jira-only capability in this app.
@@ -75,25 +79,21 @@ export function shouldAutoSyncJira(dataSource: DataSourceType, jiraSync: JiraSyn
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // re-check eligibility every 5 minutes
 
 let initialized = false;
-let isSyncing = false;
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
 async function tick(store: CommandCenterStore): Promise<void> {
   const state = store.getSnapshot();
-  if (!shouldAutoSyncJira(state.dataSource, state.jiraSync, isSyncing, Date.now())) return;
-  isSyncing = true;
-  try {
-    // Deliberately incremental (no `full`), the exact same call data-settings/page.tsx's
-    // "Sync Now" button makes for every sync after the first — never destructive on failure
-    // (store.syncJira's own §12 guarantee), silent by design here (no toast/banner): this is
-    // a background refresh, not a user-initiated action needing feedback. A failure still
-    // updates state.jiraSync bookkeeping (lastSyncError/lastSyncStatus) exactly as a manual
-    // sync failure would, so Data & Settings' existing sync-status panel reports it honestly
-    // — this module invents no second failure-reporting surface.
-    await store.syncJira();
-  } finally {
-    isSyncing = false;
-  }
+  if (!shouldAutoSyncJira(state.dataSource, state.jiraSync, store.getJiraSyncActivity().inProgress, Date.now())) return;
+  // Deliberately incremental (no `full`), the exact same call data-settings/page.tsx's
+  // "Sync Now" button makes for every sync after the first — never destructive on failure
+  // (store.syncJira's own §12 guarantee), silent by design here (no toast/banner): this is
+  // a background refresh, not a user-initiated action needing feedback. A failure still
+  // updates state.jiraSync bookkeeping (lastSyncError/lastSyncStatus) exactly as a manual
+  // sync failure would, so Data & Settings' existing sync-status panel reports it honestly
+  // — this module invents no second failure-reporting surface. If another tab (or a button
+  // click racing this tick) already holds the sync lock, syncJira() returns a
+  // "sync-in-progress" refusal without touching state, and the next tick simply re-checks.
+  await store.syncJira({ trigger: "auto" });
 }
 
 /** Called once per app session (idempotent — safe to call from every page mount, matching
@@ -117,7 +117,6 @@ export function initAutoJiraSync(store: CommandCenterStore): void {
  *  without cross-contaminating other test cases via leftover module state. */
 export function resetAutoJiraSyncForTests(): void {
   initialized = false;
-  isSyncing = false;
   if (intervalHandle) {
     clearInterval(intervalHandle);
     intervalHandle = null;

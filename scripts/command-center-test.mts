@@ -216,7 +216,10 @@ import { getActiveAssignedWorkItems, getAssignedWorkItems, getCompletedAssignedW
 import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions } from "../src/lib/command-center/recent-mentions";
 import type { DailyCommandCompletion, DailyCommandSkip } from "../src/lib/command-center/types";
 // V2.24 — Attention Truth & Automatic Jira Sync Reliability
-import { shouldAutoSyncJira } from "../src/lib/command-center/auto-sync";
+import { shouldAutoSyncJira, initAutoJiraSync, resetAutoJiraSyncForTests } from "../src/lib/command-center/auto-sync";
+import { CommandCenterStore, type JiraSyncResult, type JiraSyncTrigger } from "../src/lib/command-center/store";
+import { defaultJiraSyncLockManager, type JiraSyncLockManager } from "../src/lib/command-center/sync-lock";
+import type { DataSourceProvider, DataSourceSyncResult } from "../src/lib/command-center/datasource/types";
 import type { JiraSyncState } from "../src/lib/command-center/types";
 // V2.25 — "is this ticket done?" consistency audit (Task 1)
 import { buildWaitingFor } from "../src/lib/command-center/waiting-for";
@@ -9762,6 +9765,153 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     computeSetupHealthRows(undefined, "jira", unclassifiedData, idx, notConfigured).length === 3,
     "when nothing is configured, all three independent rows appear together — not mutually exclusive"
   );
+}
+
+
+// ===== syncJira mutual exclusion — overlapping syncs must never silently discard each other's
+// commits. Before the store-level lock, two overlapping calls both ran and whichever fetch
+// resolved LAST overwrote the other with a full this.set(), which could drop a freshly-detected
+// JIRA_STATUS_COMPLETED event ("a completed ticket reappears as open between syncs"). =====
+{
+  const LOCK_TICKET = "LOCK-1";
+  const lockProject = { id: "jira-project-LOCK", name: "Lock Project", clientId: undefined, status: "on-track", sourceType: "jira", sourceId: "LOCK" };
+  const lockItem = (status: string) => ({ ...makeItem({ id: "lock-wi", key: LOCK_TICKET, projectId: "jira-project-LOCK", status }), sourceType: "jira", sourceId: LOCK_TICKET });
+  const syncPayload = (status: string, syncedAt: string): DataSourceSyncResult =>
+    ({
+      ok: true,
+      data: { ...emptyData(), projects: [lockProject], workItems: [lockItem(status)] },
+      recordsFetched: 1,
+      truncated: false,
+      syncedAt,
+      warnings: [],
+    }) as unknown as DataSourceSyncResult;
+
+  // A fake JiraDataSource whose every sync() call stays pending until the test settles it,
+  // so the test controls the exact interleaving of overlapping syncs.
+  interface PendingSync { resolve: (r: DataSourceSyncResult) => void; reject: (e: unknown) => void }
+  function makeControllableSource() {
+    const pending: PendingSync[] = [];
+    let autoResult: DataSourceSyncResult | null = null;
+    const source: DataSourceProvider = {
+      type: "jira",
+      sync: () => (autoResult ? Promise.resolve(autoResult) : new Promise<DataSourceSyncResult>((resolve, reject) => pending.push({ resolve, reject }))),
+    };
+    return { source, pending, setAutoResult: (r: DataSourceSyncResult | null) => { autoResult = r; } };
+  }
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  // Seeds a fresh store (one "tab") with LOCK-1 still open, via a real first sync whose cursor
+  // is 2h old — stale enough that auto-sync's eligibility check actually fires a tick.
+  async function seededStore(lockManager: JiraSyncLockManager | null) {
+    const ctl = makeControllableSource();
+    const store = new CommandCenterStore({ createJiraDataSource: () => ctl.source, jiraSyncLockManager: lockManager });
+    store.getSnapshot();
+    store.resetAll();
+    ctl.setAutoResult(syncPayload("In Progress", new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()));
+    await store.syncJira();
+    ctl.setAutoResult(null);
+    return { store, ctl };
+  }
+
+  // Starts a sync through the given trigger path. "auto" goes through the real auto-sync.ts
+  // tick (initAutoJiraSync fires one immediately); "header"/"settings" make the exact call
+  // Nav.tsx's and data-settings/page.tsx's buttons make.
+  function startSync(store: CommandCenterStore, trigger: JiraSyncTrigger): Promise<JiraSyncResult | "auto-tick"> {
+    if (trigger === "auto") {
+      resetAutoJiraSyncForTests();
+      initAutoJiraSync(store);
+      resetAutoJiraSyncForTests(); // stop the interval timer; the immediate tick is already running
+      return Promise.resolve("auto-tick");
+    }
+    return store.syncJira({ full: false, trigger });
+  }
+
+  const combos: [JiraSyncTrigger, JiraSyncTrigger][] = [
+    ["auto", "header"],
+    ["auto", "settings"],
+    ["header", "settings"],
+  ];
+  const lockModes: [string, JiraSyncLockManager | null][] = [
+    ["Web Locks", defaultJiraSyncLockManager()],
+    ["fallback", null],
+  ];
+  ok("Sync lock", defaultJiraSyncLockManager() !== null, "this test runtime exposes navigator.locks, so the Web Locks path is genuinely exercised (not just the fallback)");
+
+  for (const [modeLabel, lockManager] of lockModes) {
+    for (const [first, second] of combos) {
+      const group = `Sync lock (${modeLabel}) ${first} vs ${second}`;
+      const { store, ctl } = await seededStore(lockManager);
+
+      const firstPromise = startSync(store, first);
+      await flush();
+      ok(group, ctl.pending.length === 1, `the first-started sync (${first}) is in flight`);
+      ok(group, store.getJiraSyncActivity().inProgress && store.getJiraSyncActivity().trigger === first, `the store itself reports a sync in progress, started by '${first}' — so the other button can show "started elsewhere"`);
+      const eventsBefore = store.getSnapshot().memoryEvents.length;
+
+      // Not awaited yet: without a lock this call would sit on its own pending fetch, and the
+      // test must report that as a failure rather than hang.
+      const secondPromise = startSync(store, second);
+      await flush();
+      ok(group, ctl.pending.length === 1, `the second-started sync (${second}) never reached the data source — only one sync executes the merge`);
+      ok(group, store.getSnapshot().memoryEvents.length === eventsBefore && store.getSnapshot().jiraSync.lastSyncStatus === "success", "the refused call changed no state and recorded no failure");
+
+      // The problematic interleaving: resolve the SECOND-started sync first (if it started at
+      // all), then the FIRST-started one.
+      const [firstPending, secondPending] = ctl.pending;
+      secondPending?.resolve(syncPayload("In Progress", new Date().toISOString()));
+      await flush();
+      firstPending.resolve(syncPayload("Done", new Date().toISOString()));
+      const [firstResult, secondResult] = await Promise.all([firstPromise, secondPromise]);
+      await flush();
+      ok(group, secondResult !== "auto-tick" && secondResult.ok === false && secondResult.errorKind === "sync-in-progress", `the second-started call (${second}) is refused with errorKind "sync-in-progress"`);
+      ok(group, firstResult === "auto-tick" || firstResult.ok === true, "the winning sync commits successfully");
+
+      const after = store.getSnapshot();
+      const completion = after.memoryEvents.filter((ev) => ev.kind === "JIRA_STATUS_COMPLETED" && ev.ticketKey === LOCK_TICKET);
+      ok(group, completion.length === 1, "the winning sync's JIRA_STATUS_COMPLETED event is still in state after both calls settle");
+      ok(group, after.data.workItems.find((w) => w.key === LOCK_TICKET)?.status === "Done", "the completed ticket stays Done — it does not reappear as open");
+      ok(group, !store.getJiraSyncActivity().inProgress, "the lock is released once the winning sync settles");
+    }
+
+    // A failed sync (rejected fetch) must release the lock, or every future sync is locked out.
+    {
+      const group = `Sync lock (${modeLabel}) failure release`;
+      const { store, ctl } = await seededStore(lockManager);
+      const failing = store.syncJira({ trigger: "header" });
+      await flush();
+      ctl.pending[0].reject(new Error("fetch failed: ECONNRESET"));
+      const failed = await failing;
+      ok(group, failed.ok === false && failed.errorKind !== "sync-in-progress", "a rejected fetch surfaces as an ordinary sync failure, not a thrown error");
+      ok(group, store.getSnapshot().jiraSync.lastSyncStatus === "failed" && store.getSnapshot().jiraSync.previousDataPreserved === true, "the failure is recorded in jiraSync bookkeeping and existing data is preserved");
+      ok(group, !store.getJiraSyncActivity().inProgress, "the store no longer reports a sync in progress after the failure");
+
+      ctl.setAutoResult(syncPayload("Done", new Date().toISOString()));
+      const retry = await store.syncJira({ trigger: "settings" });
+      ok(group, retry.ok === true, "the very next sync acquires the lock and runs — the failed sync did not leave the store locked out");
+      ok(group, store.getSnapshot().memoryEvents.some((ev) => ev.kind === "JIRA_STATUS_COMPLETED" && ev.ticketKey === LOCK_TICKET), "and that retry commits normally");
+    }
+  }
+
+  // Two tabs of the same origin: two independent store instances share one navigator.locks.
+  // An in-memory per-store flag can't see across them; the Web Locks lock must.
+  {
+    const group = "Sync lock (Web Locks) cross-tab";
+    const tabA = await seededStore(defaultJiraSyncLockManager());
+    const tabB = await seededStore(defaultJiraSyncLockManager());
+    const aPromise = tabA.store.syncJira({ trigger: "auto" });
+    await flush();
+    const bPromise = tabB.store.syncJira({ trigger: "header" });
+    await flush();
+    ok(group, tabB.ctl.pending.length === 0, "the second tab never sent its own request");
+    ok(group, !tabB.store.getJiraSyncActivity().inProgress, "the refused tab is immediately idle again");
+    tabB.ctl.pending[0]?.resolve(syncPayload("In Progress", new Date().toISOString()));
+    tabA.ctl.pending[0].resolve(syncPayload("Done", new Date().toISOString()));
+    const [, bResult] = await Promise.all([aPromise, bPromise]);
+    ok(group, bResult.ok === false && bResult.errorKind === "sync-in-progress" && /another tab/.test(bResult.error ?? ""), "a sync in another tab is refused while the first tab holds the lock, and says why");
+    tabB.ctl.setAutoResult(syncPayload("Done", new Date().toISOString()));
+    ok(group, (await tabB.store.syncJira({ trigger: "header" })).ok === true, "once the first tab's sync settles, the other tab can sync again");
+  }
+  resetAutoJiraSyncForTests();
 }
 
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));

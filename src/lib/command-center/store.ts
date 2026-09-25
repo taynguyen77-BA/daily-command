@@ -17,6 +17,8 @@ import { getAIProvider } from "./ai";
 import { todayLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
+import type { DataSourceProvider, DataSourceSyncResult } from "./datasource/types";
+import { LOCK_UNAVAILABLE, withJiraSyncLock, type JiraSyncLockManager } from "./sync-lock";
 import { idbGet, idbSet } from "./local-db";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
 import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
@@ -54,6 +56,7 @@ import type {
   DecisionEffectivenessClass,
   DecisionOption,
   GlobalFilters,
+  JiraErrorKind,
   JiraProjectScope,
   JiraSyncState,
   JiraWorkRelevancePolicyMap,
@@ -269,6 +272,37 @@ export function mergeById<T extends { id: string }>(existing: T[], incoming: T[]
 }
 
 type Listener = () => void;
+
+/** Which UI/runtime path started a Jira sync — lets each button tell "my own sync" apart
+ *  from "a sync started elsewhere" (see getJiraSyncActivity). */
+export type JiraSyncTrigger = "auto" | "header" | "settings";
+
+/** Transient, in-memory only — deliberately NOT part of StoreState, so it is never persisted
+ *  and never survives a reload (a sync can't survive a reload either). */
+export interface JiraSyncActivity {
+  inProgress: boolean;
+  trigger?: JiraSyncTrigger;
+}
+
+/** "sync-in-progress" is a refusal, not a sync failure: it never touches jiraSync
+ *  bookkeeping, which is why it's kept out of the persisted JiraErrorKind union. */
+export type JiraSyncErrorKind = JiraErrorKind | "sync-in-progress";
+
+export interface JiraSyncResult {
+  ok: boolean;
+  error?: string;
+  errorKind?: JiraSyncErrorKind;
+}
+
+export interface CommandCenterStoreDeps {
+  /** Defaults to the real client-side JiraDataSource. */
+  createJiraDataSource?: () => DataSourceProvider;
+  /** undefined → navigator.locks when available (resolved per sync); null → force the
+   *  in-memory fallback lock. */
+  jiraSyncLockManager?: JiraSyncLockManager | null;
+}
+
+const IDLE_JIRA_SYNC_ACTIVITY: JiraSyncActivity = { inProgress: false };
 
 /**
  * Pure parse + migration step, split out of the store so it's directly testable without
@@ -551,6 +585,9 @@ export class CommandCenterStore {
   private state: StoreState = initialState();
   private listeners = new Set<Listener>();
   private hydrated = false;
+  private jiraSyncActivity: JiraSyncActivity = IDLE_JIRA_SYNC_ACTIVITY;
+
+  constructor(private readonly deps: CommandCenterStoreDeps = {}) {}
 
   private hydrate() {
     if (this.hydrated || typeof window === "undefined") return;
@@ -649,6 +686,17 @@ export class CommandCenterStore {
     this.hydrate();
     return this.state;
   };
+
+  /** Whether a Jira sync is running in this tab right now, and which trigger started it.
+   *  Referentially stable between changes, so it's safe as a useSyncExternalStore snapshot;
+   *  subscribers are notified (via the same subscribe()) whenever it changes. */
+  getJiraSyncActivity = (): JiraSyncActivity => this.jiraSyncActivity;
+  getServerJiraSyncActivity = (): JiraSyncActivity => IDLE_JIRA_SYNC_ACTIVITY;
+
+  private setJiraSyncActivity(next: JiraSyncActivity) {
+    this.jiraSyncActivity = next;
+    this.listeners.forEach((l) => l());
+  }
 
   // Must return a referentially-stable value — useSyncExternalStore calls this on every
   // render, and a freshly-built object here trips React's "getServerSnapshot should be
@@ -967,8 +1015,30 @@ export class CommandCenterStore {
    * On failure, the existing dataset is never touched — only jiraSync bookkeeping changes
    * (§12 "the user must never lose existing Command Center data because Jira became
    * temporarily unavailable").
+   *
+   * Mutually exclusive: at most one sync runs at a time, in this tab (auto-sync tick, header
+   * button, Data & Settings button all funnel through here) and — via the Web Locks API —
+   * across tabs of the same origin. A call made while another sync holds the lock is refused
+   * with errorKind "sync-in-progress" and changes no state at all; it is never queued and
+   * never allowed to run its own merge, which is what previously let the slower of two
+   * overlapping syncs overwrite the faster one's commit. See sync-lock.ts.
    */
-  async syncJira(options?: { full?: boolean }): Promise<{ ok: boolean; error?: string }> {
+  async syncJira(options?: { full?: boolean; trigger?: JiraSyncTrigger }): Promise<JiraSyncResult> {
+    // In-tab guard first, synchronously, before any await — two calls in the same tick can
+    // never both get past this line.
+    if (this.jiraSyncActivity.inProgress) return { ok: false, error: "Sync already in progress.", errorKind: "sync-in-progress" };
+    this.setJiraSyncActivity({ inProgress: true, trigger: options?.trigger });
+    try {
+      // An undefined lock manager falls through to withJiraSyncLock's navigator.locks default.
+      const outcome = await withJiraSyncLock(() => this.runJiraSync(options), this.deps.jiraSyncLockManager);
+      if (outcome === LOCK_UNAVAILABLE) return { ok: false, error: "Sync already in progress (started in another tab).", errorKind: "sync-in-progress" };
+      return outcome;
+    } finally {
+      this.setJiraSyncActivity(IDLE_JIRA_SYNC_ACTIVITY);
+    }
+  }
+
+  private async runJiraSync(options?: { full?: boolean }): Promise<JiraSyncResult> {
     const startedAt = new Date().toISOString();
     this.set({ ...this.state, jiraSync: { ...this.state.jiraSync, lastSyncStartedAt: startedAt } });
 
@@ -993,7 +1063,7 @@ export class CommandCenterStore {
           focusedProjects: [],
         },
       });
-      return { ok: false, error };
+      return { ok: false, error, errorKind: "not-configured" };
     }
 
     // V1.7 §10 — the raw ISO datetime is sent as-is; the server route (which alone knows
@@ -1008,12 +1078,20 @@ export class CommandCenterStore {
     // accountId in Data & Settings (see setPersonalIdentity). Absent means the server route
     // simply skips the mention search entirely — no behavior change for installations that
     // never set one.
-    const result = await new JiraDataSource().sync({
-      sinceIso,
-      scopeMode: scope.mode,
-      projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
-      accountId: this.state.personalIdentity?.accountId,
-    });
+    let result: DataSourceSyncResult;
+    try {
+      result = await (this.deps.createJiraDataSource?.() ?? new JiraDataSource()).sync({
+        sinceIso,
+        scopeMode: scope.mode,
+        projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
+        accountId: this.state.personalIdentity?.accountId,
+      });
+    } catch (err) {
+      // JiraDataSource already converts its own failures into { ok: false }, but a rejected
+      // sync() must still land in the failure branch below (recorded, data preserved) rather
+      // than escaping past the bookkeeping.
+      result = { ok: false, error: err instanceof Error ? err.message : "Jira sync failed.", errorKind: "network-error" };
+    }
 
     if (!result.ok || !result.data) {
       this.set({
@@ -1030,7 +1108,7 @@ export class CommandCenterStore {
           focusedProjects: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
         },
       });
-      return { ok: false, error: result.error };
+      return { ok: false, error: result.error, errorKind: result.errorKind };
     }
 
     const incoming = result.data;
