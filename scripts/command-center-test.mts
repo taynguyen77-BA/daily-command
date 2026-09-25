@@ -218,7 +218,7 @@ import type { DailyCommandCompletion, DailyCommandSkip } from "../src/lib/comman
 // V2.24 — Attention Truth & Automatic Jira Sync Reliability
 import { shouldAutoSyncJira, initAutoJiraSync, resetAutoJiraSyncForTests } from "../src/lib/command-center/auto-sync";
 import { CommandCenterStore, type JiraSyncResult, type JiraSyncTrigger } from "../src/lib/command-center/store";
-import { defaultJiraSyncLockManager, type JiraSyncLockManager } from "../src/lib/command-center/sync-lock";
+import { defaultJiraSyncLockManager, LOCK_UNAVAILABLE, withJiraSyncLock, type JiraSyncLockManager } from "../src/lib/command-center/sync-lock";
 import type { DataSourceProvider, DataSourceSyncResult } from "../src/lib/command-center/datasource/types";
 import type { JiraSyncState } from "../src/lib/command-center/types";
 // V2.25 — "is this ticket done?" consistency audit (Task 1)
@@ -234,9 +234,15 @@ import { computeSetupHealthRows } from "../src/components/command-center/SetupHe
 import type { SlackNotifyStatus } from "../src/lib/command-center/notify-client";
 
 let failures = 0;
+let skipped = 0;
 function ok(group: string, cond: boolean, msg: string) {
   console.log(`${cond ? "✅" : "❌"} [${group}] ${msg}`);
   if (!cond) failures++;
+}
+/** An environment capability gap, not a failure: logged visibly, never counted as passed. */
+function skip(group: string, msg: string) {
+  console.log(`⏭️  [${group}] SKIPPED — ${msg}`);
+  skipped++;
 }
 
 const TODAY = "2026-06-15";
@@ -9831,16 +9837,68 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     ["auto", "settings"],
     ["header", "settings"],
   ];
-  const lockModes: [string, JiraSyncLockManager | null][] = [
-    ["Web Locks", defaultJiraSyncLockManager()],
-    ["fallback", null],
-  ];
-  ok("Sync lock", defaultJiraSyncLockManager() !== null, "this test runtime exposes navigator.locks, so the Web Locks path is genuinely exercised (not just the fallback)");
+  // A faithful in-test implementation of the Web Locks `ifAvailable` contract, so lock
+  // semantics are proven identically on every Node version — whether or not the host ships
+  // navigator.locks. The first request() for a name is granted and held until its callback's
+  // promise settles (resolve OR reject); a request for a held name gets its callback called
+  // with `lock: null` immediately — never queued. As with the real API, the callback runs
+  // asynchronously and request() resolves/rejects with the callback's own outcome.
+  class FakeLockManager implements JiraSyncLockManager {
+    private readonly held = new Set<string>();
+    async request<T>(name: string, _options: { ifAvailable: true }, callback: (lock: unknown) => Promise<T> | T): Promise<T> {
+      const granted = !this.held.has(name);
+      if (granted) this.held.add(name); // claimed synchronously, so request order decides the winner
+      await Promise.resolve();
+      if (!granted) return callback(null);
+      try {
+        return await callback({ name, mode: "exclusive" });
+      } finally {
+        this.held.delete(name);
+      }
+    }
+  }
 
-  for (const [modeLabel, lockManager] of lockModes) {
+  const realLocks = defaultJiraSyncLockManager();
+  const NO_WEB_LOCKS_NOTICE = "navigator.locks not available in this runtime — Web Locks-specific coverage skipped, running fallback-path coverage only (fake-LockManager contract coverage still runs)";
+
+  // Smoke test — the ONLY check that depends on the host runtime: confirms detection picks
+  // up navigator.locks when the environment has it. Allowed to skip, never to fail.
+  if (realLocks) ok("Sync lock (real navigator.locks) smoke", typeof realLocks.request === "function", `defaultJiraSyncLockManager() detects navigator.locks on Node ${process.version}`);
+  else skip("Sync lock (real navigator.locks) smoke", `${NO_WEB_LOCKS_NOTICE} (Node ${process.version})`);
+
+  // withJiraSyncLock's ifAvailable semantics, proven directly against the fake on every
+  // runtime — and against the real navigator.locks too when present, which doubles as a check
+  // that the fake behaves like the real thing.
+  async function checkIfAvailableSemantics(group: string, locks: JiraSyncLockManager) {
+    let releaseFirst!: (v: string) => void;
+    let secondRan = false;
+    const first = withJiraSyncLock(() => new Promise<string>((r) => (releaseFirst = r)), locks);
+    await flush();
+    const second = await withJiraSyncLock(async () => { secondRan = true; return "second"; }, locks);
+    ok(group, second === LOCK_UNAVAILABLE && !secondRan, "a second caller while the lock is held is refused immediately — its task never runs, and it is not queued behind the first");
+    releaseFirst("first");
+    ok(group, (await first) === "first", "the first caller holds the lock until its own task settles, then gets its task's result");
+    ok(group, (await withJiraSyncLock(async () => "third", locks)) === "third", "once the holder settles, the next caller is granted the lock");
+    const rejected = await withJiraSyncLock(async () => { throw new Error("fetch failed"); }, locks).then(() => "resolved", () => "rejected");
+    ok(group, rejected === "rejected", "a task that rejects propagates its rejection");
+    ok(group, (await withJiraSyncLock(async () => "after-reject", locks)) === "after-reject", "and the lock is released after a rejected task — never left permanently held");
+  }
+  await checkIfAvailableSemantics("Sync lock (fake LockManager) ifAvailable", new FakeLockManager());
+  if (realLocks) await checkIfAvailableSemantics("Sync lock (real navigator.locks) ifAvailable", realLocks);
+  else skip("Sync lock (real navigator.locks) ifAvailable", NO_WEB_LOCKS_NOTICE);
+
+  // Trigger-pair suite. The fake-LockManager and fallback modes always run; the real
+  // navigator.locks mode runs only where the runtime has it, and is visibly skipped otherwise
+  // — never silently replaced by the fallback under a "Web Locks" label.
+  const lockModes: [string, () => JiraSyncLockManager | null][] = [["Web Locks, fake LockManager", () => new FakeLockManager()]];
+  if (realLocks) lockModes.push(["Web Locks, real navigator.locks", () => realLocks]);
+  else skip("Sync lock (Web Locks, real navigator.locks) trigger pairs", NO_WEB_LOCKS_NOTICE);
+  lockModes.push(["fallback", () => null]);
+
+  for (const [modeLabel, makeLockManager] of lockModes) {
     for (const [first, second] of combos) {
       const group = `Sync lock (${modeLabel}) ${first} vs ${second}`;
-      const { store, ctl } = await seededStore(lockManager);
+      const { store, ctl } = await seededStore(makeLockManager());
 
       const firstPromise = startSync(store, first);
       await flush();
@@ -9876,7 +9934,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     // A failed sync (rejected fetch) must release the lock, or every future sync is locked out.
     {
       const group = `Sync lock (${modeLabel}) failure release`;
-      const { store, ctl } = await seededStore(lockManager);
+      const { store, ctl } = await seededStore(makeLockManager());
       const failing = store.syncJira({ trigger: "header" });
       await flush();
       ctl.pending[0].reject(new Error("fetch failed: ECONNRESET"));
@@ -9892,12 +9950,16 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     }
   }
 
-  // Two tabs of the same origin: two independent store instances share one navigator.locks.
-  // An in-memory per-store flag can't see across them; the Web Locks lock must.
+  // Two tabs of the same origin: two independent store instances (separate in-memory state,
+  // separate per-store in-progress flags) arbitrated only by ONE shared LockManager — the one
+  // thing real browser tabs actually share. Injecting the same fake into both makes this
+  // deterministic on every runtime, and keeps the fallback module boolean (process-wide here,
+  // but never shared by real tabs) out of the picture entirely.
   {
-    const group = "Sync lock (Web Locks) cross-tab";
-    const tabA = await seededStore(defaultJiraSyncLockManager());
-    const tabB = await seededStore(defaultJiraSyncLockManager());
+    const group = "Sync lock (Web Locks, fake LockManager) cross-tab";
+    const sharedLocks = new FakeLockManager();
+    const tabA = await seededStore(sharedLocks);
+    const tabB = await seededStore(sharedLocks);
     const aPromise = tabA.store.syncJira({ trigger: "auto" });
     await flush();
     const bPromise = tabB.store.syncJira({ trigger: "header" });
@@ -9907,12 +9969,27 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     tabB.ctl.pending[0]?.resolve(syncPayload("In Progress", new Date().toISOString()));
     tabA.ctl.pending[0].resolve(syncPayload("Done", new Date().toISOString()));
     const [, bResult] = await Promise.all([aPromise, bPromise]);
-    ok(group, bResult.ok === false && bResult.errorKind === "sync-in-progress" && /another tab/.test(bResult.error ?? ""), "a sync in another tab is refused while the first tab holds the lock, and says why");
+    ok(group, bResult.ok === false && bResult.errorKind === "sync-in-progress" && /another tab/.test(bResult.error ?? ""), "a sync in another tab is refused while the first tab holds the shared lock, and says why");
     tabB.ctl.setAutoResult(syncPayload("Done", new Date().toISOString()));
     ok(group, (await tabB.store.syncJira({ trigger: "header" })).ok === true, "once the first tab's sync settles, the other tab can sync again");
+
+    // Control: the refusal above comes from the SHARED lock manager, not from anything else
+    // two store instances in one process happen to share. Two stores with separate lock
+    // managers (no common arbiter) both proceed.
+    const control = "Sync lock (Web Locks, fake LockManager) cross-tab control";
+    const tabC = await seededStore(new FakeLockManager());
+    const tabD = await seededStore(new FakeLockManager());
+    const cPromise = tabC.store.syncJira({ trigger: "auto" });
+    const dPromise = tabD.store.syncJira({ trigger: "header" });
+    await flush();
+    ok(control, tabC.ctl.pending.length === 1 && tabD.ctl.pending.length === 1, "with no shared lock manager, both stores reach their data source — so the cross-tab refusal above is genuinely the shared lock's doing");
+    tabC.ctl.pending[0].resolve(syncPayload("Done", new Date().toISOString()));
+    tabD.ctl.pending[0].resolve(syncPayload("Done", new Date().toISOString()));
+    await Promise.all([cPromise, dPromise]);
   }
   resetAutoJiraSyncForTests();
 }
 
+if (skipped > 0) console.log(`\n⏭️  ${skipped} check group(s) skipped for missing runtime capabilities (see SKIPPED lines above).`);
 console.log("\n" + (failures === 0 ? `✅ All checks passed.` : `❌ ${failures} check(s) failed.`));
 process.exit(failures === 0 ? 0 : 1);
