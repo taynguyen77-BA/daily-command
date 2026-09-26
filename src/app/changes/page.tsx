@@ -2,10 +2,11 @@
 
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { ChangeItem } from "@/components/command-center/ChangeItem";
+import { workItemsForIds } from "@/lib/command-center/task-execution";
 import { EmptyState, SectionHeading } from "@/components/command-center/ui";
 
 export default function ChangesPage() {
-  const { state, derived, previousSnapshot, store } = useCommandCenter();
+  const { state, derived, previousSnapshot, store, filteredData } = useCommandCenter();
 
   if (!state.loaded) {
     return (
@@ -32,7 +33,7 @@ export default function ChangesPage() {
       ) : (
         <div className="grid gap-2 md:grid-cols-2">
           {derived.changes.map((c) => (
-            <ChangeItem key={c.id} change={c} />
+            <ChangeItem key={c.id} change={c} workItem={c.entityType === "WorkItem" ? workItemsForIds(filteredData.workItems, [c.entityId])[0] : undefined} />
           ))}
         </div>
       )}

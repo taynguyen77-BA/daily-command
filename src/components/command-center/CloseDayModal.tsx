@@ -67,8 +67,19 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
   function submitPilotFeedback() {
     if (pilotUsefulness === null || pilotClarity === null || pilotTrust === null) return;
     const identity = { displayName: state.ownerName, accountId: state.personalIdentity?.accountId };
-    const assignedWorkActiveCount = getActiveAssignedWorkItems(filteredData.workItems, identity, workRelevanceIndex, new Set(Object.keys(state.dailyCommandCompletions))).length;
-    const recentMentionsCount = selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, Date.now(), { dailyCommandCompletions: state.dailyCommandCompletions }).length;
+    const assignedWorkActiveCount = getActiveAssignedWorkItems(
+      filteredData.workItems,
+      identity,
+      workRelevanceIndex,
+      new Set(Object.keys(state.dailyCommandCompletions)),
+      new Set(Object.keys(state.dailyCommandSkips)),
+      new Set(Object.keys(state.dailyCommandBlocks))
+    ).length;
+    const recentMentionsCount = selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, Date.now(), {
+      dailyCommandCompletions: state.dailyCommandCompletions,
+      dailyCommandSkips: state.dailyCommandSkips,
+      dailyCommandBlocks: state.dailyCommandBlocks,
+    }).length;
     const waitingForCount = proactive ? buildWaitingFor(filteredData, proactive.dependencyRadar, workRelevanceIndex, dailyCommandCompletedWorkItemIds).length : 0;
     const attentionQueueActiveCount = proactive ? proactive.attentionQueue.filter((a) => a.lifecycle !== "SNOOZED" && a.lifecycle !== "RESOLVED").length : 0;
     const context = buildPilotFeedbackContext({

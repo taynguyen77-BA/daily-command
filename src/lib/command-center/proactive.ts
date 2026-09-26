@@ -124,7 +124,7 @@ export function computeProactiveIntelligence(
   const communicationPriority = rankCommunicationPriority(data.communications, data, riskEscalations, dependencyRadar);
   const clientAttentionMap = computeClientAttentionMap(data, derived, dependencyRadar, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
 
-  const newAssignments = detectNewAssignments(data, previousSnapshot, identityOwnerId);
+  const newAssignments = detectNewAssignments(data, previousSnapshot, identityOwnerId, dailyCommandCompletedWorkItemIds);
 
   // V2.17 §1a point 5 — resolved once, before buildAttentionQueue, so a still-open MENTION
   // tied to one of these work items can auto-resolve (see attention-queue.ts's forceResolved).

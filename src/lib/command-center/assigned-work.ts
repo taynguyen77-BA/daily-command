@@ -32,10 +32,17 @@ export function getActiveAssignedWorkItems(
   identity: PersonalRelationIdentity,
   workRelevanceIndex: WorkRelevanceIndex | undefined,
   dailyCommandCompletedTicketKeys: ReadonlySet<string> = new Set(),
-  dailyCommandSkippedTicketKeys: ReadonlySet<string> = new Set()
+  dailyCommandSkippedTicketKeys: ReadonlySet<string> = new Set(),
+  // V2.26 — additive/optional trailing parameter, same no-op-when-omitted contract: a
+  // Daily-Command-BLOCKED ticket leaves the active list for getBlockedAssignedWorkItems.
+  dailyCommandBlockedTicketKeys: ReadonlySet<string> = new Set()
 ): WorkItem[] {
   return getAssignedWorkItems(workItems, identity).filter(
-    (w) => !isWorkItemDoneOrExcluded(w, workRelevanceIndex) && !dailyCommandCompletedTicketKeys.has(w.key) && !dailyCommandSkippedTicketKeys.has(w.key)
+    (w) =>
+      !isWorkItemDoneOrExcluded(w, workRelevanceIndex) &&
+      !dailyCommandCompletedTicketKeys.has(w.key) &&
+      !dailyCommandSkippedTicketKeys.has(w.key) &&
+      !dailyCommandBlockedTicketKeys.has(w.key)
   );
 }
 
@@ -66,4 +73,18 @@ export function getSkippedAssignedWorkItems(
   dailyCommandSkippedTicketKeys: ReadonlySet<string> = new Set()
 ): WorkItem[] {
   return getAssignedWorkItems(workItems, identity).filter((w) => !isWorkItemDoneOrExcluded(w, workRelevanceIndex) && dailyCommandSkippedTicketKeys.has(w.key));
+}
+
+/** V2.26 — the complement of getActiveAssignedWorkItems for BLOCKED work, built exactly like
+ *  getSkippedAssignedWorkItems: assigned work the user has explicitly Daily-Command-blocked,
+ *  and which isn't already finished by Jira's own status or Work Relevance (native/policy
+ *  truth wins the display bucket over a possibly-stale personal block record). A blocked
+ *  ticket is NOT finished — it has its own visible bucket, never merged into Completed. */
+export function getBlockedAssignedWorkItems(
+  workItems: WorkItem[],
+  identity: PersonalRelationIdentity,
+  workRelevanceIndex: WorkRelevanceIndex | undefined,
+  dailyCommandBlockedTicketKeys: ReadonlySet<string> = new Set()
+): WorkItem[] {
+  return getAssignedWorkItems(workItems, identity).filter((w) => !isWorkItemDoneOrExcluded(w, workRelevanceIndex) && dailyCommandBlockedTicketKeys.has(w.key));
 }

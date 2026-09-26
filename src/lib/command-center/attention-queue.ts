@@ -40,6 +40,7 @@ import type {
   WorkItem,
 } from "./types";
 import type { NewAssignmentEvent } from "./assignment-detection";
+import type { TaskReactivation } from "./types";
 import type { StaleAssignedTicket } from "./personal-staleness";
 
 export function slug(input: string): string {
@@ -64,6 +65,7 @@ interface RawItem {
   sourceRef?: AttentionSourceRef;
   relatedDecisionId?: string;
   ownershipExplicit?: boolean;
+  reactivation?: TaskReactivation;
   // V2.17 §1a point 5 — set only for a MENTION raw item whose underlying ticket has resolved
   // to COMPLETED/EXCLUDED. Forces the lifecycle transition below straight to RESOLVED (an old,
   // unacknowledged mention on a now-done ticket implies no more action) while still keeping
@@ -293,6 +295,7 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
       evidence: [`${a.issueKey} — assignee changed to you`],
       sourceRef: { type: "workItem", id: a.workItemId },
       ownershipExplicit: true,
+      ...(a.reactivation ? { reactivation: a.reactivation } : {}),
     });
   }
 

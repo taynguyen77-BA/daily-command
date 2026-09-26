@@ -1,9 +1,14 @@
 "use client";
 
-import type { ChangeEvent } from "@/lib/command-center/types";
-import { MetaPill } from "./ui";
+import React from "react";
 
-export function ChangeItem({ change }: { change: ChangeEvent }) {
+import type { ChangeEvent, WorkItem } from "@/lib/command-center/types";
+import { MetaPill } from "./ui";
+import { RelatedTickets } from "./TaskReferenceRow";
+
+/** V2.26 — `workItem` is set by the caller only for a WorkItem-entity change whose entityId
+ *  resolves in the current data; it then renders as a TaskReferenceRow. */
+export function ChangeItem({ change, workItem }: { change: ChangeEvent; workItem?: WorkItem }) {
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="mb-1 flex items-center gap-2 text-xs text-text3">
@@ -17,6 +22,7 @@ export function ChangeItem({ change }: { change: ChangeEvent }) {
         <span className="font-medium text-text">{change.after}</span>
       </p>
       <p className="mt-2 text-xs text-text2">Impact: {change.impact}</p>
+      <RelatedTickets workItems={workItem ? [workItem] : undefined} label="Ticket" />
     </div>
   );
 }

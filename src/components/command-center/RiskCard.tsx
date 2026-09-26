@@ -7,15 +7,16 @@
 // button — both routed through the entity cache (ai/ai-cache.ts) so a re-open with
 // unchanged evidence never re-hits the model.
 
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
 import { evidenceForRisk } from "@/lib/command-center/evidence";
 import { projectRiskImpact } from "@/lib/command-center/impact-projection";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
-import type { ProactiveAssessment, Risk, RiskEscalation } from "@/lib/command-center/types";
+import type { ProactiveAssessment, Risk, RiskEscalation, WorkItem } from "@/lib/command-center/types";
 import { AiProviderIndicator, ConfidenceTag, MetaPill, RiskBadge, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
+import { RelatedTickets } from "./TaskReferenceRow";
 
 function RiskAgingAssessment({ risk, escalation }: { risk: Risk; escalation: RiskEscalation }) {
   const [aging, setAging] = useState<ProactiveAssessment | null>(null);
@@ -69,7 +70,21 @@ function RiskAgingAssessment({ risk, escalation }: { risk: Risk; escalation: Ris
   );
 }
 
-export function RiskCard({ risk, isDemo, escalation, showAgingAssessment }: { risk: Risk; isDemo: boolean; escalation?: RiskEscalation; showAgingAssessment?: boolean }) {
+// V2.26 — `relatedWorkItems` is the caller's resolution of risk.sourceWorkItemIds (explicit
+// FKs only, see task-execution.ts's workItemsForIds); each renders as a TaskReferenceRow.
+export function RiskCard({
+  risk,
+  isDemo,
+  escalation,
+  showAgingAssessment,
+  relatedWorkItems,
+}: {
+  risk: Risk;
+  isDemo: boolean;
+  escalation?: RiskEscalation;
+  showAgingAssessment?: boolean;
+  relatedWorkItems?: WorkItem[];
+}) {
   const facts = useMemo(
     () => [`Level: ${risk.level}`, `Reason detected: ${risk.reason}`, `Potential impact: ${risk.potentialImpact}`],
     [risk]
@@ -98,6 +113,7 @@ export function RiskCard({ risk, isDemo, escalation, showAgingAssessment }: { ri
       </div>
       <h3 className="font-display text-base text-text">{risk.title}</h3>
       <p className="mt-2 text-sm text-text2">{risk.reason}</p>
+      <RelatedTickets workItems={relatedWorkItems} />
 
       {escalation && (
         <p className="mt-1 text-xs text-text3">

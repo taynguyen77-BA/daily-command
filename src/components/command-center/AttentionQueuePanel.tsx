@@ -15,6 +15,7 @@ import { ArtifactEditor } from "./ArtifactEditor";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
 import { TicketLink } from "./TicketLink";
+import { ReactivatedBadge } from "./TaskReferenceRow";
 import { groupMentionItems, mentionGroupLabel } from "@/lib/command-center/mention-grouping";
 
 /** V2.17 §1a point 4 — folds several still-visible MENTION items on the same ticket into one
@@ -62,6 +63,7 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         {item.lifecycle === "RE_ESCALATED" && <span className="text-xs text-red">Re-escalated — severity increased</span>}
         <LifecycleBadge lifecycle={item.lifecycle} />
         {item.ticketKey && <TicketLink ticketKey={item.ticketKey} url={item.ticketUrl} className="text-xs text-text3" />}
+        {item.reactivation && <ReactivatedBadge reactivation={item.reactivation} />}
       </div>
       <p className="font-display text-sm text-text">{item.what}</p>
       <p className="mt-1 text-xs text-text2">

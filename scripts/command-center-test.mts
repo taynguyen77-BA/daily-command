@@ -191,7 +191,8 @@ import { GET as notifyStatusGET, POST as notifyPOST } from "../src/app/api/comma
 // V2.13 §3 — Ticket links
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { TicketLink } from "../src/components/command-center/TicketLink";
+import { TicketLink, FirstSeenBadge } from "../src/components/command-center/TicketLink";
+import { formatRelativeDateTime } from "../src/lib/command-center/relative-time";
 
 // V2.13 §2 — server-side (cron-driven) notify check
 import { runServerSideNotifyCheck } from "../src/lib/command-center/cron-notify";
@@ -212,8 +213,18 @@ import { daysStale } from "../src/components/command-center/Header";
 
 // V2.19 — Personal Work & Reporting Hardening: My Assigned Work, Recently Mentioned, Daily
 // Command Completion
-import { getActiveAssignedWorkItems, getAssignedWorkItems, getCompletedAssignedWorkItems, getSkippedAssignedWorkItems } from "../src/lib/command-center/assigned-work";
-import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions } from "../src/lib/command-center/recent-mentions";
+import { getActiveAssignedWorkItems, getAssignedWorkItems, getBlockedAssignedWorkItems, getCompletedAssignedWorkItems, getSkippedAssignedWorkItems } from "../src/lib/command-center/assigned-work";
+import { TaskReferenceRowView } from "../src/components/command-center/TaskReferenceRow";
+import { formatExecutionRecord, resolveTaskExecutionState, workItemsForIds, relatedWorkItemIdsForLoop, workItemIdForDependency } from "../src/lib/command-center/task-execution";
+import { PlanCandidateRow } from "../src/components/command-center/PlanCandidateRow";
+import { buildDailyReview } from "../src/lib/command-center/daily-review";
+import { RiskCard } from "../src/components/command-center/RiskCard";
+import { DecisionCard } from "../src/components/command-center/DecisionCard";
+import { ChangeItem } from "../src/components/command-center/ChangeItem";
+import { DependencyRadarCard } from "../src/components/command-center/DependencyRadarCard";
+import { DeliveryLoopCard } from "../src/components/command-center/DeliveryLoopCard";
+import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions, computeMentionReactivations } from "../src/lib/command-center/recent-mentions";
+import { ReactivatedBadge } from "../src/components/command-center/TaskReferenceRow";
 import type { DailyCommandCompletion, DailyCommandSkip } from "../src/lib/command-center/types";
 // V2.24 — Attention Truth & Automatic Jira Sync Reliability
 import { shouldAutoSyncJira, initAutoJiraSync, resetAutoJiraSyncForTests } from "../src/lib/command-center/auto-sync";
@@ -9559,7 +9570,10 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   const repoRoot230 = path.resolve(process.cwd());
   const myAssignedSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/MyAssignedWork.tsx"), "utf8");
   ok("V2.23 UI wiring", /getSkippedAssignedWorkItems/.test(myAssignedSrc230), "My Assigned Work reuses the shared skipped-bucket selector, not a second inline check");
-  ok("V2.23 UI wiring", /skipTicketInDailyCommand/.test(myAssignedSrc230) && /reactivateSkippedTicket/.test(myAssignedSrc230), "My Assigned Work wires Skip and Reactivate to the real store actions");
+  // V2.26 — the Skip/Reactivate wiring moved into the shared TaskReferenceRow, which My
+  // Assigned Work now renders for every row.
+  const taskRowSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/TaskReferenceRow.tsx"), "utf8");
+  ok("V2.23 UI wiring", /<TaskReferenceRow\b/.test(myAssignedSrc230) && /skipTicketInDailyCommand/.test(taskRowSrc230) && /reactivateSkippedTicket/.test(taskRowSrc230), "My Assigned Work wires Skip and Reactivate to the real store actions (via the shared TaskReferenceRow)");
 
   const priorityCardSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/PriorityCard.tsx"), "utf8");
   ok("V2.23 UI wiring", /onSkip/.test(priorityCardSrc230) && /onReactivate/.test(priorityCardSrc230), "PriorityCard exposes Skip/Reactivate controls");
@@ -9572,7 +9586,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   ok("V2.23 UI wiring", /onSkip/.test(personalFocusCardSrc230), "My Day / Your Delivery Focus's card exposes a Skip control");
 
   const pageSrc230 = fs.readFileSync(path.join(repoRoot230, "src/app/page.tsx"), "utf8");
-  ok("V2.23 UI wiring", /dailyCommandSkippedWorkItemIds/.test(pageSrc230), "the main dashboard's Top Priorities preview also excludes skipped items, not just the full Priorities page");
+  ok("V2.23 UI wiring", /dailyCommandPausedWorkItemIds/.test(pageSrc230), "the main dashboard's Top Priorities preview also excludes skipped items (V2.26: via the skipped ∪ blocked 'paused' set), not just the full Priorities page");
 }
 
 // ===== V2.25 — "is this ticket done?" consistency audit (Task 1) =====
@@ -9988,6 +10002,440 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
     await Promise.all([cPromise, dPromise]);
   }
   resetAutoJiraSyncForTests();
+}
+
+
+// ===== V2.26 — shared helpers for the provenance / blocked / reactivation / daily-review
+// suites below: a store whose Jira data source returns whatever payload the test sets. =====
+function v226JiraItem(key: string, overrides: Partial<WorkItem> = {}): WorkItem {
+  return {
+    ...makeItem({ id: `jira-${key}`, key, title: `Ticket ${key}`, projectId: "jira-project-V226", owner: "Tay", ownerId: "acc-tay", status: "In Progress", ...overrides }),
+    sourceType: "jira",
+    sourceId: key,
+    sourceUrl: `https://jira.example.com/browse/${key}`,
+  };
+}
+function v226Store() {
+  let payload: DataSourceSyncResult = { ok: true, data: emptyData(), recordsFetched: 0, syncedAt: new Date().toISOString() };
+  const store = new CommandCenterStore({
+    createJiraDataSource: () => ({ type: "jira", sync: async () => payload }),
+    jiraSyncLockManager: null,
+  });
+  store.getSnapshot();
+  store.resetAll();
+  const setJira = (workItems: WorkItem[], mentionEvents?: MentionEvent[]) => {
+    payload = {
+      ok: true,
+      data: { ...emptyData(), projects: [{ id: "jira-project-V226", name: "V226 Project", clientId: "c-1", status: "on-track", sourceType: "jira", sourceId: "V226" } as never], workItems },
+      recordsFetched: workItems.length,
+      truncated: false,
+      syncedAt: new Date().toISOString(),
+      warnings: [],
+      mentionEvents,
+    };
+  };
+  return { store, setJira };
+}
+const v226Tick = () => new Promise((r) => setTimeout(r, 5));
+
+/** Every personal-work surface where `key` shows up as ACTIVE work (not as a labeled
+ *  reactivation, not in a history bucket). Mirrors what each page renders by default. */
+function v226ActiveSurfaces(store: CommandCenterStore, key: string, nowMs: number): string[] {
+  const st = store.getSnapshot();
+  const today = getTodayIso();
+  const view = buildProjectOverrideView(st, today, "V226");
+  const keys = (m: Record<string, unknown>) => new Set(Object.keys(m));
+  const tay = { accountId: "acc-tay", displayName: "Tay" };
+  const item = st.data.workItems.find((w) => w.key === key);
+  const out: string[] = [];
+  if (getActiveAssignedWorkItems(view.filteredData.workItems, tay, view.workRelevanceIndex, keys(st.dailyCommandCompletions), keys(st.dailyCommandSkips), keys(st.dailyCommandBlocks)).some((w) => w.key === key)) out.push("My Assigned Work");
+  const mention = selectRecentMentions(st.mentionEvents, st.data.workItems, st.attentionState, nowMs, st).find((m) => m.issueKey === key);
+  if (mention && !mention.reactivation) out.push("Recently Mentioned (as new)");
+  if (view.proactive?.attentionQueue.some((i) => i.ticketKey === key && i.lifecycle !== "RESOLVED" && i.lifecycle !== "SNOOZED" && !i.reactivation)) out.push("Attention Queue");
+  if (view.personalFocus?.candidates.some((c) => c.ticketKey === key)) out.push("Your Delivery Focus");
+  if (buildPlan(view.filteredData, today, 120, view.workRelevanceIndex, view.dailyCommandCompletedWorkItemIds, view.dailyCommandPausedWorkItemIds).some((p) => p.item?.key === key)) out.push("Action Plan");
+  if (item && view.derived.scores.some((r) => r.itemId === item.id) && !view.dailyCommandPausedWorkItemIds.has(item.id)) out.push("Priorities");
+  return out;
+}
+/** A store with identity + ACTIONABLE policy configured, so tickets genuinely reach every surface. */
+function v226ConfiguredStore() {
+  const env = v226Store();
+  env.store.setPersonalIdentity({ displayName: "Tay", accountId: "acc-tay" });
+  env.store.setJiraStatusRelevance("In Progress", "ACTIONABLE");
+  return env;
+}
+const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226JiraItem(key, { jiraStatusName: "In Progress", priority: "P1", dueDate: "2026-01-05", businessImpact: 5, ...overrides });
+
+// ===== V2.26 Phần 1 — sync provenance per work item (firstSeenAt) + Sync Log =====
+{
+  const group = "V2.26 Sync provenance";
+  const { store, setJira } = v226Store();
+  const keys = ["PROV-1", "PROV-2", "PROV-3", "PROV-4", "PROV-5"];
+  setJira(keys.map((k) => v226JiraItem(k)));
+  await store.syncJira();
+  const afterFirst = store.getSnapshot();
+  const firstEntry = afterFirst.syncLog[afterFirst.syncLog.length - 1];
+  ok(group, afterFirst.syncLog.length === 1 && firstEntry.recordsCreated === 5, "sync #1 creating 5 new tickets records a syncLog entry with recordsCreated=5");
+  ok(group, JSON.stringify([...firstEntry.newTicketKeys].sort()) === JSON.stringify(keys), "that entry's newTicketKeys is exactly those 5 keys");
+  ok(group, afterFirst.data.workItems.every((w) => w.firstSeenAt === firstEntry.completedAt), "every newly-created ticket is stamped firstSeenAt = that sync's completion time");
+  const firstSeenBefore = new Map(afterFirst.data.workItems.map((w) => [w.key, w.firstSeenAt]));
+
+  await v226Tick();
+  setJira(keys.map((k) => v226JiraItem(k)));
+  await store.syncJira();
+  const afterSecond = store.getSnapshot();
+  const secondEntry = afterSecond.syncLog[afterSecond.syncLog.length - 1];
+  ok(group, afterSecond.syncLog.length === 2 && secondEntry.recordsCreated === 0 && secondEntry.newTicketKeys.length === 0, "sync #2 with nothing new records recordsCreated=0 and no newTicketKeys");
+  ok(group, secondEntry.recordsUpdated === 0, "carrying firstSeenAt forward never makes an unchanged ticket count as 'updated'");
+  ok(group, afterSecond.data.workItems.every((w) => w.firstSeenAt === firstSeenBefore.get(w.key)), "tickets unchanged between the two syncs keep sync #1's firstSeenAt — never overwritten by sync #2");
+
+  await v226Tick();
+  setJira([...keys.map((k) => v226JiraItem(k, k === "PROV-1" ? { status: "Done" } : {})), v226JiraItem("PROV-6")]);
+  await store.syncJira();
+  const afterThird = store.getSnapshot();
+  const thirdEntry = afterThird.syncLog[afterThird.syncLog.length - 1];
+  ok(group, thirdEntry.recordsCreated === 1 && thirdEntry.newTicketKeys[0] === "PROV-6" && thirdEntry.recordsUpdated === 1, "sync #3 reuses runJiraSync's own counts: 1 created (PROV-6), 1 updated (PROV-1)");
+  ok(group, afterThird.data.workItems.find((w) => w.key === "PROV-1")?.firstSeenAt === firstSeenBefore.get("PROV-1"), "an UPDATED ticket still keeps its original firstSeenAt");
+  ok(group, afterThird.data.workItems.find((w) => w.key === "PROV-6")?.firstSeenAt === thirdEntry.completedAt, "the newly-created ticket gets sync #3's timestamp");
+
+  // Pre-existing data without firstSeenAt: never back-filled, never throws.
+  const legacy = parseStoredState(JSON.stringify({ data: { ...emptyData(), workItems: [v226JiraItem("OLD-1")] }, loaded: true }));
+  ok(group, legacy.data.workItems[0].firstSeenAt === undefined && Array.isArray(legacy.syncLog) && legacy.syncLog.length === 0, "a stored state from before this field parses safely: firstSeenAt undefined, syncLog empty");
+  ok(group, parseStoredState(JSON.stringify({ syncLog: [{ startedAt: "x" }, "junk", { startedAt: "a", completedAt: "b", recordsCreated: 1, recordsUpdated: 0, newTicketKeys: ["K-1"] }] })).syncLog.length === 1, "malformed syncLog entries are dropped, valid ones kept");
+  const capped = parseStoredState(JSON.stringify({ syncLog: Array.from({ length: 45 }, (_, i) => ({ startedAt: `s${i}`, completedAt: `c${i}`, recordsCreated: 0, recordsUpdated: 0, newTicketKeys: [] })) })).syncLog;
+  ok(group, capped.length === 30 && capped[29].completedAt === "c44", "syncLog is capped at 30 entries, keeping the most recent");
+
+  // Badge: a ticket first seen yesterday vs one first seen today (same sync) must look clearly different.
+  const now = new Date(2026, 8, 26, 15, 0);
+  const todayIso = new Date(2026, 8, 26, 9, 14).toISOString();
+  const yesterdayIso = new Date(2026, 8, 25, 16, 2).toISOString();
+  const todayBadge = renderToStaticMarkup(React.createElement(FirstSeenBadge, { firstSeenAt: todayIso, now }));
+  const yesterdayBadge = renderToStaticMarkup(React.createElement(FirstSeenBadge, { firstSeenAt: yesterdayIso, now }));
+  ok(group, todayBadge.includes("First seen: today 9:14 AM") && todayBadge.includes('data-first-seen="today"'), "today's ticket reads 'First seen: today 9:14 AM' with the 'today' style");
+  ok(group, yesterdayBadge.includes("First seen: yesterday 4:02 PM") && yesterdayBadge.includes('data-first-seen="earlier"'), "yesterday's ticket reads 'First seen: yesterday 4:02 PM' with the neutral style");
+  ok(group, todayBadge !== yesterdayBadge, "the two badges render visibly differently");
+  ok(group, renderToStaticMarkup(React.createElement(FirstSeenBadge, {})) === "", "no firstSeenAt (legacy data) renders no badge at all — unknown is never shown as new");
+  ok(group, formatRelativeDateTime(new Date(2026, 8, 23, 10, 0).toISOString(), now) === "3 days ago" && formatRelativeDateTime("not-a-date", now) === undefined, "relative formatting: '3 days ago' for older, undefined (never 'Invalid Date') for garbage");
+}
+
+
+// ===== V2.26 Phần 2 — Blocked as a universal per-ticket state, peer of Complete/Skip =====
+{
+  const group = "V2.26 Blocked state";
+  const { store, setJira } = v226Store();
+  const tay = { accountId: "acc-tay", displayName: "Tay" };
+  // High-signal, ACTIONABLE tickets so the Action Plan control below genuinely proposes them.
+  store.setJiraStatusRelevance("In Progress", "ACTIONABLE");
+  setJira(["BLK-1", "BLK-2", "BLK-3"].map((k) => v226JiraItem(k, { jiraStatusName: "In Progress", priority: "P1", dueDate: "2026-01-05", businessImpact: 5 })));
+  await store.syncJira();
+  const keySet = (m: Record<string, unknown>) => new Set(Object.keys(m));
+  const buckets = () => {
+    const st = store.getSnapshot();
+    const items = st.data.workItems;
+    return {
+      st,
+      active: getActiveAssignedWorkItems(items, tay, undefined, keySet(st.dailyCommandCompletions), keySet(st.dailyCommandSkips), keySet(st.dailyCommandBlocks)).map((w) => w.key),
+      blocked: getBlockedAssignedWorkItems(items, tay, undefined, keySet(st.dailyCommandBlocks)).map((w) => w.key),
+      completed: getCompletedAssignedWorkItems(items, tay, undefined, keySet(st.dailyCommandCompletions)).map((w) => w.key),
+      skipped: getSkippedAssignedWorkItems(items, tay, undefined, keySet(st.dailyCommandSkips)).map((w) => w.key),
+    };
+  };
+
+  const beforeBlock = Date.now();
+  store.blockTicketInDailyCommand("BLK-1", "  Waiting for Anna's API answer  ");
+  let b = buckets();
+  const blockRecord = b.st.dailyCommandBlocks["BLK-1"];
+  ok(group, !b.active.includes("BLK-1"), "a blocked ticket leaves the Active list");
+  ok(group, b.blocked.length === 1 && b.blocked[0] === "BLK-1", "...and appears in getBlockedAssignedWorkItems — not hidden, its own bucket");
+  ok(group, blockRecord?.reason === "Waiting for Anna's API answer" && Date.parse(blockRecord.blockedAt) >= beforeBlock, "the block record carries the (trimmed) reason and a real blockedAt timestamp");
+  ok(group, !b.completed.includes("BLK-1") && !b.skipped.includes("BLK-1"), "blocked is not completed and not skipped");
+  const blockedItem = b.st.data.workItems.find((w) => w.key === "BLK-1")!;
+  ok(group, isWorkItemOperationallyOpen(blockedItem, undefined, new Set()), "isWorkItemOperationallyOpen is untouched: a blocked ticket is still operationally OPEN (paused, not done/excluded)");
+
+  store.completeTicketInDailyCommand("BLK-1");
+  b = buckets();
+  ok(group, b.completed.includes("BLK-1") && !b.blocked.includes("BLK-1"), "completing the blocked ticket moves it to Completed and out of Blocked — never in both");
+  ok(group, !("BLK-1" in b.st.dailyCommandBlocks), "the block record itself is cleared by completion");
+
+  // Three-state mutual exclusion — every setter clears the other two maps for that key.
+  const setters: [string, (k: string) => void][] = [
+    ["complete", (k) => store.completeTicketInDailyCommand(k)],
+    ["skip", (k) => store.skipTicketInDailyCommand(k, "Not my action")],
+    ["block", (k) => store.blockTicketInDailyCommand(k, "Depends on another ticket")],
+  ];
+  const membership = (k: string) => {
+    const st = store.getSnapshot();
+    return [k in st.dailyCommandCompletions, k in st.dailyCommandSkips, k in st.dailyCommandBlocks].filter(Boolean).length;
+  };
+  let exclusive = true;
+  for (const [, first] of setters) {
+    for (const [, second] of setters) {
+      first("BLK-2");
+      second("BLK-2");
+      if (membership("BLK-2") !== 1) exclusive = false;
+    }
+  }
+  ok(group, exclusive, "for every ordered pair of complete/skip/block, the ticket ends up in exactly ONE of the three maps");
+  store.blockTicketInDailyCommand("BLK-2");
+  ok(group, store.getSnapshot().dailyCommandBlocks["BLK-2"]?.reason === undefined, "blocking without a reason is allowed (reason stays undefined, never an empty string)");
+  store.blockTicketInDailyCommand("BLK-3", "   ");
+  ok(group, store.getSnapshot().dailyCommandBlocks["BLK-3"]?.reason === undefined, "a whitespace-only reason is treated as no reason");
+  store.unblockTicketInDailyCommand("BLK-3");
+  ok(group, !("BLK-3" in store.getSnapshot().dailyCommandBlocks) && buckets().active.includes("BLK-3"), "Unblock returns the ticket to Active");
+
+  // Blocked leaves every active personal-execution surface through the same path skip uses.
+  store.blockTicketInDailyCommand("BLK-3", "Waiting for a reply");
+  const view = buildProjectOverrideView(store.getSnapshot(), getTodayIso(), "V226");
+  const blk3Id = store.getSnapshot().data.workItems.find((w) => w.key === "BLK-3")!.id;
+  ok(group, view.dailyCommandBlockedWorkItemIds.has(blk3Id) && view.dailyCommandPausedWorkItemIds.has(blk3Id) && !view.dailyCommandSkippedWorkItemIds.has(blk3Id), "the blocked ticket is in the blocked set and the skipped∪blocked 'paused' set, but NOT in the skipped set — the two stay distinct for display");
+  const planWith = buildPlan(view.filteredData, getTodayIso(), 60, view.workRelevanceIndex, view.dailyCommandCompletedWorkItemIds, view.dailyCommandPausedWorkItemIds);
+  const planWithout = buildPlan(view.filteredData, getTodayIso(), 60, view.workRelevanceIndex, view.dailyCommandCompletedWorkItemIds);
+  ok(group, planWithout.some((p) => p.item?.id === blk3Id), "control: without the paused set, the Action Plan WOULD propose BLK-3 (so the next check isn't vacuous)");
+  ok(group, !planWith.some((p) => p.item?.id === blk3Id), "with the paused set, the Action Plan never proposes the blocked ticket");
+
+  const parsedBlocks = parseStoredState(JSON.stringify({ dailyCommandBlocks: { "OK-1": { ticketKey: "OK-1", blockedAt: "2026-09-25T10:00:00.000Z", reason: "x" }, "BAD-1": { ticketKey: "BAD-1" }, "BAD-2": "junk" } })).dailyCommandBlocks;
+  ok(group, Object.keys(parsedBlocks).join(",") === "OK-1", "stored blocks parse with the same drop-malformed discipline as skips");
+  ok(group, Object.keys(parseStoredState(JSON.stringify({})).dailyCommandBlocks).length === 0, "state from before this field parses to an empty blocks map");
+}
+
+// ===== V2.26 Phần 3 — the recorded timestamp + reason is shown next to each history row =====
+{
+  const group = "V2.26 History labels";
+  const now = new Date(2026, 8, 26, 15, 0);
+  const at = new Date(2026, 8, 26, 9, 14).toISOString();
+  const maps = {
+    dailyCommandCompletions: { "H-1": { ticketKey: "H-1", completedAt: at, completedBy: "Tay" }, "H-EMPTY": { ticketKey: "H-EMPTY", completedAt: "", completedBy: "Tay" } },
+    dailyCommandSkips: { "H-2": { ticketKey: "H-2", skippedAt: new Date(2026, 8, 25, 16, 2).toISOString(), reason: "Team is handling it" as const } },
+    dailyCommandBlocks: { "H-3": { ticketKey: "H-3", blockedAt: at, reason: "Waiting for a reply" }, "H-4": { ticketKey: "H-4", blockedAt: new Date(2026, 8, 23, 10, 0).toISOString() } },
+  };
+  const row = (key: string, finishedInJira = false) =>
+    renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: key, url: `https://jira.example.com/browse/${key}`, title: key, execution: resolveTaskExecutionState(key, maps, finishedInJira), now, actions: undefined }));
+  ok(group, row("H-1").includes("Completed, today 9:14 AM"), "a completion row shows 'Completed, today 9:14 AM' (no reason recorded → the state's own label)");
+  ok(group, row("H-2").includes("Team is handling it, yesterday 4:02 PM"), "a skip row shows its reason and when");
+  ok(group, row("H-3").includes("Waiting for a reply, today 9:14 AM"), "a block row shows its reason and when");
+  ok(group, row("H-4").includes("Blocked, 3 days ago"), "a block with no reason shows 'Blocked, 3 days ago'");
+  const emptyRow = row("H-EMPTY");
+  ok(group, emptyRow.includes(">Completed<") && !/undefined|null|Invalid Date/.test(emptyRow), "a completion with completedBy but an empty completedAt still renders 'Completed' — no 'undefined', no 'Invalid Date', no throw");
+  ok(group, formatExecutionRecord({ kind: "completed", by: "Tay" }, now) === "Completed", "a completion record with no timestamp at all formats as plain 'Completed'");
+  ok(group, formatExecutionRecord({ kind: "active" }, now) === undefined && !row("H-NONE").includes("data-task-record"), "an active ticket has no history label at all");
+  ok(group, row("H-1").includes('href="https://jira.example.com/browse/H-1"'), "every history row still links to the ticket in Jira");
+}
+
+
+// ===== V2.26 Phần 4 — a ticket coming back after Completed/Skipped/Blocked says WHY =====
+{
+  const group = "V2.26 Reactivation";
+  const { store, setJira } = v226ConfiguredStore();
+  const items = ["RE-A", "RE-B", "RE-C", "RE-S", "RE-K"].map((k) => v226Actionable(k));
+  setJira(items);
+  await store.syncJira(); // "yesterday": first sync
+  store.completeTicketInDailyCommand("RE-A");
+  store.completeTicketInDailyCommand("RE-B");
+  store.skipTicketInDailyCommand("RE-S", "Not my action");
+  store.blockTicketInDailyCommand("RE-K", "Waiting for a reply");
+  await v226Tick();
+
+  // "Today": a new comment lands on RE-B, RE-S, RE-K (after the user's records); RE-A and RE-C get nothing.
+  const later = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+  const nowMs = Date.now() + 2 * 60 * 60 * 1000;
+  const mention = (k: string): MentionEvent => ({ issueKey: k, commentId: `c-${k}`, commentAuthor: "Anna", excerpt: "any update?", mentionedAt: later });
+  setJira(items, [mention("RE-B"), mention("RE-S"), mention("RE-K")]);
+  await store.syncJira();
+  const st = store.getSnapshot();
+
+  ok(group, v226ActiveSurfaces(store, "RE-C", nowMs).length >= 3, `control: an untouched active ticket genuinely reaches the active surfaces (${v226ActiveSurfaces(store, "RE-C", nowMs).join(", ")}) — so an empty list below is meaningful`);
+  ok(group, v226ActiveSurfaces(store, "RE-A", nowMs).length === 0, "ticket A (completed, nothing new) appears on NO active surface after today's sync");
+  ok(group, getCompletedAssignedWorkItems(st.data.workItems, { accountId: "acc-tay" }, undefined, new Set(Object.keys(st.dailyCommandCompletions))).some((w) => w.key === "RE-A"), "...only in the Completed bucket");
+  const reactivations = computeMentionReactivations(st.mentionEvents, st, st.attentionState);
+  ok(group, !reactivations.has("RE-A"), "...and with no reactivation label");
+
+  const recent = selectRecentMentions(st.mentionEvents, st.data.workItems, st.attentionState, nowMs, st);
+  const bCard = recent.find((m) => m.issueKey === "RE-B");
+  ok(group, bCard?.reactivation?.reason === "new-mention-after-completion" && bCard.reactivation.reactivatedAt === later, "ticket B (completed, new comment today) comes back in Recently Mentioned carrying reactivatedReason 'new-mention-after-completion' + reactivatedAt");
+  ok(group, v226ActiveSurfaces(store, "RE-B", nowMs).length === 0, "...and never as plain new/active work anywhere (it stays out of My Assigned Work active, Focus, Action Plan, Priorities)");
+  ok(group, reactivations.get("RE-B")?.reason === "new-mention-after-completion", "the Completed bucket gets the same label for B");
+  ok(group, recent.find((m) => m.issueKey === "RE-S")?.reactivation?.reason === "new-mention-after-skip", "a skipped ticket with a new comment: 'new-mention-after-skip'");
+  ok(group, recent.find((m) => m.issueKey === "RE-K")?.reactivation?.reason === "new-mention-after-block", "a blocked ticket with a new comment: 'new-mention-after-block'");
+  ok(group, !recent.some((m) => m.issueKey === "RE-A") && !recent.some((m) => m.issueKey === "RE-C"), "tickets with no new mention don't appear in Recently Mentioned at all");
+
+  // An OLD mention (before the record) stays suppressed and unlabeled.
+  const before = new Date(Date.parse(st.dailyCommandBlocks["RE-K"].blockedAt) - 60_000).toISOString();
+  const oldOnly = selectRecentMentions([{ ...mention("RE-K"), mentionedAt: before }], st.data.workItems, {}, nowMs, st);
+  ok(group, oldOnly.length === 0, "a mention from BEFORE the block stays suppressed (blocks now follow the same rule as completions/skips)");
+
+  // Badge: clearly different from a plain "New"/first-seen badge.
+  const badge = renderToStaticMarkup(React.createElement(ReactivatedBadge, { reactivation: bCard!.reactivation! }));
+  const newBadge = renderToStaticMarkup(React.createElement(FirstSeenBadge, { firstSeenAt: new Date().toISOString() }));
+  ok(group, badge.includes("↺ Reactivated — new comment after you marked this done"), "the badge reads '↺ Reactivated — new comment after you marked this done'");
+  ok(group, /text-orange/.test(badge) && /text-accent2/.test(newBadge) && !/text-orange/.test(newBadge), "...in a different color (orange) from the 'new today' badge (accent)");
+  const bRow = renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: "RE-B", execution: resolveTaskExecutionState("RE-B", st), reactivation: reactivations.get("RE-B") }));
+  ok(group, bRow.includes('data-reactivated="new-mention-after-completion"') && bRow.includes('data-task-state="completed"'), "a history row renders the reactivation badge while staying in its Completed state");
+
+  // Reassignment audit (assignment-detection.ts): completed, reassigned away, then back to me.
+  setJira(items.map((w) => (w.key === "RE-A" ? { ...w, owner: "Other", ownerId: "acc-other" } : w)));
+  await store.syncJira();
+  setJira(items);
+  await store.syncJira();
+  const reassignView = buildProjectOverrideView(store.getSnapshot(), getTodayIso(), "V226");
+  const reassigned = reassignView.proactive?.attentionQueue.find((i) => i.category === "ASSIGNMENT" && i.ticketKey === "RE-A");
+  ok(group, reassigned?.reactivation?.reason === "reassigned-after-completion", "a completed ticket reassigned back to me surfaces in the Attention Queue labeled 'reassigned-after-completion', not as a brand-new assignment");
+  ok(group, reassigned?.reactivation?.reactivatedAt === undefined, "no reassignment timestamp is invented (detection only knows it changed between two snapshots)");
+  const fresh = detectNewAssignments({ ...emptyData(), workItems: [v226JiraItem("NEW-1")] }, toSnapshot({ ...emptyData(), workItems: [v226JiraItem("NEW-1", { ownerId: "acc-other" })] }, "2026-09-25"), "acc-tay", new Set(["jira-RE-A"]));
+  ok(group, fresh.length === 1 && fresh[0].reactivation === undefined, "a genuinely new assignment (never completed) carries no reactivation label");
+}
+
+
+// ===== V2.26 Phần 5 — Jira link + Complete/Skip/Block, consistent on every page that
+// references a concrete work item (rendered through the shared TaskReferenceRow) =====
+{
+  const group = "V2.26 TaskReferenceRow everywhere";
+  const ticket = v226JiraItem("PAGE-42", { title: "Checkout totals wrong" });
+  const href = 'href="https://jira.example.com/browse/PAGE-42"';
+  const html = (el: React.ReactElement) => renderToStaticMarkup(el);
+  const hasRow = (markup: string) => markup.includes(href) && markup.includes('data-task-row="PAGE-42"') && markup.includes("Mark completed") && markup.includes("Skip…") && markup.includes("Block…");
+
+  ok(group, hasRow(html(React.createElement(PlanCandidateRow, { candidate: { id: "plan-x", title: "PAGE-42 — Checkout totals wrong", estimateMinutes: 15, priorityScore: 70, reason: "Overdue", item: ticket } }))), "Action Plan: a ticket-backed candidate renders TaskReferenceRow with the ticket's Jira URL and Complete/Skip/Block");
+  const actionOnly = html(React.createElement(PlanCandidateRow, { candidate: { id: "a-1", title: "Call the vendor", estimateMinutes: 15, priorityScore: 55, reason: "Follow-up" } }));
+  ok(group, actionOnly.includes("Call the vendor") && !actionOnly.includes("data-task-row"), "Action Plan: a candidate with no ticket keeps its plain title — no invented ticket row");
+
+  const risk = { id: "r-1", projectId: "p-1", title: "Release at risk", level: "HIGH", reason: "Blocked P1", evidence: [], potentialImpact: "Slip", mitigation: "Escalate", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: [ticket.id], auto: true } as Risk;
+  ok(group, hasRow(html(React.createElement(RiskCard, { risk, isDemo: false, relatedWorkItems: workItemsForIds([ticket], risk.sourceWorkItemIds) }))), "Risks: RiskCard renders each source work item as a TaskReferenceRow linking to Jira");
+
+  const decision = { ...buildDemoData(TODAY).current.decisions[0], relatedWorkItemIds: [ticket.id] } as Decision;
+  const decisionHtml = html(React.createElement(DecisionCard, { decision, relatedWorkItems: workItemsForIds([ticket], decision.relatedWorkItemIds) }));
+  ok(group, hasRow(decisionHtml) && !decisionHtml.includes("Related items: 1"), "Decisions: DecisionCard lists the related ticket (with link) instead of only a bare count");
+
+  const change = { id: "ch-1", entityType: "WorkItem", entityId: ticket.id, entityLabel: ticket.title, field: "status", before: "In Progress", after: "Blocked", detectedAt: TODAY, impact: "Now blocked" } as const;
+  ok(group, hasRow(html(React.createElement(ChangeItem, { change, workItem: workItemsForIds([ticket], [change.entityId])[0] }))), "Changes: a WorkItem change renders its ticket as a TaskReferenceRow");
+  ok(group, !html(React.createElement(ChangeItem, { change: { ...change, entityType: "Risk" as const, entityId: "r-1" } })).includes("data-task-row"), "Changes: a non-WorkItem change gets no ticket row");
+
+  const deps = [{ id: "dep-1", workItemId: ticket.id }];
+  const depItem = makeDependencyRadarItem({ dependencyId: "dep-1", description: "API contract", dependsOnTeam: "Payments" });
+  ok(group, hasRow(html(React.createElement(DependencyRadarCard, { item: depItem, relatedWorkItems: workItemsForIds([ticket], [workItemIdForDependency("dep-1", deps)]) }))), "Dependencies: the Dependency Radar card renders the blocked ticket (via Dependency.workItemId) as a TaskReferenceRow");
+
+  const loop = { id: "loop-1", issue: "Totals bug", decision: { id: decision.id, title: decision.title, status: "Decided" }, action: undefined, health: "STALLED", why: "No action", nowWhat: "Create one" } as unknown as DeliveryLoop;
+  const loopIds = relatedWorkItemIdsForLoop(loop, { decisions: [decision], actions: [] });
+  ok(group, loopIds.length === 1 && loopIds[0] === ticket.id, "Loops: a loop's tickets resolve through its Decision's explicit relatedWorkItemIds");
+  ok(group, hasRow(html(React.createElement(DeliveryLoopCard, { loop, relatedWorkItems: workItemsForIds([ticket], loopIds) }))), "Loops: DeliveryLoopCard renders the resolved ticket as a TaskReferenceRow");
+  ok(group, relatedWorkItemIdsForLoop({ ...loop, decision: undefined, action: undefined }, { decisions: [], actions: [] }).length === 0, "Loops: a loop with no decision/action links has no ticket — never guessed");
+  ok(group, workItemsForIds([ticket], ["missing", ticket.id, ticket.id]).length === 1, "resolution drops unknown ids and dedupes — never fabricates a ticket");
+
+  // Each page actually wires the resolved tickets into its card (not just the card supporting it).
+  const pageSrc = (p: string) => fs.readFileSync(path.join(process.cwd(), "src/app", p, "page.tsx"), "utf8");
+  ok(group, /<PlanCandidateRow\b/.test(pageSrc("action-plan")), "action-plan/page.tsx renders PlanCandidateRow");
+  ok(group, /relatedWorkItems=\{workItemsForIds\(filteredData\.workItems, r\.sourceWorkItemIds\)\}/.test(pageSrc("risks")), "risks/page.tsx passes each risk's resolved source tickets");
+  ok(group, (pageSrc("decisions").match(/relatedWorkItems=\{workItemsForIds\(filteredData\.workItems, d\.relatedWorkItemIds\)\}/g) ?? []).length === 2, "decisions/page.tsx passes resolved tickets to BOTH DecisionCard usages");
+  ok(group, /workItem=\{c\.entityType === "WorkItem"/.test(pageSrc("changes")), "changes/page.tsx passes the resolved ticket for WorkItem changes");
+  ok(group, /workItemIdForDependency\(d\.dependencyId/.test(pageSrc("dependencies")), "dependencies/page.tsx resolves each radar item's blocked ticket");
+  ok(group, /relatedWorkItemIdsForLoop\(loop, filteredData\)/.test(pageSrc("loops")), "loops/page.tsx resolves each loop's tickets");
+}
+
+
+// ===== V2.26 Phần 6 — Daily Review, replaying the real multi-sync working loop =====
+{
+  const group = "V2.26 Daily Review scenario";
+  const { store, setJira } = v226ConfiguredStore();
+  const tay = { accountId: "acc-tay", displayName: "Tay" };
+  const review = (lastVisitAt?: string) => {
+    const st = store.getSnapshot();
+    const view = buildProjectOverrideView(st, getTodayIso(), "V226");
+    return buildDailyReview({
+      workItems: view.filteredData.workItems,
+      identity: tay,
+      workRelevanceIndex: view.workRelevanceIndex,
+      dailyCommandCompletions: st.dailyCommandCompletions,
+      dailyCommandSkips: st.dailyCommandSkips,
+      dailyCommandBlocks: st.dailyCommandBlocks,
+      memoryEvents: st.memoryEvents,
+      mentionEvents: st.mentionEvents,
+      attentionState: st.attentionState,
+      syncLog: st.syncLog,
+      lastVisitAt,
+      now: new Date(),
+    });
+  };
+  const keys = ["DR-1", "DR-2", "DR-3", "DR-4", "DR-5"];
+  const day1 = keys.map((k) => v226Actionable(k));
+
+  // Day 1: sync creates 5 tickets; the morning review lists all 5 as new.
+  setJira(day1);
+  await store.syncJira();
+  const firstReview = review(store.getSnapshot().dailyReviewLastVisitAt);
+  ok(group, firstReview.baseline.kind === "first-sync" && JSON.stringify(firstReview.newSinceLastVisit.map((w) => w.key).sort()) === JSON.stringify(keys), "day 1: with no previous visit and a single sync, all 5 tickets that sync created are 'New'");
+  store.markDailyReviewVisited();
+  await v226Tick();
+
+  // During day 1: complete 2, skip 1, block 1.
+  store.completeTicketInDailyCommand("DR-1");
+  store.completeTicketInDailyCommand("DR-2");
+  store.skipTicketInDailyCommand("DR-3", "Team is handling it");
+  store.blockTicketInDailyCommand("DR-4", "Waiting for a reply");
+  const recorded = structuredClone({ c: store.getSnapshot().dailyCommandCompletions, s: store.getSnapshot().dailyCommandSkips, b: store.getSnapshot().dailyCommandBlocks });
+  await v226Tick();
+
+  // Day 2: Jira hasn't changed at all.
+  setJira(day1);
+  await store.syncJira();
+  const lastVisit = store.getSnapshot().dailyReviewLastVisitAt;
+  const day2 = review(lastVisit);
+  const nowMs = Date.now();
+  const touched = ["DR-1", "DR-2", "DR-3", "DR-4"];
+  ok(group, day2.baseline.kind === "last-visit" && day2.baseline.at === lastVisit, "day 2: 'New' is measured against the previous Daily Review visit");
+  ok(group, day2.newSinceLastVisit.length === 0, "(a) nothing is 'New' on day 2 — Jira didn't change, and none of the 4 handled tickets comes back as new");
+  const leaked = touched.flatMap((k) => v226ActiveSurfaces(store, k, nowMs).map((surface) => `${k}@${surface}`));
+  ok(group, leaked.length === 0, `(a) none of the 4 handled tickets appears as active on any page${leaked.length ? ` — leaked: ${leaked.join(", ")}` : ""}`);
+  ok(group, v226ActiveSurfaces(store, "DR-5", nowMs).length >= 3, "control: the untouched DR-5 is still active across the surfaces (so the empty result above is meaningful)");
+
+  const st2 = store.getSnapshot();
+  const completedKeys = day2.completedRecently.map((r) => r.ticketKey).sort();
+  ok(group, JSON.stringify(completedKeys) === JSON.stringify(["DR-1", "DR-2"]) && day2.completedRecently.every((r) => r.sources.includes("daily-command") && r.at === recorded.c[r.ticketKey].completedAt), "(b) DR-1/DR-2 are in 'Completed recently' (source: Daily Command) with their original completedAt intact");
+  ok(group, day2.skipped.length === 1 && day2.skipped[0].ticketKey === "DR-3" && day2.skipped[0].at === recorded.s["DR-3"].skippedAt && st2.dailyCommandSkips["DR-3"].reason === "Team is handling it", "(b) DR-3 is in 'Skipped' with its original reason + timestamp");
+  ok(group, day2.blocked.length === 1 && day2.blocked[0].ticketKey === "DR-4" && day2.blocked[0].at === recorded.b["DR-4"].blockedAt && st2.dailyCommandBlocks["DR-4"].reason === "Waiting for a reply", "(b) DR-4 is in 'Blocked' with its original reason + timestamp");
+  ok(group, JSON.stringify({ c: st2.dailyCommandCompletions, s: st2.dailyCommandSkips, b: st2.dailyCommandBlocks }) === JSON.stringify(recorded), "(b) the day-2 sync left every Daily Command record byte-for-byte untouched");
+  const skippedRow = renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: "DR-3", url: "https://jira.example.com/browse/DR-3", execution: resolveTaskExecutionState("DR-3", st2) }));
+  ok(group, skippedRow.includes("Team is handling it, today"), "(b) the Skipped row renders its recorded reason and time");
+
+  // A new mention lands on the skipped ticket.
+  store.markDailyReviewVisited();
+  await v226Tick();
+  const mentionAt = new Date(Date.now() + 60_000).toISOString();
+  setJira(day1, [{ issueKey: "DR-3", commentId: "c-dr3", commentAuthor: "Anna", excerpt: "can you take this back?", mentionedAt: mentionAt }]);
+  await store.syncJira();
+  const day2b = review(store.getSnapshot().dailyReviewLastVisitAt);
+  ok(group, day2b.skipped[0]?.ticketKey === "DR-3" && day2b.skipped[0].reactivation?.reason === "new-mention-after-skip", "after a new mention, the skipped ticket comes back labeled 'new-mention-after-skip' in the Skipped block");
+  ok(group, !day2b.newSinceLastVisit.some((w) => w.key === "DR-3"), "...and is NOT mixed into 'New'");
+  const recentDr3 = selectRecentMentions(store.getSnapshot().mentionEvents, store.getSnapshot().data.workItems, store.getSnapshot().attentionState, Date.now() + 120_000, store.getSnapshot()).find((m) => m.issueKey === "DR-3");
+  ok(group, recentDr3?.reactivation?.reason === "new-mention-after-skip", "...and Recently Mentioned shows it with the same reactivation label, not as a plain new mention");
+
+  // Control for 'New': a genuinely new ticket on day 3 IS listed.
+  store.markDailyReviewVisited();
+  await v226Tick();
+  setJira([...day1, v226Actionable("DR-6")]);
+  await store.syncJira();
+  const day3 = review(store.getSnapshot().dailyReviewLastVisitAt);
+  ok(group, day3.newSinceLastVisit.map((w) => w.key).join(",") === "DR-6", "control: a ticket first seen after the last visit (DR-6) is the one and only 'New' item");
+
+  // Jira-side completion shows up with source "Jira".
+  setJira([...day1, v226Actionable("DR-6", { status: "Done" })]);
+  await store.syncJira();
+  const day3b = review(store.getSnapshot().dailyReviewLastVisitAt);
+  const dr6 = day3b.completedRecently.find((r) => r.ticketKey === "DR-6");
+  ok(group, dr6?.sources.join(",") === "jira" && dr6.day === getTodayIso(), "a ticket closed directly in Jira appears in 'Completed recently' with source Jira (from the JIRA_STATUS_COMPLETED memory event)");
+
+  // Boundary: "new" is strictly after the baseline. A ticket stamped at exactly the previous
+  // sync's completedAt (which is how store.ts stamps it) or at exactly the last visit is not new.
+  const stNow = store.getSnapshot();
+  const prevSyncEntry = stNow.syncLog[stNow.syncLog.length - 2];
+  const firstSeenOfDr1 = stNow.data.workItems.find((w) => w.key === "DR-1")!.firstSeenAt!;
+  const noVisit = buildDailyReview({ ...review(undefined), workItems: stNow.data.workItems, identity: tay, dailyCommandCompletions: {}, dailyCommandSkips: {}, dailyCommandBlocks: {}, memoryEvents: [], mentionEvents: [], syncLog: [{ ...prevSyncEntry, completedAt: firstSeenOfDr1 }, stNow.syncLog[stNow.syncLog.length - 1]], now: new Date() });
+  ok(group, noVisit.baseline.kind === "previous-sync" && !noVisit.newSinceLastVisit.some((w) => w.key === "DR-1"), "boundary: a ticket whose firstSeenAt equals the previous sync's completedAt is NOT new (strictly-after comparison)");
+  const sameInstant = buildDailyReview({ ...noVisit, workItems: stNow.data.workItems, identity: tay, dailyCommandCompletions: {}, dailyCommandSkips: {}, dailyCommandBlocks: {}, memoryEvents: [], mentionEvents: [], syncLog: stNow.syncLog, lastVisitAt: firstSeenOfDr1, now: new Date() } as never);
+  ok(group, !sameInstant.newSinceLastVisit.some((w) => w.key === "DR-1"), "boundary: a ticket first seen at exactly the last-visit instant is NOT new");
+
+  const reviewPageSrc = fs.readFileSync(path.join(process.cwd(), "src/app/daily-review/page.tsx"), "utf8");
+  const navSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/Nav.tsx"), "utf8");
+  ok(group, /href: "\/daily-review"/.test(navSrc) && /buildDailyReview/.test(reviewPageSrc) && (reviewPageSrc.match(/<TaskReferenceRow\b/g) ?? []).length >= 4, "the /daily-review page is in the nav, uses buildDailyReview, and renders every block through TaskReferenceRow");
+  ok(group, /setLastVisitAt\(state\.dailyReviewLastVisitAt/.test(reviewPageSrc) && reviewPageSrc.indexOf("setLastVisitAt(state.dailyReviewLastVisitAt") < reviewPageSrc.indexOf("store.markDailyReviewVisited()"), "the page captures the PREVIOUS visit before recording the current one");
 }
 
 if (skipped > 0) console.log(`\n⏭️  ${skipped} check group(s) skipped for missing runtime capabilities (see SKIPPED lines above).`);

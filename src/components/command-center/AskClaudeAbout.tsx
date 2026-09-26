@@ -8,7 +8,7 @@
 // of bounded question types, each a single on-demand call routed through the entity cache.
 // Every answer renders Evidence + Unknowns + Recommendation + TrustLabel, per spec.
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
 import type { Evidence } from "@/lib/command-center/types";

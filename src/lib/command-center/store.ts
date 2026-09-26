@@ -49,6 +49,7 @@ import type {
   Communication,
   DailyCommandCompletion,
   DailyCommandSkip,
+  DailyCommandBlock,
   DailyReportSnapshot,
   DailySnapshot,
   DataSourceType,
@@ -72,6 +73,8 @@ import type {
   PilotFeedbackEntry,
   PlanItemOrigin,
   SkipReason,
+  SyncLogEntry,
+  WorkItem,
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
 } from "./types";
@@ -83,6 +86,8 @@ export type { MyActionItemsOnlyByPage };
 const STORAGE_KEY = "command-center:v1";
 const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for trend/pattern/weekly-review, bounded
 const MAX_MEMORY_EVENTS = 200;
+const MAX_BLOCK_REASON_LENGTH = 200;
+const MAX_SYNC_LOG = 30; // most recent successful Jira syncs kept for provenance (oldest evicted first)
 const MAX_PERSONAL_PLAN_ITEMS = 400; // bounded personal-plan history, same philosophy as above
 // V2.2 §16 — Artifact History, NOT a second memory architecture: same bounded-array/
 // oldest-evicted-first pattern as snapshotHistory/memoryEvents above, just for a different
@@ -205,6 +210,10 @@ export interface StoreState {
   // personal-focus.ts's evaluateWorkRelevanceGate for the enforcement point) until an explicit
   // Reactivate (skipTicketInDailyCommand/reactivateSkippedTicket below).
   dailyCommandSkips: Record<string, DailyCommandSkip>;
+  // V2.26 — Daily Command Block. Keyed by Jira issue KEY, same local-only contract as the two
+  // maps above (see DailyCommandBlock in types.ts). Mutually exclusive with both: a ticketKey
+  // is in at most one of dailyCommandCompletions/dailyCommandSkips/dailyCommandBlocks.
+  dailyCommandBlocks: Record<string, DailyCommandBlock>;
   // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. Local-only, bounded like every
   // other history-shaped field above; never synced (not part of SyncedAppState), never sent
   // anywhere. See PilotFeedbackEntry's own comment (types.ts) for the full reasoning.
@@ -214,6 +223,13 @@ export interface StoreState {
   // vs. slow-moving projects needs different tolerances for "how long is too long with no
   // activity". Defaults to DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS.
   staleAssignedTicketThresholds: StaleAssignedTicketThresholds;
+  // Sync provenance — one entry per successful Jira sync, newest last, capped at MAX_SYNC_LOG
+  // (same cap-and-slice discipline as memoryEvents). See SyncLogEntry in types.ts.
+  syncLog: SyncLogEntry[];
+  // V2.26 — when the user last opened Daily Review. Read BEFORE being updated on each visit
+  // (see daily-review/page.tsx), so "New since your last visit" compares against the previous
+  // visit, not this one. Local-only, like the Daily Command maps.
+  dailyReviewLastVisitAt?: string;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -252,8 +268,10 @@ function initialState(): StoreState {
     dailyReports: {},
     dailyCommandCompletions: {},
     dailyCommandSkips: {},
+    dailyCommandBlocks: {},
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
+    syncLog: [],
   };
 }
 
@@ -467,6 +485,46 @@ function asDailyCommandSkips(v: unknown): Record<string, DailyCommandSkip> {
   return out;
 }
 
+// V2.26 — same discipline as isDailyCommandSkipShape above.
+function isDailyCommandBlockShape(v: unknown): v is DailyCommandBlock {
+  if (typeof v !== "object" || v === null) return false;
+  const b = v as Partial<DailyCommandBlock>;
+  return (
+    typeof b.ticketKey === "string" &&
+    typeof b.blockedAt === "string" &&
+    (b.blockedBy === undefined || typeof b.blockedBy === "string") &&
+    (b.reason === undefined || typeof b.reason === "string")
+  );
+}
+
+function asDailyCommandBlocks(v: unknown): Record<string, DailyCommandBlock> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailyCommandBlock> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (isDailyCommandBlockShape(value)) out[key] = value;
+  }
+  return out;
+}
+
+// Same discipline as every other parsed field here: a malformed entry is dropped rather than
+// trusted or crashing the parse.
+function isSyncLogEntryShape(v: unknown): v is SyncLogEntry {
+  if (typeof v !== "object" || v === null) return false;
+  const e = v as Partial<SyncLogEntry>;
+  return (
+    typeof e.startedAt === "string" &&
+    typeof e.completedAt === "string" &&
+    typeof e.recordsCreated === "number" &&
+    typeof e.recordsUpdated === "number" &&
+    Array.isArray(e.newTicketKeys) &&
+    e.newTicketKeys.every((k) => typeof k === "string")
+  );
+}
+
+function asSyncLog(v: unknown): SyncLogEntry[] {
+  return Array.isArray(v) ? v.filter(isSyncLogEntryShape).slice(-MAX_SYNC_LOG) : [];
+}
+
 // V2.22 §3 — same discipline as every other parsed field here: a malformed entry is dropped
 // rather than trusted or crashing the parse.
 function isPilotScore(v: unknown): v is 0 | 1 | 2 {
@@ -573,8 +631,11 @@ export function parseStoredState(raw: string): StoreState {
       dailyReports: asDailyReports(parsed.dailyReports),
       dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
       dailyCommandSkips: asDailyCommandSkips(parsed.dailyCommandSkips),
+      dailyCommandBlocks: asDailyCommandBlocks(parsed.dailyCommandBlocks),
       pilotFeedback: asPilotFeedback(parsed.pilotFeedback),
       staleAssignedTicketThresholds: asStaleAssignedTicketThresholds(parsed.staleAssignedTicketThresholds),
+      syncLog: asSyncLog(parsed.syncLog),
+      dailyReviewLastVisitAt: typeof parsed.dailyReviewLastVisitAt === "string" ? parsed.dailyReviewLastVisitAt : undefined,
     };
   } catch {
     return initialState();
@@ -855,9 +916,13 @@ export class CommandCenterStore {
     // V2.23 — mutual exclusion: completing a ticket also clears any Daily Command Skip on it
     // (this is the one defined SKIPPED -> COMPLETED transition, §11) so a ticketKey is never
     // simultaneously "Completed" and "Skipped".
+    // V2.26 — and any Daily Command Block (the BLOCKED -> COMPLETED transition), so the
+    // three states stay mutually exclusive.
     const dailyCommandSkips = { ...this.state.dailyCommandSkips };
     delete dailyCommandSkips[ticketKey];
-    this.set({ ...this.state, dailyCommandCompletions: { ...this.state.dailyCommandCompletions, [ticketKey]: completion }, dailyCommandSkips });
+    const dailyCommandBlocks = { ...this.state.dailyCommandBlocks };
+    delete dailyCommandBlocks[ticketKey];
+    this.set({ ...this.state, dailyCommandCompletions: { ...this.state.dailyCommandCompletions, [ticketKey]: completion }, dailyCommandSkips, dailyCommandBlocks });
   }
 
   /** The only way back once a ticket is Daily-Command-completed — never automatic (§14
@@ -888,7 +953,9 @@ export class CommandCenterStore {
     };
     const dailyCommandCompletions = { ...this.state.dailyCommandCompletions };
     delete dailyCommandCompletions[ticketKey];
-    this.set({ ...this.state, dailyCommandSkips: { ...this.state.dailyCommandSkips, [ticketKey]: skip }, dailyCommandCompletions });
+    const dailyCommandBlocks = { ...this.state.dailyCommandBlocks };
+    delete dailyCommandBlocks[ticketKey];
+    this.set({ ...this.state, dailyCommandSkips: { ...this.state.dailyCommandSkips, [ticketKey]: skip }, dailyCommandCompletions, dailyCommandBlocks });
   }
 
   /** The explicit "Reactivate" action (§9) — the only way back from SKIPPED to ACTIVE. Never
@@ -900,6 +967,41 @@ export class CommandCenterStore {
     const next = { ...this.state.dailyCommandSkips };
     delete next[ticketKey];
     this.set({ ...this.state, dailyCommandSkips: next });
+  }
+
+  /** V2.26 — Daily Command Block: "not done, paused — waiting on something outside my
+   *  control". Same shape and guarantees as skipTicketInDailyCommand: never touches Jira or
+   *  data.workItems, `reason` always optional (free text, trimmed, bounded; blank means no
+   *  reason). Clears any completion/skip for the same ticketKey so the three states stay
+   *  mutually exclusive. Re-blocking an already-blocked ticket replaces the record (new
+   *  timestamp/reason). */
+  blockTicketInDailyCommand(ticketKey: string, reason?: string) {
+    const trimmed = reason?.trim().slice(0, MAX_BLOCK_REASON_LENGTH);
+    const block: DailyCommandBlock = {
+      ticketKey,
+      blockedAt: new Date().toISOString(),
+      blockedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
+      reason: trimmed ? trimmed : undefined,
+    };
+    const dailyCommandCompletions = { ...this.state.dailyCommandCompletions };
+    delete dailyCommandCompletions[ticketKey];
+    const dailyCommandSkips = { ...this.state.dailyCommandSkips };
+    delete dailyCommandSkips[ticketKey];
+    this.set({ ...this.state, dailyCommandBlocks: { ...this.state.dailyCommandBlocks, [ticketKey]: block }, dailyCommandCompletions, dailyCommandSkips });
+  }
+
+  /** The explicit "Unblock" action — BLOCKED -> ACTIVE. Never automatic, same rule as
+   *  reactivateSkippedTicket: no sync, status change, or comment clears a block on its own. */
+  unblockTicketInDailyCommand(ticketKey: string) {
+    if (!(ticketKey in this.state.dailyCommandBlocks)) return;
+    const next = { ...this.state.dailyCommandBlocks };
+    delete next[ticketKey];
+    this.set({ ...this.state, dailyCommandBlocks: next });
+  }
+
+  /** V2.26 — records a Daily Review visit. `at` is injectable for tests. */
+  markDailyReviewVisited(at: string = new Date().toISOString()) {
+    this.set({ ...this.state, dailyReviewLastVisitAt: at });
   }
 
   /** V2.22 §3-4 — records one lightweight pilot-feedback entry (3 questions, 0-2 each, plus
@@ -1119,13 +1221,28 @@ export class CommandCenterStore {
     // fetch (see lastSyncCompletedAt below).
     const truncated = result.truncated === true;
     const prevWorkItemsById = new Map(this.state.data.workItems.map((w) => [w.id, w]));
+    // Sync provenance: an item new to the local store gets firstSeenAt stamped exactly once,
+    // here; an existing item carries its previous firstSeenAt forward (the incoming payload
+    // never has one), so no later sync can overwrite it. Stamping happens BEFORE the
+    // created/updated diff so a carried-forward field never makes an unchanged item look
+    // "updated". Pre-existing items without firstSeenAt stay undefined — never back-filled
+    // with a guess.
+    const observedAt = new Date().toISOString();
+    const incomingWorkItems: WorkItem[] = incoming.workItems.map((w) => {
+      const prev = prevWorkItemsById.get(w.id);
+      if (!prev) return { ...w, firstSeenAt: observedAt };
+      return prev.firstSeenAt ? { ...w, firstSeenAt: prev.firstSeenAt } : w;
+    });
     let created = 0;
     let updated = 0;
     let unchanged = 0;
-    for (const w of incoming.workItems) {
+    const newTicketKeys: string[] = [];
+    for (const w of incomingWorkItems) {
       const prev = prevWorkItemsById.get(w.id);
-      if (!prev) created++;
-      else if (JSON.stringify(prev) !== JSON.stringify(w)) updated++;
+      if (!prev) {
+        created++;
+        newTicketKeys.push(w.key);
+      } else if (JSON.stringify(prev) !== JSON.stringify(w)) updated++;
       else unchanged++;
     }
 
@@ -1163,8 +1280,8 @@ export class CommandCenterStore {
         ? [...this.state.data.projects.filter((p) => p.sourceType !== "jira" || staysUntouched(p.id)), ...incoming.projects]
         : mergeById(this.state.data.projects, incoming.projects),
       workItems: replaceFullDataset
-        ? [...this.state.data.workItems.filter((w) => w.sourceType !== "jira" || staysUntouched(w.projectId)), ...incoming.workItems]
-        : mergeById(this.state.data.workItems, incoming.workItems),
+        ? [...this.state.data.workItems.filter((w) => w.sourceType !== "jira" || staysUntouched(w.projectId)), ...incomingWorkItems]
+        : mergeById(this.state.data.workItems, incomingWorkItems),
       requirements: this.state.data.requirements, // Jira does not feed requirements (§6 — only ingest fields required for intelligence)
       risks: this.state.data.risks, // manually-logged risks are preserved; auto-detected risks recompute live from the merged work items
       // Dependencies are keyed by workItemId, not projectId, so a per-project untouched-set
@@ -1245,6 +1362,7 @@ export class CommandCenterStore {
           : this.state.memoryEvents,
       mentionEvents: mergedMentionEvents,
       workItemCalibrationHistory,
+      syncLog: [...this.state.syncLog, { startedAt, completedAt: observedAt, recordsCreated: created, recordsUpdated: updated, newTicketKeys }].slice(-MAX_SYNC_LOG),
       jiraSync: {
         lastSyncStartedAt: startedAt,
         // V2.18 §5 — on a partial sync, the incremental cursor advances only to the resume

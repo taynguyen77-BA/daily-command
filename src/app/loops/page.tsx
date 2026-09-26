@@ -10,7 +10,9 @@
 
 import { useState } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
-import { EmptyState, LoopHealthBadge, Panel, SectionHeading } from "@/components/command-center/ui";
+import { EmptyState, Panel, SectionHeading } from "@/components/command-center/ui";
+import { DeliveryLoopCard } from "@/components/command-center/DeliveryLoopCard";
+import { relatedWorkItemIdsForLoop, workItemsForIds } from "@/lib/command-center/task-execution";
 import type { DeliveryLoop } from "@/lib/command-center/types";
 
 function CreateFollowUpAction({ loop, onDone }: { loop: DeliveryLoop; onDone: () => void }) {
@@ -70,7 +72,7 @@ function CreateFollowUpAction({ loop, onDone }: { loop: DeliveryLoop; onDone: ()
 }
 
 export default function DeliveryLoopsPage() {
-  const { state, proactive, store } = useCommandCenter();
+  const { state, proactive, store, filteredData } = useCommandCenter();
   const [justCreated, setJustCreated] = useState<Set<string>>(new Set());
 
   if (!state.loaded) {
@@ -88,33 +90,12 @@ export default function DeliveryLoopsPage() {
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
           {loops.map((loop) => (
-            <Panel key={loop.id} className="p-4">
-              <div className="mb-1 flex items-center gap-2">
-                <LoopHealthBadge health={loop.health} />
-              </div>
-              <p className="font-display text-sm text-text">{loop.issue}</p>
-              <dl className="mt-2 space-y-1 text-xs text-text2">
-                <div>
-                  <dt className="inline text-text3">Decision: </dt>
-                  <dd className="inline">{loop.decision?.title ?? "—"} {loop.decision ? `(${loop.decision.status})` : ""}</dd>
-                </div>
-                <div>
-                  <dt className="inline text-text3">Action: </dt>
-                  <dd className="inline">{loop.action ? `${loop.action.title} (${loop.action.status})` : "Pending"}</dd>
-                </div>
-                <div>
-                  <dt className="inline text-text3">Outcome: </dt>
-                  <dd className="inline">{loop.outcomeStatus ?? "Unknown"}</dd>
-                </div>
-              </dl>
-              <p className="mt-2 text-xs text-text2">{loop.why}</p>
-              <p className="mt-1 text-xs font-medium text-accent2">Now what: {loop.nowWhat}</p>
-
+            <DeliveryLoopCard key={loop.id} loop={loop} relatedWorkItems={workItemsForIds(filteredData.workItems, relatedWorkItemIdsForLoop(loop, filteredData))}>
               {loop.health === "STALLED" && !loop.action && !justCreated.has(loop.id) && (
                 <CreateFollowUpAction loop={loop} onDone={() => setJustCreated((s) => new Set(s).add(loop.id))} />
               )}
               {justCreated.has(loop.id) && <p className="mt-2 text-xs text-green">Follow-up action created — it now appears in Personal Focus, Action Plan, and Project Memory.</p>}
-            </Panel>
+            </DeliveryLoopCard>
           ))}
         </div>
       )}

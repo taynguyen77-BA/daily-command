@@ -5,7 +5,7 @@
 // list, with zero user gesture). The conflict assessment is now strictly on-demand,
 // behind an explicit click, routed through the entity cache (ai/ai-cache.ts).
 
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
 import { commandCenterStore, getTodayIso } from "@/lib/command-center/store";
@@ -13,10 +13,11 @@ import { projectDecisionImpact } from "@/lib/command-center/impact-projection";
 import { reviewStatusFor } from "@/lib/command-center/decision-radar";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
-import type { Decision, DecisionConflictAssessment, DecisionConflictCandidate, DecisionEffectivenessClass, DecisionEffectivenessResult, DecisionRadarItem } from "@/lib/command-center/types";
+import type { Decision, DecisionConflictAssessment, DecisionConflictCandidate, DecisionEffectivenessClass, DecisionEffectivenessResult, DecisionRadarItem, WorkItem } from "@/lib/command-center/types";
 import { AiProviderIndicator, AttentionSeverityBadge, ConfidenceTag, DecisionEffectivenessBadge, DecisionReviewStatusBadge, MetaPill, Panel, TrustLabel } from "./ui";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 import { AskClaudeAbout } from "./AskClaudeAbout";
+import { RelatedTickets } from "./TaskReferenceRow";
 import { ArtifactEditor } from "./ArtifactEditor";
 
 const OUTCOME_CLASSES: DecisionEffectivenessClass[] = ["EFFECTIVE", "PARTIALLY_EFFECTIVE", "INEFFECTIVE", "UNKNOWN"];
@@ -68,11 +69,14 @@ export function DecisionCard({
   conflict,
   radar,
   effectiveness,
+  relatedWorkItems,
 }: {
   decision: Decision;
   conflict?: DecisionConflictCandidate;
   radar?: DecisionRadarItem;
   effectiveness?: DecisionEffectivenessResult;
+  // V2.26 — the caller's resolution of decision.relatedWorkItemIds (explicit FKs only).
+  relatedWorkItems?: WorkItem[];
 }) {
   const [open, setOpen] = useState(false);
   const [showOptions, setShowOptions] = useState(false);
@@ -124,10 +128,12 @@ export function DecisionCard({
       )}
       <div className="mt-2 flex flex-wrap gap-3 text-xs text-text3">
         {decision.owner && <span>Owner: {decision.owner}</span>}
-        {decision.relatedWorkItemIds && decision.relatedWorkItemIds.length > 0 && (
+        {/* Only a bare count when none of the related ids resolve in the current scope. */}
+        {decision.relatedWorkItemIds && decision.relatedWorkItemIds.length > 0 && !relatedWorkItems?.length && (
           <span>Related items: {decision.relatedWorkItemIds.length}</span>
         )}
       </div>
+      <RelatedTickets workItems={relatedWorkItems} />
 
       <WhyShouldICareDrawer content={content} onCreateUpdate={() => setCreatingUpdate(true)} />
       <AskClaudeAbout subject={decision.title} entityId={decision.id} facts={content.fact} evidence={content.evidence} />

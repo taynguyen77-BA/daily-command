@@ -250,6 +250,23 @@ export interface WorkItem {
   // the 5-value WorkItemStatus enum is too coarse to distinguish "In Progress" from
   // "Ready for UAT" — both map to "In Progress" today.
   jiraStatusName?: string;
+  // Sync provenance — ISO datetime of the Jira sync that first created this work item in the
+  // local store. Stamped exactly once, by store.ts's runJiraSync() merge, at the moment the
+  // item is new to the store; carried forward unchanged by every later sync. Undefined for
+  // data that predates this field (or never came from a Jira sync) — every read site must
+  // treat undefined as "unknown", never as "new".
+  firstSeenAt?: string;
+}
+
+/** One successful Jira sync's provenance summary, kept in StoreState.syncLog (bounded). Counts
+ *  are the same created/updated numbers runJiraSync() already records on jiraSync — never
+ *  recomputed. `newTicketKeys` lists only the tickets that sync CREATED locally. */
+export interface SyncLogEntry {
+  startedAt: string;
+  completedAt: string;
+  recordsCreated: number;
+  recordsUpdated: number;
+  newTicketKeys: string[];
 }
 
 export interface DailySnapshot {
@@ -786,6 +803,10 @@ export interface AttentionItem {
   // resolvable, same "never fabricate a fact about a ticket that isn't clearly THE ticket"
   // discipline as ticketKey.
   relation?: PersonalRelation;
+  // V2.26 — set only on an ASSIGNMENT item whose ticket the user had already Daily-Command-
+  // completed (assignment-detection.ts), so the queue shows "↺ Reactivated" instead of
+  // presenting it as a brand-new assignment.
+  reactivation?: TaskReactivation;
 }
 
 /** Persisted per attention item, keyed by AttentionItem.id — see store.ts StoreState.attentionState. */
@@ -1608,6 +1629,49 @@ export interface DailyCommandSkip {
   skippedBy?: string;
   reason?: SkipReason; // optional — never required to skip an item
 }
+
+// ===== V2.26 — Blocked as a universal per-ticket state =====
+// A Daily Command Block is a PERSONAL EXECUTION STATE alongside DailyCommandSkip and
+// DailyCommandCompletion: "this ticket is NOT done — I can't move it right now because I'm
+// waiting on something outside my control" (a reply from X, another ticket landing first).
+// Unlike completion it is not finished, and unlike skip it isn't "I chose not to do this" —
+// it is paused, still mine, and belongs in its own visible Blocked bucket
+// (assigned-work.ts's getBlockedAssignedWorkItems), never folded into Done/Excluded (Work
+// Relevance's isWorkItemOperationallyOpen is deliberately unaware of it). Keyed by Jira issue
+// KEY, same identity reasons as the other two. A ticketKey is in AT MOST ONE of
+// dailyCommandCompletions / dailyCommandSkips / dailyCommandBlocks at any time — every
+// setter in store.ts clears the other two maps for the same key.
+//
+// `reason` is free text (trimmed, bounded — see store.ts's MAX_BLOCK_REASON_LENGTH), NOT a
+// fixed union like SkipReason: what blocks a ticket is specific ("waiting on Anna's API
+// answer", "depends on JPMC-412"), and SkipReason's categories ("Team is handling it", "Not my
+// action") describe a different concept entirely. The UI offers quick-fill suggestions
+// (BLOCK_REASON_SUGGESTIONS) but any text is valid.
+export interface DailyCommandBlock {
+  ticketKey: string;
+  blockedAt: string; // ISO datetime, same precision as DailyCommandSkip.skippedAt
+  blockedBy?: string;
+  reason?: string;
+}
+
+/** V2.26 — why a ticket the user had already Completed/Skipped/Blocked in Daily Command is
+ *  showing up again: a genuinely new mention (recent-mentions.ts) or a fresh reassignment
+ *  (assignment-detection.ts) that happened AFTER the user's own record. Lets every surface
+ *  render "↺ Reactivated — …" instead of presenting the ticket as brand new. */
+export interface TaskReactivation {
+  reason:
+    | "new-mention-after-completion"
+    | "new-mention-after-skip"
+    | "new-mention-after-block"
+    | "reassigned-after-completion"
+    | "reassigned-after-skip"
+    | "reassigned-after-block";
+  // ISO datetime of the mention that caused it. Undefined for a reassignment: detection only
+  // knows the ownership changed somewhere between two snapshots, so no exact time is claimed.
+  reactivatedAt?: string;
+}
+
+export const BLOCK_REASON_SUGGESTIONS = ["Waiting for a reply", "Depends on another ticket", "Waiting on environment/access", "Waiting on client decision"] as const;
 
 // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. A lightweight, local-only feedback
 // record — three simple 0/1/2 questions, never a productivity score, never sent anywhere.

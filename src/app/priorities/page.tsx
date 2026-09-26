@@ -22,6 +22,9 @@ const FILTERS: { key: string; label: string }[] = [
   // tab above continues to exclude skipped items (see the filter logic below) — skip never
   // pollutes the default view.
   { key: "SKIPPED", label: "Skipped" },
+  // V2.26 — same discoverability exception for Daily-Command-BLOCKED work, and the same
+  // rule: every other tab excludes blocked items.
+  { key: "BLOCKED", label: "Blocked" },
 ];
 
 // V2.14 §3 — same relation filter shape/UX as Attention Queue's, for consistency.
@@ -36,7 +39,7 @@ function matchesRelationFilter(relation: PersonalRelation, filter: RelationFilte
 }
 
 function PrioritiesInner() {
-  const { state, today, derived, filteredData, store, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, proactive, personalFocus } = useCommandCenter();
+  const { state, today, derived, filteredData, store, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, dailyCommandBlockedWorkItemIds, proactive, personalFocus } = useCommandCenter();
   const searchParams = useSearchParams();
   const [filter, setFilter] = useState<string>(searchParams.get("filter") ?? "ALL");
   const [relationFilter, setRelationFilter] = useState<RelationFilter>("ALL");
@@ -70,10 +73,13 @@ function PrioritiesInner() {
     const item = itemForScore(filteredData, result);
     if (!item) return false;
     const isSkipped = !!dailyCommandSkippedWorkItemIds?.has(item.id);
+    const isBlocked = !!dailyCommandBlockedWorkItemIds?.has(item.id);
     if (filter === "SKIPPED") {
       if (!isSkipped) return false;
+    } else if (filter === "BLOCKED") {
+      if (!isBlocked) return false;
     } else {
-      if (isSkipped) return false;
+      if (isSkipped || isBlocked) return false;
       if (filter !== "ALL") {
         if (filter === "OVERDUE" && !isOverdue(item, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds)) return false;
         if (filter === "ON_TRACK" && result.classification !== "MEDIUM" && result.classification !== "LOW") return false;

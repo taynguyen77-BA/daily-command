@@ -2,10 +2,11 @@
 
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { RiskCard } from "@/components/command-center/RiskCard";
+import { workItemsForIds } from "@/lib/command-center/task-execution";
 import { EmptyState, SectionHeading } from "@/components/command-center/ui";
 
 export default function RisksPage() {
-  const { state, derived, proactive, store } = useCommandCenter();
+  const { state, derived, proactive, store, filteredData } = useCommandCenter();
 
   if (!state.loaded) {
     return (
@@ -28,7 +29,14 @@ export default function RisksPage() {
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
           {derived.risks.map((r) => (
-            <RiskCard key={r.id} risk={r} isDemo={state.isDemo} escalation={escalationByTitle.get(r.title)} showAgingAssessment={r.title === topEscalatingTitle} />
+            <RiskCard
+              key={r.id}
+              risk={r}
+              isDemo={state.isDemo}
+              escalation={escalationByTitle.get(r.title)}
+              showAgingAssessment={r.title === topEscalatingTitle}
+              relatedWorkItems={workItemsForIds(filteredData.workItems, r.sourceWorkItemIds)}
+            />
           ))}
         </div>
       )}

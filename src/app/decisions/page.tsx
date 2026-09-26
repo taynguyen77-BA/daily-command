@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { DecisionCard } from "@/components/command-center/DecisionCard";
+import { workItemsForIds } from "@/lib/command-center/task-execution";
 import { EmptyState, SectionHeading } from "@/components/command-center/ui";
 import { detectDecisionConflictCandidates } from "@/lib/command-center/decision-conflicts";
 import type { Decision, DecisionStatus } from "@/lib/command-center/types";
@@ -61,7 +62,14 @@ export default function DecisionLogPage() {
             <SectionHeading title={group.label} />
             <div className="grid gap-2 md:grid-cols-2">
               {decisions.map((d) => (
-                <DecisionCard key={d.id} decision={d} conflict={conflictByDecisionId.get(d.id)} radar={radarByDecisionId.get(d.id)} effectiveness={effectivenessByDecisionId.get(d.id)} />
+                <DecisionCard
+                  key={d.id}
+                  decision={d}
+                  conflict={conflictByDecisionId.get(d.id)}
+                  radar={radarByDecisionId.get(d.id)}
+                  effectiveness={effectivenessByDecisionId.get(d.id)}
+                  relatedWorkItems={workItemsForIds(filteredData.workItems, d.relatedWorkItemIds)}
+                />
               ))}
             </div>
           </section>
@@ -73,7 +81,7 @@ export default function DecisionLogPage() {
           <SectionHeading title="Other" subtitle="Legacy status values, still fully visible — nothing is hidden." />
           <div className="grid gap-2 md:grid-cols-2">
             {other.map((d) => (
-              <DecisionCard key={d.id} decision={d} conflict={conflictByDecisionId.get(d.id)} />
+              <DecisionCard key={d.id} decision={d} conflict={conflictByDecisionId.get(d.id)} relatedWorkItems={workItemsForIds(filteredData.workItems, d.relatedWorkItemIds)} />
             ))}
           </div>
         </section>

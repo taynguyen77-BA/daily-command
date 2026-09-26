@@ -12,6 +12,7 @@ import { mentionGroupLabel } from "@/lib/command-center/mention-grouping";
 import { useCommandCenter } from "./use-command-center";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
 import { TicketLink } from "./TicketLink";
+import { ReactivatedBadge } from "./TaskReferenceRow";
 
 function formatRecency(mentionedAt: string, nowMs: number): string {
   const ms = Math.max(0, nowMs - new Date(mentionedAt).getTime());
@@ -28,6 +29,7 @@ function MentionRow({ mention, nowMs, onResolve, onComplete }: { mention: Recent
           <TicketLink ticketKey={mention.issueKey} url={mention.commentUrl ?? mention.workItem?.sourceUrl} />
           <span>Mentioned {formatRecency(mention.mentionedAt, nowMs)}</span>
           {mention.groupCount > 1 && <span className="text-accent2">{mentionGroupLabel(mention.groupCount)}</span>}
+          {mention.reactivation && <ReactivatedBadge reactivation={mention.reactivation} now={new Date(nowMs)} />}
         </div>
         <div className="flex shrink-0 gap-2">
           <button onClick={onResolve} className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
@@ -56,8 +58,16 @@ export function RecentlyMentioned() {
   }, []);
 
   const mentions = useMemo(
-    () => selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, { dailyCommandCompletions: state.dailyCommandCompletions }),
-    [scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, state.dailyCommandCompletions]
+    // V2.26 — skips (previously never passed here, so a pre-skip mention wasn't suppressed in
+    // this panel) and blocks are passed too, so the suppress-then-reactivate rule applies to
+    // all three Daily Command states.
+    () =>
+      selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, {
+        dailyCommandCompletions: state.dailyCommandCompletions,
+        dailyCommandSkips: state.dailyCommandSkips,
+        dailyCommandBlocks: state.dailyCommandBlocks,
+      }),
+    [scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, state.dailyCommandCompletions, state.dailyCommandSkips, state.dailyCommandBlocks]
   );
 
   return (

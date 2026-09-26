@@ -7,7 +7,7 @@
 // "Ask Claude" — see V2.0 §1.4/§4. That call goes through the entity cache (ai-cache.ts)
 // so re-opening the drawer with unchanged evidence never re-hits the model.
 
-import { useState } from "react";
+import React, { useState } from "react";
 import type { AITask } from "@/lib/command-center/ai/schemas";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
 import type { WhyShouldICareContent } from "@/lib/command-center/why-should-i-care";

@@ -7,7 +7,7 @@
 // through the entity cache and is never merged into the CALCULATED/EVIDENCE sections
 // automatically — the user explicitly inserts it (§5 "never merge these silently").
 
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
 import { evaluateAiResponse } from "@/lib/command-center/ai/evaluation";

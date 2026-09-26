@@ -121,6 +121,25 @@ export function useCommandCenter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.dailyCommandSkips, scopedData.workItems]);
 
+  // V2.26 — Daily Command Block, resolved to WorkItem ids the same way.
+  const dailyCommandBlockedWorkItemIds = useMemo(() => {
+    const keys = new Set(Object.keys(state.dailyCommandBlocks ?? {}));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.dailyCommandBlocks, scopedData.workItems]);
+
+  // V2.26 — "personal execution paused" = skipped ∪ blocked. This is what the engines'
+  // existing skip parameter (proactive/personal-focus/action-plan) now receives: a blocked
+  // ticket leaves every active personal-execution surface through the exact same suppression
+  // path a skipped one already uses — no second exclusion mechanism, and nothing folded into
+  // Work Relevance's Done/Excluded gate. Skip and block stay distinct everywhere they're
+  // DISPLAYED (dailyCommandSkippedWorkItemIds / dailyCommandBlockedWorkItemIds below).
+  const dailyCommandPausedWorkItemIds = useMemo(
+    () => (dailyCommandBlockedWorkItemIds.size === 0 ? dailyCommandSkippedWorkItemIds : new Set([...Array.from(dailyCommandSkippedWorkItemIds), ...Array.from(dailyCommandBlockedWorkItemIds)])),
+    [dailyCommandSkippedWorkItemIds, dailyCommandBlockedWorkItemIds]
+  );
+
   // V2.21 §3 — computed AFTER workRelevanceIndex/dailyCommandCompletedWorkItemIds (moved
   // below them, was above before V2.21) and now threaded through: `derived` is the shared
   // scores/risks/kpis every screen reads (Home, Priorities, Risks), so it must apply the same
@@ -152,12 +171,12 @@ export function useCommandCenter() {
             state.personalIdentity?.accountId,
             state.ownerName,
             dailyCommandCompletedWorkItemIds,
-            dailyCommandSkippedWorkItemIds,
+            dailyCommandPausedWorkItemIds,
             state.staleAssignedTicketThresholds
           )
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, state.staleAssignedTicketThresholds]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, state.staleAssignedTicketThresholds]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -203,10 +222,10 @@ export function useCommandCenter() {
   const personalFocus = useMemo(
     () =>
       proactive
-        ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds)
+        ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds)
         : null,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds]
+    [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds]
   );
 
   // V2.9 §F-02 fix — exposed so any UI populating a "which client/project can I pick"
@@ -226,6 +245,8 @@ export function useCommandCenter() {
     scopedMentionEvents,
     dailyCommandCompletedWorkItemIds,
     dailyCommandSkippedWorkItemIds,
+    dailyCommandBlockedWorkItemIds,
+    dailyCommandPausedWorkItemIds,
     store: commandCenterStore,
   };
 }
@@ -273,6 +294,14 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
     if (keys.size === 0) return new Set<string>();
     return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
   })();
+  // V2.26 — same resolution for blocks, and the same skipped ∪ blocked "paused" set the main
+  // hook threads into the engines (see its own comment).
+  const dailyCommandBlockedWorkItemIds = (() => {
+    const keys = new Set(Object.keys(state.dailyCommandBlocks ?? {}));
+    if (keys.size === 0) return new Set<string>();
+    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+  })();
+  const dailyCommandPausedWorkItemIds = new Set([...Array.from(dailyCommandSkippedWorkItemIds), ...Array.from(dailyCommandBlockedWorkItemIds)]);
   const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const proactive = state.loaded
     ? computeProactiveIntelligence(
@@ -288,12 +317,12 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         state.personalIdentity?.accountId,
         state.ownerName,
         dailyCommandCompletedWorkItemIds,
-        dailyCommandSkippedWorkItemIds,
+        dailyCommandPausedWorkItemIds,
         state.staleAssignedTicketThresholds
       )
     : null;
   const personalFocus = proactive
-    ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds)
+    ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds)
     : null;
-  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds };
+  return { filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, dailyCommandBlockedWorkItemIds, dailyCommandPausedWorkItemIds };
 }

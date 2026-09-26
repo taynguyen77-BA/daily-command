@@ -39,7 +39,7 @@ import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 type ViewMode = "operations" | "executive";
 
 export default function CommandCenterPage() {
-  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, store } = useCommandCenter();
+  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, store } = useCommandCenter();
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
   const [closingDay, setClosingDay] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("operations");
@@ -64,7 +64,8 @@ export default function CommandCenterPage() {
   // V2.23 note — Priorities' own page needs skipped items still scored so it can show them
   // under an explicit "Skipped" filter), so this condensed dashboard preview filters them out
   // here instead, the same "filtering happens at the presentation boundary" discipline (§6).
-  const topPriorities = derived.scores.filter((r) => !dailyCommandSkippedWorkItemIds?.has(r.itemId)).slice(0, 4);
+  // V2.26 — paused = skipped ∪ blocked: neither belongs in the home page's top priorities.
+  const topPriorities = derived.scores.filter((r) => !dailyCommandPausedWorkItemIds?.has(r.itemId)).slice(0, 4);
   const topChanges = derived.changes.slice(0, 5);
   const topRisks = derived.risks.slice(0, 4);
   const openComms = filteredData.communications.filter((c) => c.status === "open").slice(0, 4);

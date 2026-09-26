@@ -27,6 +27,8 @@ interface NavLink {
 const LINKS: NavLink[] = [
   { href: "/", label: "Command Center" },
   { href: "/focus", label: "My Day" },
+  // V2.26 — the morning check over new / skipped / blocked / completed tickets.
+  { href: "/daily-review", label: "Daily Review" },
   { href: "/meeting", label: "Meeting Mode" },
   { href: "/attention", label: "Attention Queue" },
   { href: "/loops", label: "Delivery Loops", advanced: true },
