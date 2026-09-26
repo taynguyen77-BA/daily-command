@@ -11,6 +11,8 @@ import type { PlanCandidate } from "@/lib/command-center/action-plan";
 import { commandCenterStore } from "@/lib/command-center/store";
 import type { ActionOutcomeStatus } from "@/lib/command-center/types";
 
+const ACTION_TITLE = "Updates only this planned action — the ticket's own state is set with the \u201c… ticket\u201d buttons.";
+
 // V1.5 §18, §52 — "Did It Work?" outcome capture, the second signature interaction.
 const OUTCOME_STATUSES: ActionOutcomeStatus[] = ["RESOLVED", "IMPROVED", "PARTIALLY_IMPROVED", "NO_CHANGE", "WORSENED", "UNKNOWN"];
 
@@ -57,7 +59,7 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
           {candidate.item ? (
             <>
               {candidate.action && <p className="font-display text-sm text-text">{candidate.action.title}</p>}
-              <TaskReferenceRow workItem={candidate.item} as="div" />
+              <TaskReferenceRow workItem={candidate.item} as="div" ticketScoped />
             </>
           ) : (
             <p className="font-display text-sm text-text">{candidate.title}</p>
@@ -76,18 +78,20 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
         />
       )}
 
+      {/* Action-level controls: they update this planned Action only. The ticket's own
+          Daily Command state is the "… ticket" buttons above (TaskReferenceRow ticketScoped). */}
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
-        <button onClick={() => store.completeAction(ensureActionId())} className="rounded border border-border px-2 py-1 text-text2 hover:border-green hover:text-green">
-          Complete
+        <button onClick={() => store.completeAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-green hover:text-green">
+          Complete action
         </button>
-        <button onClick={() => store.deferAction(ensureActionId())} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">
-          Defer
+        <button onClick={() => store.deferAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">
+          Defer action
         </button>
-        <button onClick={() => store.snoozeAction(ensureActionId())} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-accent2">
-          Snooze
+        <button onClick={() => store.snoozeAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-accent2">
+          Snooze action
         </button>
-        <button onClick={() => store.markActionBlocked(ensureActionId())} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
-          Mark blocked
+        <button onClick={() => store.markActionBlocked(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
+          Mark action blocked
         </button>
         <button onClick={() => setShowNote((v) => !v)} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-text">
           {showNote ? "Hide note" : "Add note"}

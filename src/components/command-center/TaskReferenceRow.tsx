@@ -64,6 +64,14 @@ const STATE_TONE: Record<TaskExecutionState["kind"], string> = {
 
 const BTN = "rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text";
 
+/** Default labels, and the "ticket"-qualified ones used where the row sits next to other
+ *  controls of a different kind (Action Plan's action-level buttons) — same actions either way. */
+const LABELS = {
+  plain: { complete: "Mark completed", skipOpen: "Skip…", skip: "Skip", blockOpen: "Block…", block: "Block", reopen: "Reopen", reactivate: "Reactivate", unblock: "Unblock" },
+  ticket: { complete: "Complete ticket", skipOpen: "Skip ticket…", skip: "Skip ticket", blockOpen: "Block ticket…", block: "Block ticket", reopen: "Reopen ticket", reactivate: "Reactivate ticket", unblock: "Unblock ticket" },
+};
+const TICKET_TITLE = "Records this for the ticket in Daily Command — Jira itself is never changed.";
+
 export function TaskReferenceRowView({
   ticketKey,
   url,
@@ -75,6 +83,7 @@ export function TaskReferenceRowView({
   actions,
   now,
   caption,
+  ticketScoped = false,
   as = "li",
 }: {
   ticketKey: string;
@@ -89,8 +98,13 @@ export function TaskReferenceRowView({
   now?: Date;
   /** Extra context line under the record (e.g. Daily Review's completion source). */
   caption?: string;
+  /** Qualify every button with "ticket" (e.g. "Complete ticket") — for cards that also carry
+   *  non-ticket controls. */
+  ticketScoped?: boolean;
   as?: "li" | "div";
 }) {
+  const L = ticketScoped ? LABELS.ticket : LABELS.plain;
+  const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
   const [picker, setPicker] = useState<"skip" | "block" | null>(null);
   const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   const [blockReason, setBlockReason] = useState("");
@@ -119,14 +133,14 @@ export function TaskReferenceRowView({
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
           {execution.kind === "active" && picker === null && (
             <>
-              <button onClick={actions.onComplete} className={BTN}>
-                Mark completed
+              <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
+                {L.complete}
               </button>
-              <button onClick={() => setPicker("skip")} className={BTN}>
-                Skip…
+              <button onClick={() => setPicker("skip")} title={btnTitle} className={BTN}>
+                {L.skipOpen}
               </button>
-              <button onClick={() => setPicker("block")} className={BTN}>
-                Block…
+              <button onClick={() => setPicker("block")} title={btnTitle} className={BTN}>
+                {L.blockOpen}
               </button>
             </>
           )}
@@ -146,7 +160,7 @@ export function TaskReferenceRowView({
                 ))}
               </select>
               <button onClick={() => { actions.onSkip(skipReason || undefined); setPicker(null); }} className={BTN}>
-                Skip
+                {L.skip}
               </button>
               <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
                 Cancel
@@ -170,7 +184,7 @@ export function TaskReferenceRowView({
                 ))}
               </datalist>
               <button onClick={() => { actions.onBlock(blockReason || undefined); setPicker(null); setBlockReason(""); }} className={BTN}>
-                Block
+                {L.block}
               </button>
               <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
                 Cancel
@@ -178,27 +192,27 @@ export function TaskReferenceRowView({
             </>
           )}
           {execution.kind === "completed" && (
-            <button onClick={actions.onReopen} className={BTN}>
-              Reopen
+            <button onClick={actions.onReopen} title={btnTitle} className={BTN}>
+              {L.reopen}
             </button>
           )}
           {execution.kind === "skipped" && (
             <>
-              <button onClick={actions.onReactivateSkip} className={BTN}>
-                Reactivate
+              <button onClick={actions.onReactivateSkip} title={btnTitle} className={BTN}>
+                {L.reactivate}
               </button>
-              <button onClick={actions.onComplete} className={BTN}>
-                Mark completed
+              <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
+                {L.complete}
               </button>
             </>
           )}
           {execution.kind === "blocked" && (
             <>
-              <button onClick={actions.onUnblock} className={BTN}>
-                Unblock
+              <button onClick={actions.onUnblock} title={btnTitle} className={BTN}>
+                {L.unblock}
               </button>
-              <button onClick={actions.onComplete} className={BTN}>
-                Mark completed
+              <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
+                {L.complete}
               </button>
             </>
           )}
@@ -233,6 +247,7 @@ export function TaskReferenceRow({
   readOnly = false,
   showTitle = true,
   caption,
+  ticketScoped,
   as,
 }: {
   workItem?: Pick<WorkItem, "key" | "sourceUrl" | "title" | "status" | "jiraStatusName" | "firstSeenAt">;
@@ -244,6 +259,7 @@ export function TaskReferenceRow({
   readOnly?: boolean;
   showTitle?: boolean;
   caption?: string;
+  ticketScoped?: boolean;
   as?: "li" | "div";
 }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
@@ -260,6 +276,7 @@ export function TaskReferenceRow({
       reactivation={reactivation}
       actions={readOnly ? undefined : storeActionsFor(key)}
       caption={caption}
+      ticketScoped={ticketScoped}
       as={as}
     />
   );

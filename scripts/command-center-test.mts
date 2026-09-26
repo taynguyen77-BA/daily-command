@@ -10294,7 +10294,11 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   const html = (el: React.ReactElement) => renderToStaticMarkup(el);
   const hasRow = (markup: string) => markup.includes(href) && markup.includes('data-task-row="PAGE-42"') && markup.includes("Mark completed") && markup.includes("Skip…") && markup.includes("Block…");
 
-  ok(group, hasRow(html(React.createElement(PlanCandidateRow, { candidate: { id: "plan-x", title: "PAGE-42 — Checkout totals wrong", estimateMinutes: 15, priorityScore: 70, reason: "Overdue", item: ticket } }))), "Action Plan: a ticket-backed candidate renders TaskReferenceRow with the ticket's Jira URL and Complete/Skip/Block");
+  const planHtml = html(React.createElement(PlanCandidateRow, { candidate: { id: "plan-x", title: "PAGE-42 — Checkout totals wrong", estimateMinutes: 15, priorityScore: 70, reason: "Overdue", item: ticket } }));
+  ok(group, planHtml.includes(href) && planHtml.includes('data-task-row="PAGE-42"') && ["Complete ticket", "Skip ticket…", "Block ticket…"].every((l) => planHtml.includes(`>${l}<`)), "Action Plan: a ticket-backed candidate renders TaskReferenceRow with the ticket's Jira URL and 'Complete ticket / Skip ticket… / Block ticket…'");
+  ok(group, ["Complete action", "Defer action", "Snooze action", "Mark action blocked"].every((l) => planHtml.includes(`>${l}<`)), "Action Plan: the action-level cluster is labeled '… action', so the two clusters are never confusable");
+  ok(group, !/>Mark completed<|>Complete<|>Mark blocked<|>Block…</.test(planHtml), "Action Plan: no unqualified 'Complete'/'Mark completed'/'Mark blocked'/'Block…' label remains on the card");
+  ok(group, hasRow(html(React.createElement(TaskReferenceRowView, { ticketKey: "PAGE-42", url: "https://jira.example.com/browse/PAGE-42", execution: { kind: "active" }, actions: { onComplete() {}, onSkip() {}, onBlock() {}, onReopen() {}, onReactivateSkip() {}, onUnblock() {} } }))), "other pages keep the plain labels (Mark completed / Skip… / Block…) — ticketScoped is opt-in");
   const actionOnly = html(React.createElement(PlanCandidateRow, { candidate: { id: "a-1", title: "Call the vendor", estimateMinutes: 15, priorityScore: 55, reason: "Follow-up" } }));
   ok(group, actionOnly.includes("Call the vendor") && !actionOnly.includes("data-task-row"), "Action Plan: a candidate with no ticket keeps its plain title — no invented ticket row");
 
