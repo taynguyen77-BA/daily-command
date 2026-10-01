@@ -29,7 +29,8 @@ import type {
 } from "./types";
 import type { WhyShouldICareContent } from "./why-should-i-care";
 import { deriveDontForget } from "./personal-focus";
-import { computeReleaseHealth } from "./release-health";
+import { isInRelease, selectReleaseHealth } from "./release-health";
+import type { WorkRelevanceIndex } from "./jira/work-relevance";
 
 const NO_UNKNOWN_TEXT = "No owner/deadline is available in the source data.";
 
@@ -102,7 +103,10 @@ export function rebuildDraftFromSourceRef(
   derived: DerivedData,
   proactive: ProactiveIntelligence,
   personalFocus: PersonalFocusResult | null,
-  today: string
+  today: string,
+  // B5 — additive: the same Work Relevance index every other surface uses, so a rebuilt
+  // release update shows the same % as the panel.
+  workRelevanceIndex?: WorkRelevanceIndex
 ): ArtifactDraft | null {
   if (!sourceRef) return null;
   switch (sourceRef.type) {
@@ -116,8 +120,8 @@ export function rebuildDraftFromSourceRef(
       return buildStakeholderUpdateDraft({ kind: "attention", item }, sourceContext);
     }
     case "release": {
-      if (!data.workItems.some((w) => w.fixVersion === sourceRef.fixVersion)) return null;
-      const release = computeReleaseHealth(data, sourceRef.fixVersion, today);
+      if (!data.workItems.some((w) => isInRelease(w, sourceRef.fixVersion))) return null;
+      const release = selectReleaseHealth(data, sourceRef.fixVersion, today, workRelevanceIndex);
       return buildReleaseUpdateDraft(release, data, sourceContext);
     }
     default:
@@ -298,7 +302,7 @@ export function buildStakeholderUpdateDraft(source: StakeholderUpdateSource, sou
 
 export function buildReleaseUpdateDraft(release: ReleaseHealth, data: CommandCenterData, sourceContext = "Release Health"): ArtifactDraft {
   const evidence: Evidence[] = [];
-  const releaseItemIds = new Set(data.workItems.filter((w) => w.fixVersion === release.fixVersion).map((w) => w.id));
+  const releaseItemIds = new Set(data.workItems.filter((w) => isInRelease(w, release.fixVersion)).map((w) => w.id));
 
   const openDeps = data.dependencies.filter((d) => d.status === "unresolved" && releaseItemIds.has(d.workItemId));
   const openDepsSegs =
@@ -326,6 +330,8 @@ export function buildReleaseUpdateDraft(release: ReleaseHealth, data: CommandCen
     // heuristic score, never a probability — "/100" matches the honest framing already used
     // elsewhere (ExecutiveView.tsx).
     section("Confidence", [seg("CALCULATED", `${release.deliveryConfidence}/100`)]),
+    // B5 — the same completion % the Release Health panel and Ask show (one selector).
+    section("Completion", [seg("CALCULATED", `${release.completionPct}% (${release.completedItems}/${release.totalItems} done in Jira${release.excludedItems ? `, ${release.excludedItems} excluded from scope` : ""})`)]),
     section("Readiness", [seg("CALCULATED", release.readiness.replace(/_/g, " "))]),
     section("Key blockers", blockerSegs),
     section("Open dependencies", openDepsSegs),

@@ -219,6 +219,13 @@ import { closePausedTicketsFinishedInJira, formatExecutionRecord, formatPausedAg
 import { PlanCandidateRow } from "../src/components/command-center/PlanCandidateRow";
 import { buildDailyReview, newReasonLabel } from "../src/lib/command-center/daily-review";
 import { createMemoryStateStorage, createStateChannelHub, readRevFromRaw, rebaseState, serializeWithRev } from "../src/lib/command-center/state-persistence";
+import { buildDailyReportView, buildWeeklyReportView, renderDailyReport, renderWeeklyReport, type DailyReportView, type StandupState } from "../src/lib/command-center/reports";
+import { selectAllReleaseHealth, selectReleaseHealth, renderReleaseUpdate } from "../src/lib/command-center/release-health";
+import { ReleaseHealthPanel } from "../src/components/command-center/ReleaseHealthPanel";
+import { parseSprintFieldValue } from "../src/lib/command-center/jira/normalize";
+import { DEFAULT_WORK_RELEVANCE_POLICY_MAP } from "../src/lib/command-center/jira/work-relevance";
+import type { ArtifactDraft } from "../src/lib/command-center/types";
+import { isValidCustomFieldId } from "../src/lib/command-center/jira/http";
 import { applyDailyCommandChange, emptyTombstones, mergeDailyCommandState, TOMBSTONE_RETENTION_DAYS, type DailyCommandState } from "../src/lib/command-center/execution-state-merge";
 import { RiskCard } from "../src/components/command-center/RiskCard";
 import { DecisionCard } from "../src/components/command-center/DecisionCard";
@@ -4847,8 +4854,8 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   const releaseDraft = buildReleaseUpdateDraft(release, v22Data, "Release Health");
   ok(
     "V2.2 Release Update",
-    releaseDraft.sections.map((s) => s.heading).join(",") === "Release,Confidence,Readiness,Key blockers,Open dependencies,Decisions,Next actions",
-    "the Release Update has exactly the §4.3 section headings"
+    releaseDraft.sections.map((s) => s.heading).join(",") === "Release,Confidence,Completion,Readiness,Key blockers,Open dependencies,Decisions,Next actions",
+    "the Release Update has exactly the §4.3 section headings (+ B5's Completion, the one release number)"
   );
   ok("V2.2 Release Update", releaseDraft.sections.find((s) => s.heading === "Release")?.segments[0].text === "R-2026.1", "the Release section names the exact fix version");
   const openDepsText = releaseDraft.sections.find((s) => s.heading === "Open dependencies")!.segments.map((s) => s.text).join(" ");
@@ -10675,7 +10682,7 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
     ok(group, "OLD" in t.getSnapshot().dailyCommandCompletions, "a pre-A2 blob (no stateRev) hydrates normally");
     t.completeTicketInDailyCommand("NEW");
     const st = storedState(storage);
-    ok(group, "OLD" in st.dailyCommandCompletions && "NEW" in st.dailyCommandCompletions && readRevFromRaw(storage.raw()) === 1, "the first write over it keeps everything and starts the rev at 1");
+    ok(group, "OLD" in st.dailyCommandCompletions && "NEW" in st.dailyCommandCompletions && readRevFromRaw(storage.raw()) >= 1, "the first writes over it keep everything and start the rev counting up from 0");
   }
 
   // Wiring: the browser defaults.
@@ -10894,6 +10901,240 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
     "2026-09-02"
   );
   ok(group, pure.closedKeys.length === 0 && "P" in pure.state.dailyCommandSkips, "an open ticket is never moved");
+}
+
+
+// ===== B1–B5 — reports that are usable as-is, and one release number everywhere =====
+{
+  const group = "B Reports & release truth";
+  const noUndefined = (s: string) => !/undefined|null|NaN|\[object Object\]/.test(s);
+  const tay = { accountId: "acc-tay", displayName: "Tay" };
+  const iso = () => ({ stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
+
+  // ---------- B1: ticket-level actions reach the report ----------
+  {
+    const { store, setJira } = v226ConfiguredStore(iso());
+    setJira(["R-X", "R-Y", "R-Z", "R-W"].map((k) => v226Actionable(k)));
+    await store.syncJira();
+    store.completeTicketInDailyCommand("R-X");
+    store.skipTicketInDailyCommand("R-Y", "Not my action");
+    store.blockTicketInDailyCommand("R-Z", "Waiting on Anna's API answer");
+    const st = store.getSnapshot();
+    const kinds = st.memoryEvents.filter((e) => e.kind.startsWith("TICKET_")).map((e) => `${e.kind}:${e.ticketKey}`);
+    ok(group, kinds.join(",") === "TICKET_COMPLETED:R-X,TICKET_SKIPPED:R-Y,TICKET_BLOCKED:R-Z", `complete/skip/block each emit a MemoryEvent (got ${kinds.join(",")})`);
+    const skipEv = st.memoryEvents.find((e) => e.kind === "TICKET_SKIPPED")!;
+    ok(group, skipEv.reason === "Not my action" && skipEv.ticketTitle === "Ticket R-Y" && skipEv.projectName === "V226 Project" && skipEv.ticketUrl === "https://jira.example.com/browse/R-Y" && skipEv.assigneeId === "acc-tay", "events capture reason, title, project, link and assignee at that moment");
+    store.unblockTicketInDailyCommand("R-Z");
+    store.blockTicketInDailyCommand("R-Z", "Waiting on Anna's API answer");
+    store.skipTicketInDailyCommand("R-W");
+    store.reactivateSkippedTicket("R-W");
+    ok(group, ["TICKET_UNBLOCKED", "TICKET_REACTIVATED"].every((k) => store.getSnapshot().memoryEvents.some((e) => e.kind === k)), "unblock and reactivate are recorded too");
+
+    const snap = store.generateDailyReport(getTodayIso(), true);
+    ok(group, !!snap.standup && snap.events.some((e) => e.kind === "TICKET_COMPLETED"), "today's generated report freezes both the ticket events and the standup state");
+    const view = buildDailyReportView(snap, getTodayIso(), tay);
+    ok(group, view.doneMine.some((t) => t.key === "R-X" && (t.notes ?? []).includes("via Daily Command")), "Mark completed (button) → listed in that day's Done (mine), labelled 'via Daily Command'");
+    ok(group, view.skipped.some((t) => t.key === "R-Y" && t.notes?.[0] === "Not my action") && view.blocked.some((t) => t.key === "R-Z" && t.notes?.[0] === "Waiting on Anna's API answer" && t.ageBusinessDays === 0), "skipped / blocked tickets are listed with their reasons (and age)");
+    ok(group, !view.inProgress.some((t) => ["R-X", "R-Y", "R-Z"].includes(t.key ?? "")) && view.inProgress.some((t) => t.key === "R-W"), "In progress lists only still-active assigned work");
+    const fromEventsOnly = buildDailyReportView({ ...snap, standup: undefined }, getTodayIso(), tay);
+    ok(group, !fromEventsOnly.standupAvailable && fromEventsOnly.skipped.some((t) => t.key === "R-Y" && t.notes?.[0] === "Not my action") && fromEventsOnly.blocked.some((t) => t.key === "R-Z") && !fromEventsOnly.skipped.some((t) => t.key === "R-W"), "a day without a standup snapshot still lists that day's skips/blocks from events (a reactivated skip is not listed)");
+    // Reopen the same day → no longer Done.
+    store.reopenTicketInDailyCommand("R-X");
+    const reopened = buildDailyReportView(store.generateDailyReport(getTodayIso(), true), getTodayIso(), tay);
+    ok(group, !reopened.doneMine.some((t) => t.key === "R-X"), "completed then reopened the same day → not listed as Done");
+  }
+  // De-duplication: Action completion + ticket button, same day, same ticket.
+  {
+    const ev = (kind: MemoryEvent["kind"], extra: Partial<MemoryEvent> = {}): MemoryEvent => ({ id: `${kind}-${Math.random()}`, date: "2026-10-01", kind, title: kind, impact: "", evidence: [], ...extra });
+    const snap: DailyReportSnapshot = { date: "2026-10-01", generatedAt: "2026-10-01T18:00:00.000Z", events: [ev("ACTION_COMPLETED", { title: "Action completed: chase API", ticketKey: "D-1", projectName: "Pay" }), ev("TICKET_COMPLETED", { ticketKey: "D-1", ticketTitle: "Login fix", ticketUrl: "https://j/D-1", projectName: "Pay" }), ev("ACTION_COMPLETED", { title: "Action completed: send recap" })] };
+    const v = buildDailyReportView(snap, "2026-10-01", tay);
+    ok(group, v.doneMine.filter((t) => t.key === "D-1").length === 1 && v.doneMine.find((t) => t.key === "D-1")?.title === "Login fix", "a ticket completed via an Action AND via the ticket button the same day is listed once (with the ticket's title)");
+    ok(group, v.doneMine.some((t) => !t.key && t.title === "Action completed: send recap"), "an Action with no ticket is still listed");
+  }
+
+  // ---------- B2: Jira completion accuracy ----------
+  {
+    const { store, setJira } = v226ConfiguredStore(iso());
+    store.setJiraStatusRelevance("Parked", "EXCLUDED");
+    const base = [v226Actionable("J-MINE"), v226Actionable("J-TEAM", { owner: "Bob", ownerId: "acc-bob" }), v226Actionable("J-EXCL"), v226Actionable("J-SAT"), v226Actionable("J-NORES")];
+    setJira(base);
+    await store.syncJira();
+    await v226Tick();
+    const saturday = new Date(2026, 8, 26, 15, 30).toISOString(); // Sat Sep 26 2026, local
+    setJira([
+      v226Actionable("J-MINE", { status: "Done", jiraStatusName: "Done", resolvedAt: new Date().toISOString() }),
+      v226Actionable("J-TEAM", { owner: "Bob", ownerId: "acc-bob", status: "Done", jiraStatusName: "Done", resolvedAt: new Date().toISOString() }),
+      v226Actionable("J-EXCL", { jiraStatusName: "Parked" }),
+      v226Actionable("J-SAT", { status: "Done", jiraStatusName: "Done", resolvedAt: saturday }),
+      v226Actionable("J-NORES", { status: "Done", jiraStatusName: "Done" }),
+    ]);
+    await store.syncJira();
+    const st = store.getSnapshot();
+    const evOf = (key: string) => st.memoryEvents.filter((e) => e.ticketKey === key && e.kind.startsWith("JIRA_"));
+    ok(group, evOf("J-EXCL").length === 1 && evOf("J-EXCL")[0].kind === "JIRA_REMOVED_FROM_SCOPE", "a ticket moved to an EXCLUDED status → a 'Removed from scope' event, never JIRA_STATUS_COMPLETED");
+    ok(group, evOf("J-SAT")[0]?.date === "2026-09-26" && evOf("J-SAT")[0].datedBy === "resolution" && !!st.dailyReports["2026-09-26"]?.events.some((e) => e.ticketKey === "J-SAT"), "resolved Saturday, synced today → the event is dated Saturday and lands in Saturday's report");
+    ok(group, evOf("J-NORES")[0]?.date === getTodayIso() && evOf("J-NORES")[0].datedBy === "detection", "no resolutiondate → dated by the detection day, marked as detected");
+    ok(group, evOf("J-TEAM")[0]?.assigneeId === "acc-bob" && evOf("J-MINE")[0]?.assigneeId === "acc-tay", "the assignee is stored on the event");
+    const view = buildDailyReportView(store.generateDailyReport(getTodayIso(), true), getTodayIso(), tay);
+    ok(group, view.doneMine.some((t) => t.key === "J-MINE" && t.notes?.[0] === "in Jira") && !view.teamDone.some((t) => t.key === "J-MINE"), "my ticket closed in Jira → Done (mine), labelled 'in Jira'");
+    ok(group, view.teamDone.some((t) => t.key === "J-TEAM" && t.assignee === "Bob") && !view.doneMine.some((t) => t.key === "J-TEAM"), "a teammate's ticket closed in Jira → only in the Team section");
+    ok(group, !view.doneMine.some((t) => t.key === "J-EXCL") && !view.teamDone.some((t) => t.key === "J-EXCL") && view.removedFromScope.some((t) => t.key === "J-EXCL"), "the EXCLUDED ticket is not Done anywhere — it is listed under 'Removed from scope'");
+    ok(group, view.doneMine.find((t) => t.key === "J-NORES")?.notes?.[0] === `in Jira (detected ${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][new Date().getMonth()]} ${new Date().getDate()})`, "a detection-dated completion says 'detected <date>'");
+    const md = renderDailyReport(view, "markdown", { includeTeam: false });
+    ok(group, !md.includes("J-TEAM") && renderDailyReport(view, "markdown").includes("J-TEAM"), "the Team section is optional in exports");
+    // Jira fields.
+    const httpSrc = fs.readFileSync(path.join(process.cwd(), "src/lib/command-center/jira/http.ts"), "utf8");
+    ok(group, /resolutiondate,statuscategorychangedate/.test(httpSrc), "ISSUE_FIELDS requests resolutiondate and statuscategorychangedate");
+    const issue = jiraIssueSchema.parse({ id: "1", key: "N-1", fields: { summary: "S", status: { name: "Done", statusCategory: { key: "done" } }, project: { key: "N" }, fixVersions: [{ name: "1.0" }, { name: "1.1" }], resolutiondate: "2026-09-26T10:00:00.000+0000", customfield_10020: [{ name: "Sprint 6", state: "closed" }, { name: "Sprint 7", state: "active" }] } });
+    const n = normalizeIssue(issue, { today: "2026-10-01", sprintFieldId: "customfield_10020" }).workItem;
+    ok(group, n.resolvedAt === "2026-09-26T10:00:00.000+0000" && JSON.stringify(n.fixVersions) === '["1.0","1.1"]' && n.fixVersion === "1.0" && n.sprint === "Sprint 7", "normalize keeps resolutiondate, every fix version (first still in fixVersion) and the ACTIVE sprint from the configured field");
+    ok(group, parseSprintFieldValue(["com.atlassian.greenhopper.service.sprint.Sprint@1[id=3,rapidViewId=1,state=CLOSED,name=Sprint 2,startDate=x]"]) === "Sprint 2" && parseSprintFieldValue("junk") === undefined, "the older Server/DC string sprint format is parsed too; junk is ignored");
+    ok(group, normalizeIssue(issue, { today: "2026-10-01" }).workItem.sprint === undefined, "no sprint field configured → no sprint (never guessed)");
+    ok(group, isValidCustomFieldId("customfield_10020") && !isValidCustomFieldId("summary") && !isValidCustomFieldId("customfield_1; drop"), "only customfield_<digits> ids are ever sent to Jira");
+    ok(group, store.setJiraSprintFieldId("customfield_10020") && store.getSnapshot().jiraSprintFieldId === "customfield_10020" && !store.setJiraSprintFieldId("Sprint") && store.getSnapshot().jiraSprintFieldId === "customfield_10020", "Data & Settings stores a valid sprint field id and refuses anything else");
+  }
+
+  // ---------- B3: export snapshots ----------
+  const sampleDaily: DailyReportView = {
+    date: "2026-10-01",
+    doneMine: [{ key: "PAY-1", title: "Fix *login* <bug>", url: "https://jira.example.com/browse/PAY-1", project: "Payments", notes: ["via Daily Command", "in Jira"] }, { title: "Action completed: send recap", notes: ["via Daily Command"] }],
+    inProgress: [{ key: "PAY-2", title: "Refund flow", url: "https://jira.example.com/browse/PAY-2", project: "Payments", notes: ["planned today"] }],
+    blocked: [{ key: "PAY-3", title: "Card vault", project: "Payments", notes: ["Waiting on Anna"], ageBusinessDays: 6, waitsOn: ["Platform: API keys"], revisitOn: "2026-10-05" }],
+    skipped: [{ key: "OPS-4", title: "Infra cleanup", url: "https://jira.example.com/browse/OPS-4", project: "Ops", notes: ["Team is handling it"], ageBusinessDays: 1 }],
+    newToday: [{ key: "PAY-5", title: "New fraud rule", url: "https://jira.example.com/browse/PAY-5", project: "Payments", notes: ["Assigned to you"] }],
+    mentionsAwaitingReply: [],
+    teamDone: [{ key: "PAY-9", title: "Docs", url: "https://jira.example.com/browse/PAY-9", project: "Payments", assignee: "Bob", notes: ["in Jira"] }],
+    removedFromScope: [],
+    decisions: [],
+    standupAvailable: true,
+    identityConfigured: true,
+  };
+  const expectedMd = [
+    "# Daily Report — 2026-10-01",
+    "",
+    "## Done (2)",
+    "- [PAY-1](https://jira.example.com/browse/PAY-1) Fix \\*login\\* <bug> — Payments · via Daily Command · in Jira",
+    "- Action completed: send recap · via Daily Command",
+    "",
+    "## In progress / planned today (1)",
+    "- [PAY-2](https://jira.example.com/browse/PAY-2) Refund flow — Payments · planned today",
+    "",
+    "## Blocked (1)",
+    "- **PAY-3** Card vault — Payments · 6 business days · Waiting on Anna · waits on Platform: API keys · re-check Oct 5",
+    "",
+    "## Skipped (1)",
+    "- [OPS-4](https://jira.example.com/browse/OPS-4) Infra cleanup — Ops · 1 business day · Team is handling it",
+    "",
+    "## New today (1)",
+    "- [PAY-5](https://jira.example.com/browse/PAY-5) New fraud rule — Payments · Assigned to you",
+    "",
+    "## Mentions awaiting my reply (0)",
+    "- None.",
+    "",
+    "## Team: done (1)",
+    "- [PAY-9](https://jira.example.com/browse/PAY-9) Docs — Payments · Bob · in Jira",
+  ].join("\n");
+  const md = renderDailyReport(sampleDaily, "markdown");
+  ok(group, md === expectedMd, `daily Markdown export matches its snapshot${md === expectedMd ? "" : `\n--- got ---\n${md}`}`);
+  const slack = renderDailyReport(sampleDaily, "slack");
+  const expectedSlackStart = ["*Daily Report — 2026-10-01*", "", "*Done (2)*", "• <https://jira.example.com/browse/PAY-1|PAY-1> Fix *login* &lt;bug&gt; — Payments · via Daily Command · in Jira", "• Action completed: send recap · via Daily Command", ""].join("\n");
+  ok(group, slack.startsWith(expectedSlackStart) && slack.includes("• *PAY-3* Card vault — Payments · 6 business days") && !/^#/m.test(slack) && !/\]\(/.test(slack), `daily Slack export uses mrkdwn (*bold*, <url|KEY>, •, &lt;/&gt; escaping), never Markdown headings/links${slack.startsWith(expectedSlackStart) ? "" : `\n--- got ---\n${slack}`}`);
+  const text = renderDailyReport(sampleDaily, "text", { includeTeam: false });
+  ok(group, text.startsWith("DAILY REPORT — 2026-10-01\n\nDone (2)\n- PAY-1 Fix *login* <bug> — Payments · via Daily Command · in Jira (https://jira.example.com/browse/PAY-1)") && !text.includes("PAY-9"), `daily plain-text export snapshot (links in parentheses; team omitted when asked)${text.startsWith("DAILY REPORT") ? "" : `\n${text}`}`);
+  ok(group, [md, slack, text].every(noUndefined), "no 'undefined'/'null'/'NaN' in any daily export");
+  const sparse = renderDailyReport({ ...sampleDaily, doneMine: [{ key: "X-1" }, {}], standupAvailable: false }, "markdown");
+  ok(group, noUndefined(sparse) && sparse.includes("- **X-1**") && sparse.includes("No standup snapshot"), "tickets with missing title/link/project still render cleanly");
+
+  // ---------- B4: weekly ----------
+  {
+    const day = (date: string, events: MemoryEvent[], standup?: StandupState): DailyReportSnapshot => ({ date, generatedAt: `${date}T18:00:00.000Z`, events, ...(standup ? { standup } : {}) });
+    const ev = (date: string, kind: MemoryEvent["kind"], extra: Partial<MemoryEvent>): MemoryEvent => ({ id: `${date}-${kind}-${extra.ticketKey}`, date, kind, title: kind, impact: "", evidence: [], ...extra });
+    const standup = (extra: Partial<StandupState> = {}): StandupState => ({ asOf: "x", inProgress: [], blocked: [], skipped: [], newToday: [], mentionsAwaitingReply: [], openAssigned: [], ...extra });
+    const reports: Record<string, DailyReportSnapshot> = {
+      "2026-09-28": day("2026-09-28", [ev("2026-09-28", "TICKET_COMPLETED", { ticketKey: "W-1", ticketTitle: "One", projectName: "Pay", sprint: "S7" }), ev("2026-09-28", "DECISION_MADE", { title: "Go with vendor A" })], standup({ newToday: [{ key: "W-9", title: "Fresh", notes: ["New ticket"] }] })),
+      "2026-09-30": day("2026-09-30", [ev("2026-09-30", "JIRA_STATUS_COMPLETED", { ticketKey: "W-2", ticketTitle: "Two", projectName: "Ops", assigneeId: "acc-tay", sprint: "S7" }), ev("2026-09-30", "JIRA_STATUS_COMPLETED", { ticketKey: "W-3", ticketTitle: "Three", projectName: "Ops", assigneeId: "acc-bob", assigneeName: "Bob" })]),
+      "2026-10-02": day(
+        "2026-10-02",
+        [ev("2026-10-02", "TICKET_COMPLETED", { ticketKey: "W-4", ticketTitle: "Four", projectName: "Pay", sprint: "S8" })],
+        standup({
+          inProgress: [{ key: "OLD-1", title: "Old one", since: "2026-09-10T09:00:00.000Z" }, { key: "NEW-1", title: "New one", since: "2026-09-29T09:00:00.000Z" }],
+          blocked: [{ key: "BL-1", title: "Blocked", notes: ["Waiting on Anna"], ageBusinessDays: 4, since: "2026-09-01T09:00:00.000Z", revisitOn: "2026-10-06" }],
+          skipped: [{ key: "SK-1", title: "Skipped", notes: ["Not my action"] }],
+          openAssigned: [{ key: "OLD-1", title: "Old one" }, { key: "NEW-1", title: "New one" }],
+        })
+      ),
+      "2026-10-03": day("2026-10-03", []), // Saturday report — fine, never required
+    };
+    const w = buildWeeklyReportView({ weekStart: "2026-09-30", dailyReports: reports, identity: tay, today: "2026-10-04" });
+    ok(group, JSON.stringify(buildWeeklyReportView({ weekStart: "2026-09-28", dailyReports: {}, identity: tay, today: "2026-09-29" }).missingDays) === '["2026-09-28","2026-09-29"]', "days that haven't happened yet are never reported as missing");
+    ok(group, w.weekStart === "2026-09-28" && w.weekEnd === "2026-10-02" && JSON.stringify(w.missingDays) === '["2026-09-29","2026-10-01"]', "Mon–Fri week from any day in it; only missing WEEKDAYS are gaps");
+    const cal = buildWeeklyReportView({ weekStart: "2026-09-28", mode: "calendar", dailyReports: reports, identity: tay, today: "2026-10-04" });
+    ok(group, cal.weekEnd === "2026-10-04" && !cal.missingDays.includes("2026-10-04") && !cal.missingDays.includes("2026-10-03"), "calendar mode covers 7 days, and a weekend day without a report is never a gap");
+    ok(group, JSON.stringify(w.doneGroups.map((g) => [g.name, g.tickets.map((t) => t.key)])) === '[["Pay",["W-1","W-4"]],["Ops",["W-2"]]]', "done work is grouped per project as ticket lists, not just counts");
+    ok(group, w.teamDone.map((t) => t.key).join(",") === "W-3" && w.totals.doneMine === 3 && w.totals.teamDone === 1, "team work stays in its own list");
+    ok(group, w.carriedOver.map((t) => t.key).join(",") === "OLD-1,BL-1", "carried over = still open at week end and first seen before the week");
+    ok(group, w.blockers[0]?.ageBusinessDays === 4 && w.skipped[0]?.notes?.[0] === "Not my action" && w.stateAsOf === "2026-10-02", "blockers with age and skipped with reason, as of the latest day with standup state");
+    ok(group, w.newReceived.map((t) => t.key).join(",") === "W-9" && w.decisions.join() === "Go with vendor A", "new received this week, and decisions");
+    ok(group, w.nextWeek.map((t) => t.key).join(",") === "OLD-1,NEW-1,BL-1", "next week = open assigned + tickets whose re-check falls next week");
+    const bySprint = buildWeeklyReportView({ weekStart: "2026-09-28", groupBy: "sprint", dailyReports: reports, identity: tay, today: "2026-10-04" });
+    ok(group, JSON.stringify(bySprint.doneGroups.map((g) => [g.name, g.tickets.length])) === '[["S7",2],["S8",1]]', "group by sprint");
+    for (const format of ["markdown", "slack", "text"] as const) {
+      const out = renderWeeklyReport(w, format);
+      ok(group, noUndefined(out) && out.includes("W-1") && out.includes("Waiting on Anna") && out.includes("missing: 2026-09-29, 2026-10-01"), `weekly ${format} export lists tickets, reasons and gaps, with no 'undefined'`);
+    }
+    ok(group, renderWeeklyReport(w, "markdown").split("\n").slice(0, 4).join("\n") === "# Weekly Report — 2026-09-28 to 2026-10-02\n\n## Totals\n- Done (mine): 3", "weekly Markdown header snapshot");
+    ok(group, !renderWeeklyReport(w, "slack", { includeTeam: false }).includes("W-3"), "team section optional in the weekly export too");
+  }
+
+  // ---------- B5: one release number everywhere ----------
+  {
+    const items: WorkItem[] = [
+      makeItem({ id: "rel-1", key: "REL-1", fixVersion: "2.0", status: "Done", jiraStatusName: "Done", sourceType: "jira", projectId: "jira-project-REL" }),
+      makeItem({ id: "rel-2", key: "REL-2", fixVersion: "2.0", status: "In Progress", jiraStatusName: "Ready for UAT", sourceType: "jira", projectId: "jira-project-REL" }),
+      makeItem({ id: "rel-3", key: "REL-3", fixVersion: "2.0", status: "In Progress", jiraStatusName: "In Progress", sourceType: "jira", projectId: "jira-project-REL", owner: "Tay", blocked: true, blockerReason: "Flagged in Jira" }),
+      makeItem({ id: "rel-4", key: "REL-4", fixVersion: "2.0", status: "In Progress", jiraStatusName: "Parked", sourceType: "jira", projectId: "jira-project-REL" }),
+      makeItem({ id: "rel-5", key: "REL-5", fixVersion: "2.0", fixVersions: ["2.0", "2.1"], status: "To Do", jiraStatusName: "To Do", sourceType: "jira", projectId: "jira-project-REL" }),
+    ];
+    const relData = { ...emptyData(), workItems: items };
+    const index = buildWorkRelevanceIndex({ ...DEFAULT_WORK_RELEVANCE_POLICY_MAP, "Ready for UAT": "COMPLETED", Parked: "EXCLUDED" });
+    const truth = selectReleaseHealth(relData, "2.0", TODAY, index);
+    ok(group, truth.totalItems === 4 && truth.completedItems === 2 && truth.completionPct === 50 && truth.excludedItems === 1, "release truth = Done + COMPLETED (2 of 4); the EXCLUDED item leaves the denominator");
+    const dcIds = new Set(["rel-3"]);
+    ok(group, computeReleaseHealth(relData, "2.0", TODAY, index, dcIds).completionPct === truth.completionPct && selectAllReleaseHealth(relData, TODAY, index).find((r) => r.fixVersion === "2.0")!.completionPct === 50, "personally 'completing' an open release ticket does not change the release %");
+    ok(group, selectReleaseHealth(relData, "2.1", TODAY, index).totalItems === 1 && selectAllReleaseHealth(relData, TODAY, index).some((r) => r.fixVersion === "2.1"), "an item with several fix versions counts in each of them");
+    ok(group, JSON.stringify(truth.remainingByStatus?.map((g) => [g.status, g.items.map((i) => i.key)])) === '[["In Progress",["REL-3"]],["To Do",["REL-5"]]]' && truth.blockers?.[0]?.key === "REL-3" && truth.blockers[0].assignee === "Tay", "remaining open items are grouped by status with assignee; blockers listed");
+    // Every surface, same %.
+    const panel = renderToStaticMarkup(React.createElement(ReleaseHealthPanel, { data: relData, today: TODAY, workRelevanceIndex: index, dailyCommandCompletedWorkItemIds: dcIds }));
+    const askFacts = answerFromRoute({ intent: "release-risk", target: "2.0" }, relData, deriveData(relData, null, TODAY), TODAY, "jira", undefined, undefined, undefined, index, {}, dcIds).facts;
+    const pctOf = (draft: ArtifactDraft | null) => draft?.sections.find((s) => s.heading === "Completion")?.segments[0]?.text;
+    const commandBarDraft = buildReleaseUpdateDraft(selectReleaseHealth(relData, "2.0", TODAY, index), relData);
+    const rebuilt = rebuildDraftFromSourceRef({ type: "release", fixVersion: "2.0" }, "Release Health", relData, deriveData(relData, null, TODAY), {} as never, null, TODAY, index);
+    const exported = renderReleaseUpdate(truth, "markdown");
+    const seen = [panel.includes("Completion: 50%"), askFacts.includes("Completion: 50%"), pctOf(commandBarDraft)?.startsWith("50%"), pctOf(rebuilt)?.startsWith("50%"), exported.includes("Completion: 50%")];
+    ok(group, seen.every(Boolean), `Panel, Ask, CommandBar draft, rebuilt release update draft and the release export all show 50% for 2.0 (${seen.join(",")})`);
+    const sources = ["src/components/command-center/CommandBar.tsx", "src/components/command-center/ReleaseHealthPanel.tsx", "src/lib/command-center/communicate.ts", "src/lib/command-center/query-router.ts", "src/lib/command-center/proactive.ts", "src/lib/command-center/release-drift.ts", "src/lib/command-center/store.ts"].map((f) => fs.readFileSync(path.join(process.cwd(), f), "utf8"));
+    ok(group, sources.every((s) => !/computeReleaseHealth\(|computeAllReleaseHealth\(/.test(s)) && /<ReleaseHealthPanel data=\{filteredData\} today=\{today\} workRelevanceIndex=\{workRelevanceIndex\} \/>/.test(fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8")), "every caller goes through selectReleaseHealth / selectAllReleaseHealth, and the dashboard panel gets the Work Relevance index");
+    // Drift scope added/removed.
+    const prevSnap = { date: "2026-09-30", workItems: items.filter((w) => w.key !== "REL-5").concat([makeItem({ id: "rel-6", key: "REL-6", fixVersion: "2.0" })]), risks: [], requirements: [], dependencies: [], projects: [] };
+    const drift = computeReleaseDrift([truth], prevSnap, TODAY, index, items).find((d) => d.fixVersion === "2.0");
+    ok(group, JSON.stringify(drift?.scopeAdded) === '["REL-5"]' && JSON.stringify(drift?.scopeRemoved) === '["REL-6"]', "release drift lists tickets added to / removed from the release since the last snapshot");
+    const slackRel = renderReleaseUpdate(truth, "slack", drift);
+    const expectedRelSlack = [
+      "*Release update — 2.0*",
+      "",
+      "• Completion: 50% (2/4 done in Jira) · 1 excluded from scope",
+    ].join("\n");
+    ok(group, slackRel.startsWith(expectedRelSlack) && slackRel.includes("*Blockers (1)*") && slackRel.includes("• *REL-3*") && slackRel.includes("• Added: REL-5") && !/^#/m.test(slackRel), `release Slack export snapshot${slackRel.startsWith(expectedRelSlack) ? "" : `\n${slackRel}`}`);
+    ok(group, exported.startsWith("# Release update — 2.0\n\n- Completion: 50% (2/4 done in Jira) · 1 excluded from scope") && exported.includes("## Remaining (2)") && exported.includes("**In Progress (1)**"), "release Markdown export snapshot");
+    ok(group, [slackRel, exported, panel].every(noUndefined), "no 'undefined' in release outputs");
+  }
+
+  const reportsPage = fs.readFileSync(path.join(process.cwd(), "src/app/reports/page.tsx"), "utf8");
+  const nav = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/Nav.tsx"), "utf8");
+  ok(group, /href: "\/reports"/.test(nav) && /type="date"/.test(reportsPage) && /Week of/.test(reportsPage) && /renderDailyReport/.test(reportsPage) && /renderWeeklyReport/.test(reportsPage), "the /reports page is in the nav, with a day picker for daily and a week picker for weekly");
+  const closeDay = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/CloseDayModal.tsx"), "utf8");
+  const weeklyPage = fs.readFileSync(path.join(process.cwd(), "src/app/weekly-review/page.tsx"), "utf8");
+  ok(group, /dailyReportToMarkdown/.test(closeDay) && /weeklyReportToMarkdown/.test(weeklyPage), "Close Day and Weekly Review keep their existing copy buttons");
 }
 
 if (skipped > 0) console.log(`\n⏭️  ${skipped} check group(s) skipped for missing runtime capabilities (see SKIPPED lines above).`);

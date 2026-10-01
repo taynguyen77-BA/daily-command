@@ -5,7 +5,7 @@
 
 import { availableFixVersions } from "./filters";
 import { buildPlan } from "./action-plan";
-import { computeReleaseHealth } from "./release-health";
+import { selectReleaseHealth } from "./release-health";
 import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
 import { explainWorkItemRelevance, listStatusesByRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
@@ -839,7 +839,7 @@ export function answerFromRoute(
     }
     case "release-risk": {
       if (!route.target) return { facts: ["No matching release/fix version found in the current data."], evidence: [], recommendedAction: "Specify a valid fix version." };
-      const health = computeReleaseHealth(data, route.target, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+      const health = selectReleaseHealth(data, route.target, today, workRelevanceIndex);
       return {
         facts: [
           `Completion: ${health.completionPct}%`,

@@ -20,8 +20,10 @@ import {
 } from "./types";
 import type { JiraCapabilityResult, JiraErrorKind } from "../types";
 
+// B2 — resolutiondate / statuscategorychangedate are universal Jira system fields (safe on the
+// strict endpoint), fetched so a completion is dated by when it actually happened in Jira.
 const ISSUE_FIELDS =
-  "summary,status,priority,assignee,duedate,labels,fixVersions,issuetype,issuelinks,project,created,updated,flagged";
+  "summary,status,priority,assignee,duedate,labels,fixVersions,issuetype,issuelinks,project,created,updated,flagged,resolutiondate,statuscategorychangedate";
 // V2.2.3 — `POST /rest/api/3/search/jql` validates every requested field name against the
 // instance's real, resolvable field IDs and 400s the WHOLE request if one doesn't resolve
 // (unlike the classic GET /rest/api/3/search, which silently ignores an unrecognized field
@@ -33,6 +35,16 @@ const ISSUE_FIELDS =
 // flagged-based blocked-status detection still works via the status-name heuristic when
 // this signal isn't available (see mapping.ts isBlockedByHeuristic).
 const JQL_SEARCH_FIELDS = ISSUE_FIELDS.split(",").filter((f) => f !== "flagged");
+
+/** B4 — a user-configured custom field id (the sprint field) is only ever accepted in Jira's
+ *  own `customfield_<digits>` form, so nothing arbitrary is ever spliced into a request. */
+export function isValidCustomFieldId(id: string | undefined): id is string {
+  return !!id && /^customfield_\d{1,9}$/.test(id);
+}
+
+function withExtraFields(base: string[], extra: string[] | undefined): string[] {
+  return [...base, ...(extra ?? []).filter((f) => isValidCustomFieldId(f) && !base.includes(f))];
+}
 export const JIRA_PAGE_SIZE = 50;
 export const JIRA_MAX_ISSUES = 2000; // safety cap — §11 "handle large result sets safely"
 // V2.2.1 §4/§5 — every Jira request gets an explicit abort timeout. Without this, a hung
@@ -234,6 +246,8 @@ export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraCo
 export interface FetchIssuesOptions {
   sinceIso?: string;
   projectKeys?: string[];
+  /** B4 — extra custom fields to request (validated by isValidCustomFieldId; others dropped). */
+  extraFields?: string[];
 }
 
 /**
@@ -252,7 +266,7 @@ async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnecti
   try {
     while (true) {
       const res = await fetchImpl(
-        buildUrl(config.baseUrl, "/rest/api/3/search", { jql, startAt: String(startAt), maxResults: String(JIRA_PAGE_SIZE), fields: ISSUE_FIELDS }),
+        buildUrl(config.baseUrl, "/rest/api/3/search", { jql, startAt: String(startAt), maxResults: String(JIRA_PAGE_SIZE), fields: withExtraFields(ISSUE_FIELDS.split(","), options.extraFields).join(",") }),
         { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
       );
       if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
@@ -321,7 +335,7 @@ async function fetchIssuesByJqlCursor(
   let truncated = false;
   try {
     while (true) {
-      const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: JQL_SEARCH_FIELDS };
+      const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: withExtraFields(JQL_SEARCH_FIELDS, classicFallbackOptions?.extraFields) };
       if (nextPageToken) body.nextPageToken = nextPageToken;
       const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
         method: "POST",

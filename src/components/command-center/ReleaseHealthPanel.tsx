@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { computeAllReleaseHealth } from "@/lib/command-center/release-health";
+import React, { useState } from "react";
+import { selectAllReleaseHealth } from "@/lib/command-center/release-health";
 import { buildReleaseUpdateDraft } from "@/lib/command-center/communicate";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { CommandCenterData, ReleaseHealth } from "@/lib/command-center/types";
@@ -48,14 +48,15 @@ export function ReleaseHealthPanel({
   data,
   today,
   workRelevanceIndex,
-  dailyCommandCompletedWorkItemIds,
 }: {
   data: CommandCenterData;
   today: string;
   workRelevanceIndex?: WorkRelevanceIndex;
+  /** Accepted for compatibility and ignored — personal completion never counts toward a release (B5). */
   dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
 }) {
-  const releases = computeAllReleaseHealth(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  // B5 — the one release selector; personal Daily Command completion never counts here.
+  const releases = selectAllReleaseHealth(data, today, workRelevanceIndex);
   if (releases.length === 0) return null;
 
   return (

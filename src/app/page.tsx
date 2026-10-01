@@ -178,7 +178,7 @@ export default function CommandCenterPage() {
 
           <HealthTrend trend={trend} currentConfidence={currentMetrics.deliveryConfidence} />
           <GettingBetterWorse trend={trend} />
-          <ReleaseHealthPanel data={filteredData} today={today} />
+          <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} />
 
           {reEscalations.length > 0 && (
             <section>

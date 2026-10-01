@@ -39,6 +39,7 @@ const LINKS: NavLink[] = [
   { href: "/action-plan", label: "Action Plan" },
   { href: "/decisions", label: "Decision Log", advanced: true },
   { href: "/weekly-review", label: "Weekly Review" },
+  { href: "/reports", label: "Reports" },
   { href: "/data-settings", label: "Data & Settings" },
 ];
 

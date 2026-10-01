@@ -14,14 +14,15 @@ import { buildDemoData } from "./demo-data";
 import { slug } from "./attention-queue";
 import { detectChanges, toSnapshot } from "./change-detection";
 import { getAIProvider } from "./ai";
-import { todayLocalIso } from "./date-utils";
+import { todayLocalIso, toLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
 import type { DataSourceProvider, DataSourceSyncResult } from "./datasource/types";
 import { LOCK_UNAVAILABLE, withJiraSyncLock, type JiraSyncLockManager } from "./sync-lock";
 import { idbGet, idbUpdate } from "./local-db";
 import { browserStateChannel, createLocalStorageStateStorage, readRevFromRaw, rebaseState, serializeWithRev, type StateChannel, type StateChannelFactory, type StateStorage } from "./state-persistence";
-import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
+import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope, scopeMentionEvents } from "./jira/project-scope";
+import { buildStandupState, type StandupState } from "./reports";
 import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "./jira/work-relevance-history";
 import { computeActionEffectiveness } from "./action-effectiveness";
@@ -29,12 +30,12 @@ import { computeDecisionRadar } from "./decision-radar";
 import { computeDeliveryDrift } from "./delivery-drift";
 import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
-import { detectJiraStatusCompletions } from "./jira-completion-detection";
+import { detectJiraScopeRemovals, detectJiraStatusCompletions, type JiraStatusCompletionEvent } from "./jira-completion-detection";
 import { detectNewAssignments } from "./assignment-detection";
 import { closePausedTicketsFinishedInJira } from "./task-execution";
 import { DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS, type StaleAssignedTicketThresholds } from "./personal-staleness";
 import { computeRiskEscalations } from "./risk-escalation";
-import { computeAllReleaseHealth } from "./release-health";
+import { selectAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
 import { deriveMemoryEvents } from "./memory-events";
 import { detectRisks } from "./risk-detection";
@@ -262,6 +263,11 @@ export interface StoreState {
   // provenance predates firstSeenAt). Lets a ticket that leaves the synced dataset and comes
   // back keep its first-seen time instead of being re-stamped as new. Local-only.
   knownTicketFirstSeen: Record<string, string>;
+  // B4 — the Jira custom field id holding the sprint (e.g. "customfield_10020"), configured in
+  // Data & Settings; never hardcoded (it differs per Jira instance). Undefined = no sprints.
+  jiraSprintFieldId?: string;
+  // B4 — what a "week" means in the Weekly Report: Mon–Fri (default) or 7 calendar days.
+  weeklyReportMode?: "workweek" | "calendar";
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -724,6 +730,8 @@ export function parseStoredState(raw: string): StoreState {
       dailyReviewAcks: asDailyReviewAcks(parsed.dailyReviewAcks),
       dailyReviewBaselineAt: typeof parsed.dailyReviewBaselineAt === "string" ? parsed.dailyReviewBaselineAt : undefined,
       knownTicketFirstSeen: asStringRecord(parsed.knownTicketFirstSeen),
+      jiraSprintFieldId: typeof parsed.jiraSprintFieldId === "string" && /^customfield_\d{1,9}$/.test(parsed.jiraSprintFieldId) ? parsed.jiraSprintFieldId : undefined,
+      weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
     };
   } catch {
     return initialState();
@@ -1145,6 +1153,38 @@ export class CommandCenterStore {
     this.set({ ...this.state, ...applyDailyCommandChange(this.state, ticketKey, next, nowIso) });
   }
 
+  /** B1 — every ticket-level Daily Command action is also a MemoryEvent, so it reaches the
+   *  Daily/Weekly reports (which read only memoryEvents). Ticket title / project / client /
+   *  assignee are captured NOW, same point-in-time discipline as reportContextForWorkItem;
+   *  a ticket not in the local data still gets an event with just its key. */
+  private recordTicketEvent(kind: "TICKET_COMPLETED" | "TICKET_REOPENED" | "TICKET_SKIPPED" | "TICKET_BLOCKED" | "TICKET_UNBLOCKED" | "TICKET_REACTIVATED", ticketKey: string, reason?: string) {
+    const w = this.state.data.workItems.find((x) => x.key === ticketKey);
+    const project = w ? this.state.data.projects.find((p) => p.id === w.projectId) : undefined;
+    const client = w ? this.state.data.clients.find((c) => c.id === (w.clientId ?? project?.clientId)) : undefined;
+    const verb = { TICKET_COMPLETED: "Completed", TICKET_REOPENED: "Reopened", TICKET_SKIPPED: "Skipped", TICKET_BLOCKED: "Blocked", TICKET_UNBLOCKED: "Unblocked", TICKET_REACTIVATED: "Reactivated" }[kind];
+    const entry: MemoryEvent = {
+      id: `memory-event-${kind}-${ticketKey}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      date: getTodayIso(),
+      kind,
+      title: `${verb}: ${w ? `${ticketKey} — ${w.title}` : ticketKey}`,
+      impact: "Recorded in Daily Command — Jira itself was not changed.",
+      evidence: [],
+      ticketKey,
+      ...(w ? { projectId: w.projectId, ticketTitle: w.title } : {}),
+      ...(w?.sourceUrl ? { ticketUrl: w.sourceUrl } : {}),
+      ...(project ? { projectName: project.name } : {}),
+      ...(client ? { clientName: client.name } : {}),
+      ...(w?.ownerId ? { assigneeId: w.ownerId } : {}),
+      ...(w?.owner ? { assigneeName: w.owner } : {}),
+      ...(reason?.trim() ? { reason: reason.trim() } : {}),
+      ...(w?.sprint ? { sprint: w.sprint } : {}),
+    };
+    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, entry].slice(-MAX_MEMORY_EVENTS) });
+    // Keep an already-generated report for today current (events + standup), so the action
+    // is in it even if memoryEvents later rolls past its cap before the next sync.
+    if (this.state.dailyReports[entry.date]) this.generateDailyReport(entry.date, true);
+  }
+
   private actorName(): string | undefined {
     return this.state.personalIdentity?.displayName ?? this.state.ownerName;
   }
@@ -1160,6 +1200,7 @@ export class CommandCenterStore {
   completeTicketInDailyCommand(ticketKey: string) {
     const now = new Date().toISOString();
     this.setDailyCommand(ticketKey, { kind: "completion", record: { ticketKey, completedAt: now, completedBy: this.actorName() } }, now);
+    this.recordTicketEvent("TICKET_COMPLETED", ticketKey);
   }
 
   /** The only way back once a ticket is Daily-Command-completed — never automatic (§14
@@ -1168,6 +1209,7 @@ export class CommandCenterStore {
   reopenTicketInDailyCommand(ticketKey: string) {
     if (!(ticketKey in this.state.dailyCommandCompletions)) return;
     this.setDailyCommand(ticketKey, null);
+    this.recordTicketEvent("TICKET_REOPENED", ticketKey);
   }
 
   /** V2.23 — Daily Command Skip: "this work is relevant, but I am intentionally not
@@ -1182,6 +1224,7 @@ export class CommandCenterStore {
     const now = new Date().toISOString();
     const skip: DailyCommandSkip = { ticketKey, skippedAt: now, skippedBy: this.actorName(), reason, ...(isIsoDate(revisitOn) ? { revisitOn } : {}) };
     this.setDailyCommand(ticketKey, { kind: "skip", record: skip }, now);
+    this.recordTicketEvent("TICKET_SKIPPED", ticketKey, reason);
   }
 
   /** The explicit "Reactivate" action (§9) — the only way back from SKIPPED to ACTIVE. Never
@@ -1191,6 +1234,7 @@ export class CommandCenterStore {
   reactivateSkippedTicket(ticketKey: string) {
     if (!(ticketKey in this.state.dailyCommandSkips)) return;
     this.setDailyCommand(ticketKey, null);
+    this.recordTicketEvent("TICKET_REACTIVATED", ticketKey);
   }
 
   /** V2.26 — Daily Command Block: "not done, paused — waiting on something outside my
@@ -1204,6 +1248,7 @@ export class CommandCenterStore {
     const trimmed = reason?.trim().slice(0, MAX_BLOCK_REASON_LENGTH);
     const block: DailyCommandBlock = { ticketKey, blockedAt: now, blockedBy: this.actorName(), reason: trimmed ? trimmed : undefined, ...(isIsoDate(revisitOn) ? { revisitOn } : {}) };
     this.setDailyCommand(ticketKey, { kind: "block", record: block }, now);
+    this.recordTicketEvent("TICKET_BLOCKED", ticketKey, block.reason);
   }
 
   /** The explicit "Unblock" action — BLOCKED -> ACTIVE. Never automatic, same rule as
@@ -1211,6 +1256,7 @@ export class CommandCenterStore {
   unblockTicketInDailyCommand(ticketKey: string) {
     if (!(ticketKey in this.state.dailyCommandBlocks)) return;
     this.setDailyCommand(ticketKey, null);
+    this.recordTicketEvent("TICKET_UNBLOCKED", ticketKey);
   }
 
   /** V2.26 — records a Daily Review visit. `at` is injectable for tests. A3 — no longer
@@ -1252,6 +1298,20 @@ export class CommandCenterStore {
     const safeWarn = Number.isFinite(warnBusinessDays) && warnBusinessDays > 0 ? Math.round(warnBusinessDays) : this.state.staleAssignedTicketThresholds.warnBusinessDays;
     const safeEscalateRaw = Number.isFinite(escalateBusinessDays) && escalateBusinessDays > 0 ? Math.round(escalateBusinessDays) : this.state.staleAssignedTicketThresholds.escalateBusinessDays;
     this.set({ ...this.state, staleAssignedTicketThresholds: { warnBusinessDays: safeWarn, escalateBusinessDays: Math.max(safeEscalateRaw, safeWarn) } });
+  }
+
+  /** B4 — Data & Settings: the sprint custom field id. Blank clears it; anything that is not
+   *  Jira's `customfield_<digits>` form is refused (returns false) rather than stored. */
+  setJiraSprintFieldId(id: string | undefined): boolean {
+    const trimmed = id?.trim();
+    if (trimmed && !/^customfield_\d{1,9}$/.test(trimmed)) return false;
+    this.set({ ...this.state, jiraSprintFieldId: trimmed || undefined });
+    return true;
+  }
+
+  /** B4 — Data & Settings: Mon–Fri weeks (default) or 7 calendar days. */
+  setWeeklyReportMode(mode: "workweek" | "calendar") {
+    this.set({ ...this.state, weeklyReportMode: mode });
   }
 
   /** V2.11 §3B — the ONLY place the advanced-settings visibility toggle is ever set. Purely
@@ -1424,6 +1484,7 @@ export class CommandCenterStore {
         scopeMode: scope.mode,
         projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
         accountId: this.state.personalIdentity?.accountId,
+        ...(this.state.jiraSprintFieldId ? { sprintFieldId: this.state.jiraSprintFieldId } : {}),
       });
     } catch (err) {
       // JiraDataSource already converts its own failures into { ok: false }, but a rejected
@@ -1573,23 +1634,41 @@ export class CommandCenterStore {
     // real completed work just because nobody clicked anything in this app. See
     // jira-completion-detection.ts for why isWorkItemDoneOrExcluded (not the broader
     // isWorkItemOperationallyOpen) is the right gate here.
-    const jiraCompletions = prevSnapshot ? detectJiraStatusCompletions(merged, prevSnapshot, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy)) : [];
-    const jiraCompletionEvents: MemoryEvent[] = jiraCompletions.map((c) => {
+    // B2 — only Done / COMPLETED counts; a move into EXCLUDED is its own "removed from scope"
+    // event. Dated by Jira's resolutiondate when present (a Saturday close synced on Monday is
+    // Saturday's), otherwise by this sync's day, marked as "detected".
+    const syncIndex = buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy);
+    const detectedOn = getTodayIso();
+    const jiraEvent = (c: JiraStatusCompletionEvent, kind: "JIRA_STATUS_COMPLETED" | "JIRA_REMOVED_FROM_SCOPE"): MemoryEvent => {
       const project = merged.projects.find((p) => p.id === c.projectId);
       const client = project ? merged.clients.find((cl) => cl.id === project.clientId) : undefined;
+      const resolvedDay = c.resolvedAt && !Number.isNaN(new Date(c.resolvedAt).getTime()) ? toLocalIso(new Date(c.resolvedAt)) : undefined;
       return {
-        id: `memory-event-JIRA_STATUS_COMPLETED-${c.workItemId}-${Date.now()}`,
-        date: getTodayIso(),
-        kind: "JIRA_STATUS_COMPLETED",
-        title: `Completed in Jira: ${c.title}`,
-        impact: "Detected via Jira sync — no in-app action was taken.",
+        id: `memory-event-${kind}-${c.workItemId}-${Date.now()}`,
+        date: resolvedDay ?? detectedOn,
+        kind,
+        title: kind === "JIRA_STATUS_COMPLETED" ? `Completed in Jira: ${c.title}` : `Removed from scope: ${c.title}`,
+        impact: kind === "JIRA_STATUS_COMPLETED" ? "Detected via Jira sync — no in-app action was taken." : "Moved to a status your Work Relevance Policy excludes — not counted as completed.",
         evidence: [],
         projectId: c.projectId,
         ticketKey: c.issueKey,
+        ticketTitle: c.title,
+        ...(c.url ? { ticketUrl: c.url } : {}),
         projectName: project?.name,
         clientName: client?.name,
+        ...(c.assigneeId ? { assigneeId: c.assigneeId } : {}),
+        ...(c.assigneeName ? { assigneeName: c.assigneeName } : {}),
+        ...(merged.workItems.find((w) => w.id === c.workItemId)?.sprint ? { sprint: merged.workItems.find((w) => w.id === c.workItemId)!.sprint } : {}),
+        datedBy: resolvedDay ? "resolution" : "detection",
+        detectedOn,
       };
-    });
+    };
+    const jiraCompletionEvents: MemoryEvent[] = prevSnapshot
+      ? [
+          ...detectJiraStatusCompletions(merged, prevSnapshot, syncIndex).map((c) => jiraEvent(c, "JIRA_STATUS_COMPLETED")),
+          ...detectJiraScopeRemovals(merged, prevSnapshot, syncIndex).map((c) => jiraEvent(c, "JIRA_REMOVED_FROM_SCOPE")),
+        ]
+      : [];
 
     // V2.10 §2, revised V2.17 §1a — mentionEvents are cumulative across syncs (like
     // workItems/dependencies above), now keyed by COMMENT id, not issue key: each incremental
@@ -1679,6 +1758,8 @@ export class CommandCenterStore {
     // until the user happened to open Close Day again. generateDailyReport's own cost is a
     // cheap filter over memoryEvents, so regenerating on every sync is not wasteful.
     this.generateDailyReport(getTodayIso(), true);
+    // B2 — a Jira completion dated by its resolution day belongs in THAT day's report too.
+    for (const day of Array.from(new Set(jiraCompletionEvents.map((e) => e.date)))) if (day !== getTodayIso()) this.generateDailyReport(day, true);
     return { ok: true };
   }
 
@@ -1935,8 +2016,8 @@ export class CommandCenterStore {
     const openRisks = dedupeRisks(dataAfter.risks, detectRisks(dataAfter, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
     const riskEscalations = computeRiskEscalations(openRisks, historyBeforeAppend, today);
     const dependencyRadar = computeDependencyRadar(dataAfter, openRisks, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-    const releaseHealths = computeAllReleaseHealth(dataAfter, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-    const releaseDrift = computeReleaseDrift(releaseHealths, lastPrior ?? null, today);
+    const releaseHealths = selectAllReleaseHealth(dataAfter, today, workRelevanceIndex);
+    const releaseDrift = computeReleaseDrift(releaseHealths, lastPrior ?? null, today, workRelevanceIndex, dataAfter.workItems);
 
     const events = deriveMemoryEvents(previousDrift, currentDrift, riskEscalations, dependencyRadar, releaseDrift, today, dataAfter);
 
@@ -2156,13 +2237,40 @@ export class CommandCenterStore {
    *  Close Day (or this action) runs again. Pass `force: true` to deliberately regenerate —
    *  the one legitimate case is TODAY's own report, before the day is actually over and more
    *  memoryEvents might still land. */
+  /** B3 — the standup state (in progress, blocked, skipped, new, mentions…) as of `now`, over
+   *  the same project-scoped data every page shows. Pure read; see reports.ts. */
+  buildLiveStandup(now: Date = new Date()): StandupState {
+    const data = applyProjectScope(this.state.data, this.state.jiraProjectScope);
+    return buildStandupState({
+      data,
+      identity: { displayName: this.state.personalIdentity?.displayName ?? this.state.ownerName, accountId: this.state.personalIdentity?.accountId },
+      workRelevanceIndex: buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy),
+      dailyCommandCompletions: this.state.dailyCommandCompletions,
+      dailyCommandSkips: this.state.dailyCommandSkips,
+      dailyCommandBlocks: this.state.dailyCommandBlocks,
+      personalPlan: this.state.personalPlan,
+      mentionEvents: scopeMentionEvents(this.state.mentionEvents, data.workItems, this.state.jiraProjectScope),
+      attentionState: this.state.attentionState,
+      memoryEvents: this.state.memoryEvents,
+      syncLog: this.state.syncLog,
+      baselineAt: this.state.dailyReviewBaselineAt,
+      lastVisitAt: this.state.dailyReviewLastVisitAt,
+      reviewAcks: this.state.dailyReviewAcks,
+      now,
+    });
+  }
+
   generateDailyReport(dateIso: string, force = false): DailyReportSnapshot {
     const existing = this.state.dailyReports[dateIso];
     if (existing && !force) return existing;
+    // B3 — today's report freezes the standup state as of now; a past day keeps whatever
+    // standup it was last generated with (never recomputed from today's state).
+    const standup = dateIso === getTodayIso() ? this.buildLiveStandup() : existing?.standup;
     const snapshot: DailyReportSnapshot = {
       date: dateIso,
       generatedAt: new Date().toISOString(),
       events: this.state.memoryEvents.filter((e) => e.date === dateIso).map((e) => ({ ...e })),
+      ...(standup ? { standup } : {}),
     };
     const dailyReports: Record<string, DailyReportSnapshot> = { ...this.state.dailyReports, [dateIso]: snapshot };
     const overflow = Object.keys(dailyReports).length - MAX_DAILY_REPORTS;

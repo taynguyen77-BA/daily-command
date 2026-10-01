@@ -47,7 +47,14 @@ export const jiraIssueFieldsSchema = z.object({
   issuelinks: z.array(jiraIssueLinkSchema).optional(),
   project: z.object({ key: z.string().optional(), name: z.string().optional() }).optional(),
   flagged: z.boolean().optional(), // some instances expose a boolean "Flagged" custom field
-});
+  // B2 — when the issue was resolved / last changed status category (system fields).
+  resolutiondate: z.string().nullable().optional(),
+  statuscategorychangedate: z.string().nullable().optional(),
+})
+  // B4 — custom fields (the configured sprint field) are instance-specific ids, so they are
+  // kept as unknown values instead of being stripped; normalize.ts reads only the one it was
+  // told to.
+  .catchall(z.unknown());
 
 export const jiraIssueSchema = z.object({
   id: z.string().optional(),

@@ -23,7 +23,7 @@ import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
-import { buildIncrementalSinceParam, computeResumeCursor, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
+import { buildIncrementalSinceParam, computeResumeCursor, isValidCustomFieldId, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
 import type { MentionEvent } from "@/lib/command-center/types";
 
@@ -39,6 +39,9 @@ const syncRequestSchema = z.object({
   // configured for this installation", never an error — same contract as every other
   // optional Jira capability in this app.
   accountId: z.string().optional(),
+  // B4 — the sprint custom field id configured in Data & Settings. Only Jira's own
+  // `customfield_<digits>` form is accepted; anything else is ignored, never sent to Jira.
+  sprintFieldId: z.string().optional(),
 });
 
 /**
@@ -120,7 +123,8 @@ export async function POST(req: Request) {
   // here. See jira/http.ts buildIncrementalSinceParam for the safety reasoning.
   const jqlSinceIso = parsedRequest.data.sinceIso ? buildIncrementalSinceParam(parsedRequest.data.sinceIso, getJiraTimezoneOffsetMinutes()) : undefined;
 
-  const issuesResult = await fetchJiraIssues(config, { sinceIso: jqlSinceIso, projectKeys });
+  const sprintFieldId = isValidCustomFieldId(parsedRequest.data.sprintFieldId) ? parsedRequest.data.sprintFieldId : undefined;
+  const issuesResult = await fetchJiraIssues(config, { sinceIso: jqlSinceIso, projectKeys, extraFields: sprintFieldId ? [sprintFieldId] : undefined });
   if (!issuesResult.ok) {
     return NextResponse.json({ ok: false, error: issuesResult.error, errorKind: issuesResult.errorKind }, { status: 502 });
   }
@@ -138,7 +142,7 @@ export async function POST(req: Request) {
     warnings.push(`Result set reached the ${JIRA_MAX_ISSUES}-issue safety cap — this sync is partial. It will automatically resume from where it stopped on the next sync.`);
   }
 
-  const options = { baseUrl: config.baseUrl, projectToClient: getProjectClientMap(), today };
+  const options = { baseUrl: config.baseUrl, projectToClient: getProjectClientMap(), today, sprintFieldId };
   const jiraProjects = projectKeys ? projectsResult.data.filter((p) => projectKeys.includes(p.key)) : projectsResult.data;
   const { projects, clients } = normalizeProjects(jiraProjects, options);
   const { workItems, dependencies } = normalizeIssues(issuesResult.data, options);

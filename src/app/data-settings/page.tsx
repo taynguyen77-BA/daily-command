@@ -249,14 +249,14 @@ function ArtifactHistoryRow({
   onReopen: (draft: ArtifactDraft, staleness: "fresh" | "stale" | "unavailable") => void;
   onDelete: () => void;
 }) {
-  const { filteredData, derived, proactive, personalFocus, today } = useCommandCenter();
+  const { filteredData, derived, proactive, personalFocus, today, workRelevanceIndex } = useCommandCenter();
 
   function reopen() {
     if (!proactive) {
       onReopen(record, "unavailable");
       return;
     }
-    const fresh = rebuildDraftFromSourceRef(record.sourceRef, record.sourceContext, filteredData, derived, proactive, personalFocus, today);
+    const fresh = rebuildDraftFromSourceRef(record.sourceRef, record.sourceContext, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex);
     if (!fresh) {
       onReopen(record, "unavailable");
       return;
@@ -890,6 +890,35 @@ export default function DataSettingsPage() {
             className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
           />
           <p className="text-xs text-text3">More reliable than display name — find it in your Jira profile URL.</p>
+        </div>
+      </Panel>
+
+      <Panel className="p-5">
+        <SectionHeading title="Reports" subtitle="How the Weekly Report counts a week, and (optionally) which Jira field holds the sprint so reports can group by sprint." />
+        <div className="flex max-w-xl flex-wrap items-end gap-4">
+          <label className="flex flex-col gap-1 text-xs text-text2">
+            Week
+            <select
+              value={state.weeklyReportMode ?? "workweek"}
+              onChange={(e) => store.setWeeklyReportMode(e.target.value === "calendar" ? "calendar" : "workweek")}
+              className="rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text"
+            >
+              <option value="workweek">Mon–Fri</option>
+              <option value="calendar">Calendar week (7 days)</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-text2">
+            Sprint field id (optional)
+            <input
+              defaultValue={state.jiraSprintFieldId ?? ""}
+              placeholder="customfield_10020"
+              onBlur={(e) => {
+                if (!store.setJiraSprintFieldId(e.target.value)) e.target.value = state.jiraSprintFieldId ?? "";
+              }}
+              className="w-56 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
+            />
+            <span className="text-text3">Jira&apos;s own id for your Sprint field — it differs per Jira site. Picked up on the next sync.</span>
+          </label>
         </div>
       </Panel>
 
@@ -1667,7 +1696,7 @@ export default function DataSettingsPage() {
             onRefresh:
               reopening.staleness === "stale" && proactive
                 ? () => {
-                    const fresh = rebuildDraftFromSourceRef(reopening.record.sourceRef, reopening.record.sourceContext, filteredData, derived, proactive, personalFocus, today);
+                    const fresh = rebuildDraftFromSourceRef(reopening.record.sourceRef, reopening.record.sourceContext, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex);
                     if (fresh) setReopening({ record: reopening.record, draft: fresh, staleness: "fresh", nonce: Date.now() });
                   }
                 : undefined,

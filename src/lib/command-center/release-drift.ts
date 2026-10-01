@@ -1,8 +1,9 @@
 // Release Drift (V1.4 §34). Extends Release Health with a snapshot-over-snapshot delta —
 // recomputes release health from the previous snapshot's raw workItems using the existing
-// computeReleaseHealth() (never a second, divergent implementation).
+// selectReleaseHealth() (the one release selector — never a second, divergent implementation).
 
-import { computeReleaseHealth } from "./release-health";
+import { isInRelease, selectReleaseHealth } from "./release-health";
+import type { WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, DailySnapshot, DriftLevel, ReleaseDrift, ReleaseHealth } from "./types";
 
 function classifyLevel(score: number): DriftLevel {
@@ -12,7 +13,16 @@ function classifyLevel(score: number): DriftLevel {
   return "STABLE";
 }
 
-export function computeReleaseDrift(current: ReleaseHealth[], previousSnapshot: DailySnapshot | null, today: string): ReleaseDrift[] {
+/** B5 — `workRelevanceIndex` (optional, additive) makes the previous-snapshot side use the same
+ *  release truth as `current`; `currentWorkItems` (optional) adds the tickets that joined/left
+ *  each release since the snapshot. */
+export function computeReleaseDrift(
+  current: ReleaseHealth[],
+  previousSnapshot: DailySnapshot | null,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  currentWorkItems?: CommandCenterData["workItems"]
+): ReleaseDrift[] {
   if (!previousSnapshot) return [];
 
   const previousData: CommandCenterData = {
@@ -29,9 +39,11 @@ export function computeReleaseDrift(current: ReleaseHealth[], previousSnapshot: 
 
   return current
     .map((health) => {
-      const hadItemsBefore = previousSnapshot.workItems.some((w) => w.fixVersion === health.fixVersion);
+      const hadItemsBefore = previousSnapshot.workItems.some((w) => isInRelease(w, health.fixVersion));
       if (!hadItemsBefore) return null;
-      const previousHealth = computeReleaseHealth(previousData, health.fixVersion, today);
+      const previousHealth = selectReleaseHealth(previousData, health.fixVersion, today, workRelevanceIndex);
+      const before = new Set(previousSnapshot.workItems.filter((w) => isInRelease(w, health.fixVersion)).map((w) => w.key));
+      const after = currentWorkItems ? new Set(currentWorkItems.filter((w) => isInRelease(w, health.fixVersion)).map((w) => w.key)) : undefined;
 
       const completionDelta = health.completionPct - previousHealth.completionPct;
       const blockedDelta = health.blockedCount - previousHealth.blockedCount;
@@ -53,6 +65,12 @@ export function computeReleaseDrift(current: ReleaseHealth[], previousSnapshot: 
         confidenceDelta,
         scopeDelta,
         drivers,
+        ...(after
+          ? {
+              scopeAdded: Array.from(after).filter((k) => !before.has(k)).sort(),
+              scopeRemoved: Array.from(before).filter((k) => !after.has(k)).sort(),
+            }
+          : {}),
       } satisfies ReleaseDrift;
     })
     .filter((r): r is ReleaseDrift => r !== null)

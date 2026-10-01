@@ -14,7 +14,7 @@ const PROJECTS_ENDPOINT = "/api/command-center/jira/projects";
 export class JiraDataSource implements DataSourceProvider {
   readonly type = "jira" as const;
 
-  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string }): Promise<DataSourceSyncResult> {
+  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string }): Promise<DataSourceSyncResult> {
     try {
       // V2.15 §2 — when this device is paired for Cross-Device Sync, its paired secret is
       // also accepted by jira/sync/route.ts's POST auth gate (see sync-auth.ts), so a manual

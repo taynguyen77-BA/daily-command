@@ -6,7 +6,7 @@ import { answerFromRoute, classifyQuery, familyForIntent, isArtifactIntent, type
 import { detectExplicitProjectMention, knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
 import { buildDecisionBriefDraft, buildReleaseUpdateDraft, buildStakeholderUpdateDraft, buildStatusUpdateDraft, buildTodaysUpdateDraft } from "@/lib/command-center/communicate";
-import { computeReleaseHealth } from "@/lib/command-center/release-health";
+import { selectReleaseHealth } from "@/lib/command-center/release-health";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { commandUsageKey, USAGE_KEYS } from "@/lib/command-center/usage";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
@@ -183,7 +183,7 @@ export function CommandBar() {
         setArtifactNote("No release/fix version found in the current data.");
         return;
       }
-      setArtifactDraft(buildReleaseUpdateDraft(computeReleaseHealth(viewData, version, today), viewData, sourceContext));
+      setArtifactDraft(buildReleaseUpdateDraft(selectReleaseHealth(viewData, version, today, workRelevanceIndex), viewData, sourceContext));
       return;
     }
     if (artifactIntent === "create-decision-brief") {

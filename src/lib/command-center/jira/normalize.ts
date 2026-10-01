@@ -11,6 +11,32 @@ export interface NormalizeOptions {
   baseUrl?: string; // used only to construct sourceUrl — never fabricated if absent
   projectToClient?: Record<string, string>; // Jira project key -> client display name
   today: string; // ISO date, used only as a safe fallback when Jira omits a timestamp
+  /** B4 — the configured sprint custom field id (e.g. "customfield_10020"), when set. */
+  sprintFieldId?: string;
+}
+
+/** B4 — a sprint custom field's value, in either shape Jira uses: Cloud sends an array of
+ *  objects ({ name, state }), older Server/DC sends serialized strings
+ *  ("com.atlassian.greenhopper…[id=1,state=ACTIVE,name=Sprint 7,…]"). Picks the ACTIVE sprint
+ *  when there is one, else the last listed. Undefined for anything unrecognized. */
+export function parseSprintFieldValue(value: unknown): string | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const sprints = value
+    .map((v): { name: string; state?: string } | undefined => {
+      if (v && typeof v === "object" && typeof (v as { name?: unknown }).name === "string") {
+        const o = v as { name: string; state?: unknown };
+        return { name: o.name, state: typeof o.state === "string" ? o.state : undefined };
+      }
+      if (typeof v === "string") {
+        const name = /[\[,]name=([^,\]]+)/.exec(v)?.[1];
+        const state = /[\[,]state=([^,\]]+)/.exec(v)?.[1];
+        return name ? { name, state } : undefined;
+      }
+      return undefined;
+    })
+    .filter((s): s is { name: string; state?: string } => !!s);
+  if (sprints.length === 0) return undefined;
+  return (sprints.find((s) => s.state?.toUpperCase() === "ACTIVE") ?? sprints[sprints.length - 1]).name;
 }
 
 function truncateToDate(iso: string | undefined, fallback: string): string {
@@ -97,6 +123,16 @@ export function normalizeIssue(issue: JiraIssue, options: NormalizeOptions): { w
     scopeChangeCount: 0, // requires changelog history Jira's search API doesn't return; see Known Limitations
     labels: f.labels,
     fixVersion: f.fixVersions?.[0]?.name,
+    ...(() => {
+      const all = (f.fixVersions ?? []).map((v) => v.name).filter((n): n is string => !!n);
+      return all.length > 1 ? { fixVersions: all } : {};
+    })(),
+    ...(f.resolutiondate ? { resolvedAt: f.resolutiondate } : {}),
+    ...(f.statuscategorychangedate ? { statusCategoryChangedAt: f.statuscategorychangedate } : {}),
+    ...(() => {
+      const sprint = options.sprintFieldId ? parseSprintFieldValue((f as Record<string, unknown>)[options.sprintFieldId]) : undefined;
+      return sprint ? { sprint } : {};
+    })(),
     sourceType: "jira",
     sourceId: issue.key,
     sourceUrl: issueUrl(options.baseUrl, issue.key),

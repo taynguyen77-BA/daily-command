@@ -262,6 +262,17 @@ export interface WorkItem {
   // Undefined = never observed being reassigned to me (including: created already assigned
   // to me — that is a "New ticket", not an assignment).
   assignedToMeAt?: string;
+  // B2 — Jira `resolutiondate` / `statuscategorychangedate` (raw ISO datetimes), so a ticket
+  // closed on Saturday and first synced on Monday is reported on Saturday. Undefined when
+  // Jira didn't send them (never fabricated).
+  resolvedAt?: string;
+  statusCategoryChangedAt?: string;
+  // B5 — EVERY fix version the issue carries (fixVersion above keeps the first, for existing
+  // readers). A release counts the item once in each of its versions.
+  fixVersions?: string[];
+  // B4 — the issue's sprint (active one when several), read from the user-configured sprint
+  // custom field. Undefined when no field is configured or the issue has no sprint.
+  sprint?: string;
 }
 
 /** One successful Jira sync's provenance summary, kept in StoreState.syncLog (bounded). Counts
@@ -590,6 +601,22 @@ export interface ReleaseHealth {
   deliveryConfidence: number;
   readiness: ReleaseReadiness;
   topRiskTitle?: string;
+  // B5 — additive detail. Release truth counts only Jira Done / Work-Relevance COMPLETED as
+  // done, and leaves EXCLUDED items out of the denominator (excludedItems says how many).
+  excludedItems?: number;
+  remainingByStatus?: { status: string; items: ReleaseItemRef[] }[];
+  blockers?: ReleaseItemRef[];
+  overdue?: ReleaseItemRef[];
+}
+
+export interface ReleaseItemRef {
+  key: string;
+  title: string;
+  url?: string;
+  status: string;
+  assignee?: string;
+  dueDate?: string;
+  blockerReason?: string;
 }
 
 /** V1.3 §23 — the compact, token-conscious context handed to Claude. Never the raw Jira
@@ -844,6 +871,9 @@ export interface ReleaseDrift {
   confidenceDelta: number;
   scopeDelta: number;
   drivers: string[];
+  // B5 — which tickets joined / left the release since the previous snapshot.
+  scopeAdded?: string[];
+  scopeRemoved?: string[];
 }
 
 /** V1.4 §35 — Client Attention Map. A prioritization view, not portfolio management. */
@@ -904,7 +934,18 @@ export interface MemoryEvent {
     // status or Work Relevance Policy COMPLETED/EXCLUDED), independent of any in-app action.
     // See jira-completion-detection.ts and daily-report.ts's "Completed in Jira" vs "Completed
     // via Daily Command" label split.
-    | "JIRA_STATUS_COMPLETED";
+    | "JIRA_STATUS_COMPLETED"
+    // B2 — a ticket that moved into a Work-Relevance EXCLUDED status: "removed from scope",
+    // never reported as completed.
+    | "JIRA_REMOVED_FROM_SCOPE"
+    // B1 — ticket-level Daily Command actions (store.ts's complete/skip/block setters), so the
+    // most-used buttons reach Daily/Weekly reports.
+    | "TICKET_COMPLETED"
+    | "TICKET_REOPENED"
+    | "TICKET_SKIPPED"
+    | "TICKET_BLOCKED"
+    | "TICKET_UNBLOCKED"
+    | "TICKET_REACTIVATED";
   title: string;
   impact: string;
   evidence: string[];
@@ -924,6 +965,20 @@ export interface MemoryEvent {
   projectName?: string;
   clientName?: string;
   outcomeNote?: string;
+  // B1/B2 — more point-in-time ticket context, same capture-at-write discipline as above.
+  ticketTitle?: string;
+  ticketUrl?: string;
+  /** Skip/Block reason, as recorded. */
+  reason?: string;
+  /** The ticket's Jira assignee when the event was recorded — splits "My work" / "Team work". */
+  assigneeId?: string;
+  assigneeName?: string;
+  /** B2 — Jira-detected events: `date` is the resolution day when Jira sent one ("resolution"),
+   *  otherwise the sync day it was noticed ("detection" — reports say "detected <date>"). */
+  datedBy?: "resolution" | "detection";
+  detectedOn?: string;
+  /** B4 — the ticket's sprint when the event was recorded (configured sprint field only). */
+  sprint?: string;
 }
 
 /** V2.17 Task 2 — an immutable, point-in-time Daily Report: exactly the subset of that day's
@@ -937,6 +992,11 @@ export interface DailyReportSnapshot {
   date: string;
   generatedAt: string;
   events: MemoryEvent[];
+  // B3 — the standup state AS OF generation (in progress, blocked, skipped, new, mentions…),
+  // frozen with the report like `events`, so a past day reads what was true then. Absent on
+  // reports generated before B3 and on past days regenerated later (reports/build fall back
+  // to the events alone).
+  standup?: import("./reports").StandupState;
 }
 
 /** V1.4 §32-33 — a single labeled Jira changelog field change. Never used to infer actual

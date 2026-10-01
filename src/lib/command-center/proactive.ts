@@ -20,7 +20,7 @@ import { buildFirst30Minutes } from "./first-30-minutes";
 import { isWorkItemDoneOrExcluded, isWorkItemOperationallyOpen, resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { buildDailySnapshot, dailyCanonicalSnapshots } from "./memory";
 import { computeOutcomeScorecard } from "./outcome-scorecard";
-import { computeAllReleaseHealth } from "./release-health";
+import { selectAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
 import { computeRiskEscalations } from "./risk-escalation";
 import { computeStakeholderAttention, rankCommunicationPriority } from "./stakeholder-radar";
@@ -30,7 +30,7 @@ import type { DerivedData } from "./selectors";
 export interface ProactiveIntelligence {
   drift: ReturnType<typeof computeDeliveryDrift>;
   trajectory: ReturnType<typeof computeTrajectory>;
-  releaseHealths: ReturnType<typeof computeAllReleaseHealth>;
+  releaseHealths: ReturnType<typeof selectAllReleaseHealth>;
   releaseDrift: ReturnType<typeof computeReleaseDrift>;
   riskEscalations: ReturnType<typeof computeRiskEscalations>;
   dependencyRadar: ReturnType<typeof computeDependencyRadar>;
@@ -108,8 +108,8 @@ export function computeProactiveIntelligence(
   const trajectory = computeTrajectory(dailyHistory, currentMetrics);
   const riskEscalations = computeRiskEscalations(derived.risks, dailyHistory, today);
   const dependencyRadar = computeDependencyRadar(data, derived.risks, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-  const releaseHealths = computeAllReleaseHealth(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-  const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today);
+  const releaseHealths = selectAllReleaseHealth(data, today, workRelevanceIndex);
+  const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today, workRelevanceIndex, data.workItems);
   const actionEffectiveness = computeActionEffectiveness(data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const ineffective = ineffectiveActions(actionEffectiveness, data.actions);
   const ineffectiveActionWorkItemIds = new Set(ineffective.map(({ action }) => action.relatedWorkItemId).filter((id): id is string => !!id));
