@@ -14,6 +14,7 @@
 import type { CommandCenterStore, StoreState } from "./store";
 import { mergeById } from "./store";
 import type { SyncedAppState } from "./app-state";
+import { emptyTombstones, maxIso, mergeDailyCommandState, mergeReviewAcks, type DailyCommandState } from "./execution-state-merge";
 import { pairedAuthHeader, isDevicePaired } from "./device-pairing";
 
 const STATE_ENDPOINT = "/api/command-center/state";
@@ -32,6 +33,14 @@ export function extractSyncedAppState(state: StoreState, updatedAtIso: string): 
     actionPlanState: { actions: state.data.actions, personalPlan: state.personalPlan },
     memoryEvents: state.memoryEvents,
     dailyReports: state.dailyReports,
+    dailyCommandCompletions: state.dailyCommandCompletions,
+    dailyCommandSkips: state.dailyCommandSkips,
+    dailyCommandBlocks: state.dailyCommandBlocks,
+    dailyCommandTombstones: state.dailyCommandTombstones,
+    syncLog: state.syncLog,
+    dailyReviewLastVisitAt: state.dailyReviewLastVisitAt,
+    dailyReviewAcks: state.dailyReviewAcks,
+    dailyReviewBaselineAt: state.dailyReviewBaselineAt,
     uiPreferences: {
       showAdvancedSettings: state.showAdvancedSettings,
       myActionItemsOnly: state.myActionItemsOnly,
@@ -47,7 +56,32 @@ export function extractSyncedAppState(state: StoreState, updatedAtIso: string): 
  *  lose). Deliberately conservative: ANY real interaction on ANY of the three signals means
  *  "not unused" — a merge (never a silent overwrite) is used instead. */
 export function looksUnused(state: StoreState): boolean {
-  return Object.keys(state.attentionState).length === 0 && state.data.decisions.length === 0 && state.personalPlan.length === 0;
+  // A1 — a device whose only use so far is Complete/Skip/Block is NOT unused: adopting the
+  // server wholesale would otherwise drop those records.
+  const hasExecutionState =
+    Object.keys(state.dailyCommandCompletions).length > 0 || Object.keys(state.dailyCommandSkips).length > 0 || Object.keys(state.dailyCommandBlocks).length > 0;
+  return Object.keys(state.attentionState).length === 0 && state.data.decisions.length === 0 && state.personalPlan.length === 0 && !hasExecutionState;
+}
+
+const MAX_SYNC_LOG = 30; // mirrors store.ts's own MAX_SYNC_LOG cap
+
+/** A1 — syncLog entries are immutable facts about one sync: union by completedAt (oldest
+ *  first), capped like store.ts caps it. */
+function mergeSyncLogs(local: SyncedAppState["syncLog"], server: SyncedAppState["syncLog"]): NonNullable<SyncedAppState["syncLog"]> {
+  const byCompletedAt = new Map((local ?? []).map((e) => [e.completedAt, e]));
+  for (const e of server ?? []) if (!byCompletedAt.has(e.completedAt)) byCompletedAt.set(e.completedAt, e);
+  return Array.from(byCompletedAt.values())
+    .sort((a, b) => a.completedAt.localeCompare(b.completedAt))
+    .slice(-MAX_SYNC_LOG);
+}
+
+function dailyCommandStateOf(s: SyncedAppState): DailyCommandState {
+  return {
+    dailyCommandCompletions: s.dailyCommandCompletions ?? {},
+    dailyCommandSkips: s.dailyCommandSkips ?? {},
+    dailyCommandBlocks: s.dailyCommandBlocks ?? {},
+    dailyCommandTombstones: s.dailyCommandTombstones ?? emptyTombstones(),
+  };
 }
 
 const MAX_MEMORY_EVENTS = 200; // mirrors store.ts's own MAX_MEMORY_EVENTS cap
@@ -91,6 +125,14 @@ export function mergeSyncedAppState(local: SyncedAppState, server: SyncedAppStat
     // are already identical in practice (memoryEvents themselves are unioned above) — server
     // winning is a safe, deterministic tie-break, not a real data-loss risk.
     dailyReports: { ...local.dailyReports, ...server.dailyReports },
+    // A1 — per-record LWW with tombstones (execution-state-merge.ts), NOT "server wins": the
+    // blob-level recency above says nothing about which device touched a given ticket last.
+    // A field missing from a pre-A1 server blob merges as empty — local records survive.
+    ...mergeDailyCommandState(dailyCommandStateOf(local), dailyCommandStateOf(server)),
+    syncLog: mergeSyncLogs(local.syncLog, server.syncLog),
+    dailyReviewLastVisitAt: maxIso(local.dailyReviewLastVisitAt, server.dailyReviewLastVisitAt),
+    dailyReviewAcks: mergeReviewAcks(local.dailyReviewAcks ?? {}, server.dailyReviewAcks ?? {}),
+    dailyReviewBaselineAt: maxIso(local.dailyReviewBaselineAt, server.dailyReviewBaselineAt),
     uiPreferences: server.uiPreferences,
     updatedAtIso: server.updatedAtIso,
   };
@@ -185,15 +227,40 @@ function comparableJson(state: StoreState): string {
   return JSON.stringify(slice);
 }
 
+/** A1 — before pushing, fold in anything another device pushed since this device last
+ *  synced, so a push never overwrites the server's newer records with this device's stale
+ *  copy (previously only the on-load decision merged; every later push was a blind
+ *  whole-blob overwrite, so a ticket completed on device A was erased by device B's next
+ *  unrelated edit). The local side is passed as the "newer" argument here: it holds the
+ *  pending edit that triggered this push, so for the id-union fields local wins a shared id;
+ *  the Daily Command maps are symmetric LWW either way. Returns the slice to push, or null
+ *  when the server is unreachable (the push itself will then fail and back off as before). */
+async function reconcileWithServer(store: CommandCenterStore, now: string): Promise<SyncedAppState> {
+  const local = extractSyncedAppState(store.getSnapshot(), now);
+  const server = await getServerState();
+  if (!server.ok || server.value === null) return local;
+  const lastKnown = store.getSnapshot().lastAppStateSyncIso ?? "";
+  if (server.value.updatedAtIso <= lastKnown) return local;
+  const merged = { ...mergeSyncedAppState(server.value, local), updatedAtIso: now };
+  store.applySyncedAppState(merged);
+  return merged;
+}
+
 async function flushPendingPush(store: CommandCenterStore) {
   if (!isDevicePaired()) return;
   const now = new Date().toISOString();
-  const slice = extractSyncedAppState(store.getSnapshot(), now);
+  const slice = await reconcileWithServer(store, now);
   const result = await pushServerState(slice);
   if (result.ok) {
     backoffAttempt = 0;
     lastKnownSliceJson = comparableJson(store.getSnapshot());
     store.setLastAppStateSyncIso(now);
+    // A merge applied by reconcileWithServer above re-triggered the change watcher; that
+    // follow-up push is redundant once the merged slice itself has been pushed.
+    if (pushTimer && comparableJson(store.getSnapshot()) === lastKnownSliceJson) {
+      clearTimeout(pushTimer);
+      pushTimer = null;
+    }
     return;
   }
   if (result.reason === "not-paired" || result.reason === "unauthorized" || result.reason === "unavailable") {
@@ -210,6 +277,18 @@ async function flushPendingPush(store: CommandCenterStore) {
   const delay = Math.min(MAX_BACKOFF_MS, INITIAL_BACKOFF_MS * 2 ** (backoffAttempt - 1));
   if (pushTimer) clearTimeout(pushTimer);
   pushTimer = setTimeout(() => flushPendingPush(store), delay);
+}
+
+async function pullIfServerNewer(store: CommandCenterStore) {
+  if (!isDevicePaired()) return;
+  const server = await getServerState();
+  if (!server.ok || server.value === null) return;
+  if (server.value.updatedAtIso <= (store.getSnapshot().lastAppStateSyncIso ?? "")) return;
+  const now = new Date().toISOString();
+  const merged = { ...mergeSyncedAppState(extractSyncedAppState(store.getSnapshot(), now), server.value), updatedAtIso: now };
+  store.applySyncedAppState(merged);
+  lastKnownSliceJson = comparableJson(store.getSnapshot());
+  await pushServerState(merged);
 }
 
 function scheduleDebouncedPush(store: CommandCenterStore) {
@@ -260,6 +339,14 @@ export async function initAppStateSync(store: CommandCenterStore): Promise<void>
       }
       void flushPendingPush(store);
     });
+    // A1 — pick up records another device pushed mid-session (the on-load merge below only
+    // runs once): a GET on return to the tab, merging + converging only when the server moved.
+    const pullOnReturn = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void pullIfServerNewer(store);
+    };
+    window.addEventListener("focus", pullOnReturn);
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", pullOnReturn);
   }
 
   if (!isDevicePaired()) return;

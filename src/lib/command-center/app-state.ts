@@ -17,7 +17,12 @@ import { z } from "zod";
 import type {
   Action,
   AttentionItemState,
+  DailyCommandBlock,
+  DailyCommandCompletion,
+  DailyCommandSkip,
+  DailyCommandTombstones,
   DailyReportSnapshot,
+  DailyReviewAck,
   Decision,
   JiraProjectScope,
   JiraWorkRelevancePolicyMap,
@@ -25,6 +30,7 @@ import type {
   MyActionItemsOnlyByPage,
   PersonalIdentity,
   PersonalPlanItem,
+  SyncLogEntry,
 } from "./types";
 
 export interface SyncedAppState {
@@ -46,6 +52,19 @@ export interface SyncedAppState {
   // V2.17 Task 2 point 5 — user-generated content, same reasoning as `decisions` above: a
   // Daily Report generated on one device should be visible from another, not stranded locally.
   dailyReports: Record<string, DailyReportSnapshot>;
+  // A1 — personal execution state. All optional ON READ: a blob written by a pre-A1 client has
+  // none of them, and a missing field always means "server knows nothing" (local is kept), never
+  // "server says empty". The three maps merge per record (LWW + tombstones — see
+  // execution-state-merge.ts), never by whole-blob recency.
+  dailyCommandCompletions?: Record<string, DailyCommandCompletion>;
+  dailyCommandSkips?: Record<string, DailyCommandSkip>;
+  dailyCommandBlocks?: Record<string, DailyCommandBlock>;
+  dailyCommandTombstones?: DailyCommandTombstones;
+  syncLog?: SyncLogEntry[];
+  dailyReviewLastVisitAt?: string;
+  // A3 — Daily Review acknowledgments and the "New" baseline.
+  dailyReviewAcks?: Record<string, DailyReviewAck>;
+  dailyReviewBaselineAt?: string;
   updatedAtIso: string;
 }
 
@@ -122,6 +141,22 @@ export const syncedAppStateSchema = z.object({
   }),
   memoryEvents: z.array(z.record(z.string(), z.unknown())),
   dailyReports: z.record(z.string(), z.record(z.string(), z.unknown())),
+  // A1/A3 — optional so pre-A1 clients keep posting successfully. Listed explicitly because
+  // z.object strips unknown keys: without these the route would silently drop them.
+  dailyCommandCompletions: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+  dailyCommandSkips: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+  dailyCommandBlocks: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+  dailyCommandTombstones: z
+    .object({
+      completions: z.record(z.string(), z.record(z.string(), z.unknown())),
+      skips: z.record(z.string(), z.record(z.string(), z.unknown())),
+      blocks: z.record(z.string(), z.record(z.string(), z.unknown())),
+    })
+    .optional(),
+  syncLog: z.array(z.record(z.string(), z.unknown())).optional(),
+  dailyReviewLastVisitAt: z.string().optional(),
+  dailyReviewAcks: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
+  dailyReviewBaselineAt: z.string().optional(),
   uiPreferences: z.object({
     showAdvancedSettings: z.boolean(),
     myActionItemsOnly: z.object({ attention: z.boolean(), myDay: z.boolean(), priorities: z.boolean() }),

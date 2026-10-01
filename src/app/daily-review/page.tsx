@@ -4,12 +4,16 @@
 // what I skipped, what's blocked, what got done. See daily-review.ts for the composition
 // rules. Every row is the shared TaskReferenceRow (Jira link, recorded reason + time,
 // Complete/Skip/Block — and Reactivate/Unblock/Reopen in the history blocks).
+//
+// A3 — opening (or refreshing) this page no longer records anything: "New" rows stay until
+// explicitly acknowledged, per row ("Seen") or all at once ("Mark all reviewed"), and each
+// row says why it is new.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { TaskReferenceRow } from "@/components/command-center/TaskReferenceRow";
-import { buildDailyReview, DAILY_REVIEW_COMPLETED_WINDOW_DAYS, type DailyReviewCompletedRow } from "@/lib/command-center/daily-review";
+import { buildDailyReview, DAILY_REVIEW_COMPLETED_WINDOW_DAYS, type DailyReviewCompletedRow, newReasonLabel } from "@/lib/command-center/daily-review";
 import { formatRelativeDateTime, formatRelativeDay } from "@/lib/command-center/relative-time";
 
 function completedCaption(row: DailyReviewCompletedRow, now: Date): string {
@@ -18,10 +22,11 @@ function completedCaption(row: DailyReviewCompletedRow, now: Date): string {
   return when ? `Source: ${source} · ${when}` : `Source: ${source}`;
 }
 
-function Block({ title, subtitle, count, empty, children }: { title: string; subtitle: string; count: number; empty: string; children: React.ReactNode }) {
+function Block({ title, subtitle, count, empty, children, action }: { title: string; subtitle: string; count: number; empty: string; children: React.ReactNode; action?: React.ReactNode }) {
   return (
     <section>
       <SectionHeading title={`${title} (${count})`} subtitle={subtitle} />
+      {action && count > 0 && <div className="mb-2 flex justify-end">{action}</div>}
       {count === 0 ? <Panel className="p-4 text-sm text-text3">{empty}</Panel> : <Panel className="p-4"><ul>{children}</ul></Panel>}
     </section>
   );
@@ -30,15 +35,6 @@ function Block({ title, subtitle, count, empty, children }: { title: string; sub
 export default function DailyReviewPage() {
   const { state, store, filteredData, workRelevanceIndex, scopedMentionEvents } = useCommandCenter();
   const [now] = useState(() => new Date());
-  // The PREVIOUS visit, captured once the persisted state has actually loaded (IndexedDB
-  // hydration is async) — only then is this visit recorded. undefined = not captured yet.
-  const [lastVisitAt, setLastVisitAt] = useState<string | null | undefined>(undefined);
-  useEffect(() => {
-    if (!state.loaded || lastVisitAt !== undefined) return;
-    setLastVisitAt(state.dailyReviewLastVisitAt ?? null);
-    store.markDailyReviewVisited();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.loaded]);
 
   const review = useMemo(
     () =>
@@ -53,10 +49,13 @@ export default function DailyReviewPage() {
         mentionEvents: scopedMentionEvents,
         attentionState: state.attentionState,
         syncLog: state.syncLog,
-        lastVisitAt: lastVisitAt ?? undefined,
+        // A3 — the pinned baseline; the legacy last visit only until a sync has pinned one.
+        baselineAt: state.dailyReviewBaselineAt,
+        lastVisitAt: state.dailyReviewLastVisitAt,
+        reviewAcks: state.dailyReviewAcks,
         now,
       }),
-    [filteredData.workItems, state, workRelevanceIndex, scopedMentionEvents, lastVisitAt, now]
+    [filteredData.workItems, state, workRelevanceIndex, scopedMentionEvents, now]
   );
 
   if (!state.loaded) {
@@ -64,7 +63,9 @@ export default function DailyReviewPage() {
   }
 
   const baselineLabel =
-    review.baseline.kind === "last-visit"
+    review.baseline.kind === "reviewed"
+      ? `since ${formatRelativeDateTime(review.baseline.at, now)}`
+      : review.baseline.kind === "last-visit"
       ? `since your last visit (${formatRelativeDateTime(review.baseline.at, now)})`
       : review.baseline.kind === "previous-sync"
         ? `since the sync before the latest one (${formatRelativeDateTime(review.baseline.at, now)}) — your first visit here`
@@ -72,7 +73,7 @@ export default function DailyReviewPage() {
   const newSubtitle =
     review.baseline.kind === "first-sync" && state.syncLog.length === 0
       ? "No Jira sync recorded yet — first-seen times are recorded per sync, so nothing can be new until one runs."
-      : `Tickets first seen ${baselineLabel}${review.personal ? ", assigned to you" : ""}. Anything you already completed, skipped or blocked is never listed here.`;
+      : `New tickets${review.personal ? " assigned to you" : ""}, reassignments to you and mentions of you ${baselineLabel}. Each stays here until you mark it seen; anything you completed, skipped or blocked is never listed.`;
 
   return (
     <div className="space-y-6 pb-16">
@@ -82,14 +83,48 @@ export default function DailyReviewPage() {
       </div>
 
       <Block
-        title="New since your last visit"
+        title="New"
         subtitle={newSubtitle}
-        count={review.newSinceLastVisit.length}
-        empty="Nothing new since your last visit."
+        count={review.newRows.length}
+        empty="Nothing new to review."
+        action={
+          <button
+            onClick={() => store.markDailyReviewSeen(review.newRows.map((r) => r.ticketKey))}
+            className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+          >
+            Mark all reviewed
+          </button>
+        }
       >
-        {review.newSinceLastVisit.map((w) => (
-          <TaskReferenceRow key={w.id} workItem={w} />
+        {review.newRows.map((r) => (
+          <li key={r.ticketKey} data-new-row={r.ticketKey} className="flex items-start gap-2 border-b border-border last:border-b-0">
+            <div className="min-w-0 flex-1">
+              {r.workItem ? (
+                <TaskReferenceRow as="div" workItem={r.workItem} caption={newReasonLabel(r.reasons)} />
+              ) : (
+                <TaskReferenceRow as="div" ticketKey={r.ticketKey} caption={newReasonLabel(r.reasons)} />
+              )}
+            </div>
+            <button
+              onClick={() => store.markDailyReviewSeen([r.ticketKey])}
+              title="Hide from New until something else happens on this ticket"
+              className="mt-2 shrink-0 rounded px-2 py-1 text-xs text-text3 hover:bg-surface2 hover:text-text2"
+            >
+              Seen
+            </button>
+          </li>
         ))}
+      </Block>
+
+      <Block
+        title="Due for re-check today"
+        subtitle="Skipped or blocked tickets whose re-check day has come. They stay skipped/blocked everywhere else until you reactivate, unblock or complete them."
+        count={review.dueForRecheck.length}
+        empty="Nothing due for a re-check."
+      >
+        {review.dueForRecheck.map((r) =>
+          r.workItem ? <TaskReferenceRow key={r.ticketKey} workItem={r.workItem} reactivation={r.reactivation} /> : <TaskReferenceRow key={r.ticketKey} ticketKey={r.ticketKey} reactivation={r.reactivation} />
+        )}
       </Block>
 
       <Block title="Skipped" subtitle="Still relevant, deliberately not executing. Reactivate to bring one back." count={review.skipped.length} empty="Nothing skipped.">

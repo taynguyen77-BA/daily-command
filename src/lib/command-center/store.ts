@@ -19,7 +19,8 @@ import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
 import type { DataSourceProvider, DataSourceSyncResult } from "./datasource/types";
 import { LOCK_UNAVAILABLE, withJiraSyncLock, type JiraSyncLockManager } from "./sync-lock";
-import { idbGet, idbSet } from "./local-db";
+import { idbGet, idbUpdate } from "./local-db";
+import { browserStateChannel, createLocalStorageStateStorage, readRevFromRaw, rebaseState, serializeWithRev, type StateChannel, type StateChannelFactory, type StateStorage } from "./state-persistence";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope } from "./jira/project-scope";
 import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "./jira/work-relevance-history";
@@ -29,6 +30,8 @@ import { computeDeliveryDrift } from "./delivery-drift";
 import { computeDeliveryLoops } from "./delivery-loops";
 import { computeDependencyRadar } from "./dependency-radar";
 import { detectJiraStatusCompletions } from "./jira-completion-detection";
+import { detectNewAssignments } from "./assignment-detection";
+import { closePausedTicketsFinishedInJira } from "./task-execution";
 import { DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS, type StaleAssignedTicketThresholds } from "./personal-staleness";
 import { computeRiskEscalations } from "./risk-escalation";
 import { computeAllReleaseHealth } from "./release-health";
@@ -37,6 +40,7 @@ import { deriveMemoryEvents } from "./memory-events";
 import { detectRisks } from "./risk-detection";
 import { dedupeRisks } from "./selectors";
 import { USAGE_KEYS } from "./usage";
+import { applyDailyCommandChange, emptyTombstones, mergeDailyCommandState, mergeReviewAcks, type DailyCommandRecord } from "./execution-state-merge";
 import type {
   Action,
   ActionOutcomeStatus,
@@ -50,7 +54,10 @@ import type {
   DailyCommandCompletion,
   DailyCommandSkip,
   DailyCommandBlock,
+  DailyCommandTombstone,
+  DailyCommandTombstones,
   DailyReportSnapshot,
+  DailyReviewAck,
   DailySnapshot,
   DataSourceType,
   Decision,
@@ -87,6 +94,15 @@ const STORAGE_KEY = "command-center:v1";
 const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for trend/pattern/weekly-review, bounded
 const MAX_MEMORY_EVENTS = 200;
 const MAX_BLOCK_REASON_LENGTH = 200;
+const MAX_KNOWN_TICKETS = 20000;
+/** Bounded like every other history-shaped field: past the cap, the oldest-first-seen keys go
+ *  first (unknown-provenance "" sorts oldest). */
+function capKnownTickets(known: Record<string, string>): Record<string, string> {
+  const entries = Object.entries(known);
+  if (entries.length <= MAX_KNOWN_TICKETS) return known;
+  return Object.fromEntries(entries.sort((a, b) => a[1].localeCompare(b[1])).slice(-MAX_KNOWN_TICKETS));
+}
+const isIsoDate = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
 const MAX_SYNC_LOG = 30; // most recent successful Jira syncs kept for provenance (oldest evicted first)
 const MAX_PERSONAL_PLAN_ITEMS = 400; // bounded personal-plan history, same philosophy as above
 // V2.2 §16 — Artifact History, NOT a second memory architecture: same bounded-array/
@@ -214,6 +230,10 @@ export interface StoreState {
   // maps above (see DailyCommandBlock in types.ts). Mutually exclusive with both: a ticketKey
   // is in at most one of dailyCommandCompletions/dailyCommandSkips/dailyCommandBlocks.
   dailyCommandBlocks: Record<string, DailyCommandBlock>;
+  // A1 — removals from the three maps above, so a cross-device merge never resurrects a
+  // record removed here (see execution-state-merge.ts). Written only through
+  // applyDailyCommandChange; synced with the maps.
+  dailyCommandTombstones: DailyCommandTombstones;
   // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. Local-only, bounded like every
   // other history-shaped field above; never synced (not part of SyncedAppState), never sent
   // anywhere. See PilotFeedbackEntry's own comment (types.ts) for the full reasoning.
@@ -230,6 +250,18 @@ export interface StoreState {
   // (see daily-review/page.tsx), so "New since your last visit" compares against the previous
   // visit, not this one. Local-only, like the Daily Command maps.
   dailyReviewLastVisitAt?: string;
+  // A3 — explicit Daily Review acknowledgments ("Seen" per row / "Mark all reviewed"), keyed
+  // by ticket KEY. Synced (grow-only per-key max). Replaces visit-on-mount, which emptied
+  // "New" on a mere page refresh.
+  dailyReviewAcks: Record<string, DailyReviewAck>;
+  // A3 — the stable cutoff "New" is computed against. Pinned once by runJiraSync (from the
+  // legacy last visit, else the previous sync) and advanced only by "Mark all reviewed" —
+  // never by visiting the page, never by a later sync.
+  dailyReviewBaselineAt?: string;
+  // A3 — every ticket key ever seen by a Jira sync → its original firstSeenAt ("" when its
+  // provenance predates firstSeenAt). Lets a ticket that leaves the synced dataset and comes
+  // back keep its first-seen time instead of being re-stamped as new. Local-only.
+  knownTicketFirstSeen: Record<string, string>;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -269,6 +301,9 @@ function initialState(): StoreState {
     dailyCommandCompletions: {},
     dailyCommandSkips: {},
     dailyCommandBlocks: {},
+    dailyCommandTombstones: emptyTombstones(),
+    dailyReviewAcks: {},
+    knownTicketFirstSeen: {},
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -318,6 +353,15 @@ export interface CommandCenterStoreDeps {
   /** undefined → navigator.locks when available (resolved per sync); null → force the
    *  in-memory fallback lock. */
   jiraSyncLockManager?: JiraSyncLockManager | null;
+  /** A2 — undefined → the browser default (IndexedDB, else localStorage; none server-side);
+   *  null → no persistence at all. Tests inject a shared in-memory storage per "origin". */
+  stateStorage?: StateStorage | null;
+  /** A2 — undefined → BroadcastChannel("daily-command-state") when the browser has it;
+   *  null → none (forces the focus/visibilitychange fallback). */
+  stateChannel?: StateChannelFactory | null;
+  /** A2 — where the no-BroadcastChannel fallback listens for "focus"/"visibilitychange".
+   *  undefined → window + document. */
+  stateFocusTargets?: Pick<EventTarget, "addEventListener">[];
 }
 
 const IDLE_JIRA_SYNC_ACTIVITY: JiraSyncActivity = { inProgress: false };
@@ -448,7 +492,12 @@ function asDailyReports(v: unknown): Record<string, DailyReportSnapshot> {
 function isDailyCommandCompletionShape(v: unknown): v is DailyCommandCompletion {
   if (typeof v !== "object" || v === null) return false;
   const c = v as Partial<DailyCommandCompletion>;
-  return typeof c.ticketKey === "string" && typeof c.completedAt === "string" && (c.completedBy === undefined || typeof c.completedBy === "string");
+  return (
+    typeof c.ticketKey === "string" &&
+    typeof c.completedAt === "string" &&
+    (c.completedBy === undefined || typeof c.completedBy === "string") &&
+    (c.updatedAt === undefined || typeof c.updatedAt === "string")
+  );
 }
 
 function asDailyCommandCompletions(v: unknown): Record<string, DailyCommandCompletion> {
@@ -472,7 +521,9 @@ function isDailyCommandSkipShape(v: unknown): v is DailyCommandSkip {
     typeof s.ticketKey === "string" &&
     typeof s.skippedAt === "string" &&
     (s.skippedBy === undefined || typeof s.skippedBy === "string") &&
-    (s.reason === undefined || (typeof s.reason === "string" && VALID_SKIP_REASONS.has(s.reason)))
+    (s.reason === undefined || (typeof s.reason === "string" && VALID_SKIP_REASONS.has(s.reason))) &&
+    (s.updatedAt === undefined || typeof s.updatedAt === "string") &&
+    (s.revisitOn === undefined || typeof s.revisitOn === "string")
   );
 }
 
@@ -493,8 +544,41 @@ function isDailyCommandBlockShape(v: unknown): v is DailyCommandBlock {
     typeof b.ticketKey === "string" &&
     typeof b.blockedAt === "string" &&
     (b.blockedBy === undefined || typeof b.blockedBy === "string") &&
-    (b.reason === undefined || typeof b.reason === "string")
+    (b.reason === undefined || typeof b.reason === "string") &&
+    (b.updatedAt === undefined || typeof b.updatedAt === "string") &&
+    (b.revisitOn === undefined || typeof b.revisitOn === "string")
   );
+}
+
+// A1 — same drop-malformed-entries discipline; a missing/corrupt tombstone map is just empty.
+function asTombstoneMap(v: unknown): Record<string, DailyCommandTombstone> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailyCommandTombstone> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const t = value as Partial<DailyCommandTombstone> | null;
+    if (t && typeof t === "object" && typeof t.ticketKey === "string" && typeof t.deletedAt === "string") out[key] = { ticketKey: t.ticketKey, deletedAt: t.deletedAt };
+  }
+  return out;
+}
+
+export function asDailyReviewAcks(v: unknown): Record<string, DailyReviewAck> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailyReviewAck> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const a = value as Partial<DailyReviewAck> | null;
+    if (a && typeof a === "object" && typeof a.ticketKey === "string" && typeof a.reviewedAt === "string") out[key] = { ticketKey: a.ticketKey, reviewedAt: a.reviewedAt };
+  }
+  return out;
+}
+
+function asStringRecord(v: unknown): Record<string, string> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  return Object.fromEntries(Object.entries(obj).filter(([, value]) => typeof value === "string")) as Record<string, string>;
+}
+
+export function asDailyCommandTombstones(v: unknown): DailyCommandTombstones {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  return { completions: asTombstoneMap(obj.completions), skips: asTombstoneMap(obj.skips), blocks: asTombstoneMap(obj.blocks) };
 }
 
 function asDailyCommandBlocks(v: unknown): Record<string, DailyCommandBlock> {
@@ -632,10 +716,14 @@ export function parseStoredState(raw: string): StoreState {
       dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
       dailyCommandSkips: asDailyCommandSkips(parsed.dailyCommandSkips),
       dailyCommandBlocks: asDailyCommandBlocks(parsed.dailyCommandBlocks),
+      dailyCommandTombstones: asDailyCommandTombstones(parsed.dailyCommandTombstones),
       pilotFeedback: asPilotFeedback(parsed.pilotFeedback),
       staleAssignedTicketThresholds: asStaleAssignedTicketThresholds(parsed.staleAssignedTicketThresholds),
       syncLog: asSyncLog(parsed.syncLog),
       dailyReviewLastVisitAt: typeof parsed.dailyReviewLastVisitAt === "string" ? parsed.dailyReviewLastVisitAt : undefined,
+      dailyReviewAcks: asDailyReviewAcks(parsed.dailyReviewAcks),
+      dailyReviewBaselineAt: typeof parsed.dailyReviewBaselineAt === "string" ? parsed.dailyReviewBaselineAt : undefined,
+      knownTicketFirstSeen: asStringRecord(parsed.knownTicketFirstSeen),
     };
   } catch {
     return initialState();
@@ -650,41 +738,82 @@ export class CommandCenterStore {
 
   constructor(private readonly deps: CommandCenterStoreDeps = {}) {}
 
-  private hydrate() {
-    if (this.hydrated || typeof window === "undefined") return;
-    this.hydrated = true;
+  // ===== A2 — cross-tab-safe persistence (see state-persistence.ts for the full design) =====
+  // `base` is the state exactly as this tab last read it from, or wrote it to, storage, and
+  // `rev` its stateRev. `this.state !== this.base` therefore means "this tab has changes not
+  // yet in storage"; every write is rebased onto storage when storage moved past `rev`.
+  private base: StoreState = this.state;
+  private rev = 0;
+  private readonly tabId = `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  private channel: StateChannel | null = null;
+  private resolvedStorage: StateStorage | null | undefined = undefined;
+  private usesDefaultIndexedDb = false;
+  private persistInFlight = false;
+  private persistQueued = false;
+
+  private storage(): StateStorage | null {
+    if (this.resolvedStorage !== undefined) return this.resolvedStorage;
+    if (this.deps.stateStorage !== undefined) return (this.resolvedStorage = this.deps.stateStorage);
+    if (typeof window === "undefined") return null; // server render — not cached, the client resolves its own
     if (typeof indexedDB === "undefined") {
       // No IndexedDB available (old browser, some locked-down private-browsing modes, or
       // this app's own Node-based offline test environment) — the original, fully
-      // synchronous localStorage path, unchanged.
-      try {
-        const raw = window.localStorage.getItem(STORAGE_KEY);
-        if (raw) this.state = parseStoredState(raw);
-      } catch {
-        // localStorage inaccessible (e.g. private browsing) — fall back to pristine state.
-        this.state = initialState();
-      }
+      // synchronous localStorage path.
+      this.resolvedStorage = createLocalStorageStateStorage(() => window.localStorage, STORAGE_KEY);
+    } else {
+      this.usesDefaultIndexedDb = true;
+      this.resolvedStorage = { read: () => idbGet(STORAGE_KEY), update: (fn) => idbUpdate(STORAGE_KEY, fn) };
+    }
+    return this.resolvedStorage;
+  }
+
+  private hydrate() {
+    if (this.hydrated) return;
+    const storage = this.storage();
+    if (!storage) return;
+    this.hydrated = true;
+    this.connectCrossTab();
+    if (this.usesDefaultIndexedDb) {
+      // V2.16 — IndexedDB reads are inherently async, but getSnapshot() must return
+      // synchronously for useSyncExternalStore — this kicks off the read in the background;
+      // once it resolves, every subscribed component is notified, same as any other state
+      // change. Until then, callers see the pristine initialState(), an unavoidable, brief
+      // first-paint gap — the same one this app already accepts for getServerSnapshot().
+      void this.hydrateFromIndexedDb();
       return;
     }
-    // V2.16 — IndexedDB reads are inherently async, but getSnapshot() must return
-    // synchronously for useSyncExternalStore — this kicks off the read in the background;
-    // once it resolves, set() notifies every subscribed component, same as any other state
-    // change. Until then, callers see the pristine initialState(), an unavoidable, brief
-    // first-paint gap — the same one this app already accepts for getServerSnapshot()
-    // (also always pristine).
-    void this.hydrateFromIndexedDb();
+    let raw: string | null | Promise<string | null>;
+    try {
+      raw = storage.read();
+    } catch {
+      // Storage inaccessible (e.g. private browsing) — fall back to pristine state.
+      this.state = initialState();
+      this.base = this.state;
+      return;
+    }
+    if (raw instanceof Promise) {
+      void raw.then((r) => r && this.adoptStored(parseStoredState(r), readRevFromRaw(r)), () => undefined);
+      return;
+    }
+    if (raw) {
+      this.state = parseStoredState(raw);
+      this.base = this.state;
+      this.rev = readRevFromRaw(raw);
+    }
   }
 
   /** V2.16 — one-time migration: a device that already has real data in the OLD localStorage
    *  key (every install from before this pass) must not appear to have "lost" it just
    *  because IndexedDB is empty on its first-ever read here. The legacy key is only cleared
    *  once its content has actually been confirmed written to IndexedDB — a failed migration
-   *  write leaves the old copy in place so the next reload simply retries. */
+   *  write leaves the old copy in place so the next reload simply retries. A2 — the write is
+   *  conditional (only into an empty IndexedDB), so a second tab migrating at the same moment
+   *  can never overwrite a write the first tab already made. */
   private async hydrateFromIndexedDb() {
     try {
       const fromIdb = await idbGet(STORAGE_KEY);
       if (fromIdb) {
-        this.set(parseStoredState(fromIdb));
+        this.adoptStored(parseStoredState(fromIdb), readRevFromRaw(fromIdb));
         return;
       }
     } catch {
@@ -700,36 +829,137 @@ export class CommandCenterStore {
     if (!legacyRaw) return; // genuinely nothing persisted anywhere yet
 
     const migrated = parseStoredState(legacyRaw);
-    this.set(migrated);
+    this.adoptStored(migrated, 0);
     try {
-      await idbSet(STORAGE_KEY, JSON.stringify(migrated));
+      await idbUpdate(STORAGE_KEY, (current) => (current ? null : serializeWithRev(migrated, 0)));
       window.localStorage.removeItem(STORAGE_KEY);
     } catch {
       // Migration write failed — legacy copy stays in place; persist() below will keep
       // retrying the IndexedDB write on every subsequent mutation regardless.
     }
+    void this.checkForNewerState();
   }
 
-  private persist() {
-    if (typeof window === "undefined") return;
-    if (typeof indexedDB === "undefined") {
-      try {
-        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(this.state));
-      } catch {
-        // Storage full/unavailable — keep working in-memory for this session.
-      }
+  /** A2 — take a newer stored state as this tab's own. Local changes not yet persisted are
+   *  rebased on top (never dropped), then persisted. */
+  private adoptStored(stored: StoreState, rev: number) {
+    const pending = this.state !== this.base;
+    this.state = pending ? this.rebase(this.base, this.state, stored) : stored;
+    this.base = stored;
+    this.rev = rev;
+    this.listeners.forEach((l) => l());
+    if (pending) this.persist();
+  }
+
+  /** A2 — the 3-way rebase (state-persistence.ts), then the execution-state LWW merge over the
+   *  result, so per-ticket records, tombstones and Daily Review acks from BOTH sides survive
+   *  even where the generic rebase took a whole sub-map from one side. */
+  private rebase(prev: StoreState, next: StoreState, stored: StoreState): StoreState {
+    const rebased = rebaseState(prev, next, stored);
+    return {
+      ...rebased,
+      ...mergeDailyCommandState(rebased, stored),
+      dailyReviewAcks: mergeReviewAcks(rebased.dailyReviewAcks, stored.dailyReviewAcks),
+    };
+  }
+
+  private connectCrossTab() {
+    const factory = this.deps.stateChannel !== undefined ? this.deps.stateChannel : browserStateChannel;
+    this.channel = factory
+      ? factory((m) => {
+          if (m.writerTabId !== this.tabId && m.rev > this.rev) void this.checkForNewerState();
+        })
+      : null;
+    if (this.channel) return;
+    // Fallback (no BroadcastChannel): compare the stored rev whenever this tab regains focus.
+    const targets =
+      this.deps.stateFocusTargets ??
+      [typeof window !== "undefined" ? window : undefined, typeof document !== "undefined" ? document : undefined].filter(
+        (t): t is Window & Document => !!t && typeof (t as EventTarget).addEventListener === "function"
+      );
+    const check = () => void this.checkForNewerState();
+    for (const t of targets) {
+      t.addEventListener("focus", check);
+      t.addEventListener("visibilitychange", check);
+    }
+  }
+
+  /** A2 — re-hydrates from storage when another tab has written a newer rev. Called on a
+   *  BroadcastChannel message, and on focus/visibilitychange where that channel is missing. */
+  async checkForNewerState(): Promise<void> {
+    const storage = this.storage();
+    if (!storage) return;
+    let raw: string | null;
+    try {
+      raw = await storage.read();
+    } catch {
       return;
     }
-    // V2.16 — fire-and-forget, same as the localStorage write it replaces: persistence must
-    // never block a UI update. IndexedDB's much larger quota makes hitting it a genuinely
-    // rare condition (unlike localStorage's ~5-10MB ceiling this replaces) — still never
-    // thrown past this module (the same "keep working in-memory" contract as every other
-    // storage failure here), but logged rather than fully swallowed, since a failure here is
-    // unusual enough to be worth a trace if someone's debugging "my changes don't survive a
-    // reload".
-    void idbSet(STORAGE_KEY, JSON.stringify(this.state)).catch((err) => {
-      console.error("CommandCenterStore: failed to persist to IndexedDB", err);
-    });
+    const rev = readRevFromRaw(raw);
+    if (!raw || rev <= this.rev) return;
+    this.adoptStored(parseStoredState(raw), rev);
+  }
+
+  /** Writes `this.state` through one atomic read-modify-write. When the stored rev is newer
+   *  than `this.rev` (another tab wrote since this tab last saw storage), the write is rebased
+   *  onto the stored state instead of overwriting it; the rebased result then becomes this
+   *  tab's state too. Writes are serialized per tab (one in flight, the rest coalesced).
+   *  Failures keep working in-memory, same contract as ever: localStorage quota errors are
+   *  swallowed; IndexedDB ones are logged, since they are rare enough to be worth a trace. */
+  private persist() {
+    const storage = this.storage();
+    if (!storage) return;
+    if (this.persistInFlight) {
+      this.persistQueued = true;
+      return;
+    }
+    this.persistInFlight = true;
+    const local = this.state;
+    const base = this.base;
+    const baseRev = this.rev;
+    let written = local;
+    let writtenRev = baseRev;
+    const decide = (current: string | null): string => {
+      const storedRev = readRevFromRaw(current);
+      written = storedRev > baseRev && current ? this.rebase(base, local, parseStoredState(current)) : local;
+      writtenRev = Math.max(storedRev, baseRev) + 1;
+      return serializeWithRev(written, writtenRev);
+    };
+    const finish = (ok: boolean) => {
+      this.persistInFlight = false;
+      if (ok) {
+        this.base = written;
+        this.rev = writtenRev;
+        if (written !== local) {
+          this.state = this.state === local ? written : rebaseState(local, this.state, written);
+          this.listeners.forEach((l) => l());
+        }
+        this.channel?.post({ rev: writtenRev, writerTabId: this.tabId });
+      }
+      if (this.persistQueued || (ok && this.state !== this.base)) {
+        this.persistQueued = false;
+        if (this.state !== this.base) this.persist();
+      }
+    };
+    let result: void | Promise<void>;
+    try {
+      result = storage.update(decide);
+    } catch {
+      // Storage full/unavailable — keep working in-memory for this session.
+      finish(false);
+      return;
+    }
+    if (result instanceof Promise) {
+      result.then(
+        () => finish(true),
+        (err) => {
+          console.error("CommandCenterStore: failed to persist state", err);
+          finish(false);
+        }
+      );
+    } else {
+      finish(true);
+    }
   }
 
   private set(next: StoreState) {
@@ -907,22 +1137,29 @@ export class CommandCenterStore {
    *  the full reasoning and personal-focus.ts/assigned-work.ts/recent-mentions.ts for where
    *  this suppresses the ticket. `completedBy` defaults to the configured identity's display
    *  name, when set, matching every other "who did this" field in this codebase. */
+  /** A1 — the one write path for the three Daily Command maps: mutual exclusion, `updatedAt`
+   *  stamping and tombstoning of every removal all happen in applyDailyCommandChange
+   *  (execution-state-merge.ts), so a removal here is never resurrected by a cross-device
+   *  merge. `next` null = remove the ticket from every map. */
+  private setDailyCommand(ticketKey: string, next: DailyCommandRecord | null, nowIso: string = new Date().toISOString()) {
+    this.set({ ...this.state, ...applyDailyCommandChange(this.state, ticketKey, next, nowIso) });
+  }
+
+  private actorName(): string | undefined {
+    return this.state.personalIdentity?.displayName ?? this.state.ownerName;
+  }
+
+  /** V2.19 — Daily Command Completion: "I'm done with this ticket here", independent of the
+   *  Jira issue's own status and of any specific Action/Mention. Never touches Jira, never
+   *  mutates data.workItems or any existing Action — see types.ts's DailyCommandCompletion for
+   *  the full reasoning and personal-focus.ts/assigned-work.ts/recent-mentions.ts for where
+   *  this suppresses the ticket. `completedBy` defaults to the configured identity's display
+   *  name, when set, matching every other "who did this" field in this codebase.
+   *  V2.23/V2.26 — mutual exclusion: also clears any skip/block on the same ticket (the
+   *  SKIPPED -> COMPLETED and BLOCKED -> COMPLETED transitions). */
   completeTicketInDailyCommand(ticketKey: string) {
-    const completion: DailyCommandCompletion = {
-      ticketKey,
-      completedAt: new Date().toISOString(),
-      completedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
-    };
-    // V2.23 — mutual exclusion: completing a ticket also clears any Daily Command Skip on it
-    // (this is the one defined SKIPPED -> COMPLETED transition, §11) so a ticketKey is never
-    // simultaneously "Completed" and "Skipped".
-    // V2.26 — and any Daily Command Block (the BLOCKED -> COMPLETED transition), so the
-    // three states stay mutually exclusive.
-    const dailyCommandSkips = { ...this.state.dailyCommandSkips };
-    delete dailyCommandSkips[ticketKey];
-    const dailyCommandBlocks = { ...this.state.dailyCommandBlocks };
-    delete dailyCommandBlocks[ticketKey];
-    this.set({ ...this.state, dailyCommandCompletions: { ...this.state.dailyCommandCompletions, [ticketKey]: completion }, dailyCommandSkips, dailyCommandBlocks });
+    const now = new Date().toISOString();
+    this.setDailyCommand(ticketKey, { kind: "completion", record: { ticketKey, completedAt: now, completedBy: this.actorName() } }, now);
   }
 
   /** The only way back once a ticket is Daily-Command-completed — never automatic (§14
@@ -930,9 +1167,7 @@ export class CommandCenterStore {
    *  never clears this record on its own). */
   reopenTicketInDailyCommand(ticketKey: string) {
     if (!(ticketKey in this.state.dailyCommandCompletions)) return;
-    const next = { ...this.state.dailyCommandCompletions };
-    delete next[ticketKey];
-    this.set({ ...this.state, dailyCommandCompletions: next });
+    this.setDailyCommand(ticketKey, null);
   }
 
   /** V2.23 — Daily Command Skip: "this work is relevant, but I am intentionally not
@@ -940,33 +1175,22 @@ export class CommandCenterStore {
    *  distinct from Work Relevance EXCLUDED (a policy/project-truth concept) and from Daily
    *  Command Completion (types.ts's DailyCommandSkip has the full reasoning). Never touches
    *  Jira, never mutates data.workItems or any existing Action. `reason` is always optional —
-   *  never required to skip an item (§7). Skipping an ACTIVE ticket is the only defined
-   *  entry point (§11); skipping an already-completed ticket is not offered by any UI action,
-   *  but is still made safe here by mutual exclusion with dailyCommandCompletions, same as
-   *  completeTicketInDailyCommand's own guarantee in the other direction. */
-  skipTicketInDailyCommand(ticketKey: string, reason?: SkipReason) {
-    const skip: DailyCommandSkip = {
-      ticketKey,
-      skippedAt: new Date().toISOString(),
-      skippedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
-      reason,
-    };
-    const dailyCommandCompletions = { ...this.state.dailyCommandCompletions };
-    delete dailyCommandCompletions[ticketKey];
-    const dailyCommandBlocks = { ...this.state.dailyCommandBlocks };
-    delete dailyCommandBlocks[ticketKey];
-    this.set({ ...this.state, dailyCommandSkips: { ...this.state.dailyCommandSkips, [ticketKey]: skip }, dailyCommandCompletions, dailyCommandBlocks });
+   *  never required to skip an item (§7). Mutually exclusive with completion/block.
+   *  A4 — `revisitOn` (local YYYY-MM-DD, optional) only schedules a Daily Review re-check;
+   *  it never un-skips anything by itself. */
+  skipTicketInDailyCommand(ticketKey: string, reason?: SkipReason, revisitOn?: string) {
+    const now = new Date().toISOString();
+    const skip: DailyCommandSkip = { ticketKey, skippedAt: now, skippedBy: this.actorName(), reason, ...(isIsoDate(revisitOn) ? { revisitOn } : {}) };
+    this.setDailyCommand(ticketKey, { kind: "skip", record: skip }, now);
   }
 
   /** The explicit "Reactivate" action (§9) — the only way back from SKIPPED to ACTIVE. Never
    *  automatic: an ordinary Jira sync, status change, or comment must never clear this record
-   *  on its own (§8) — only this call, or completeTicketInDailyCommand's own mutual-exclusion
-   *  clear (the SKIPPED -> COMPLETED transition), ever removes a skip. */
+   *  on its own (§8) — only this call, completion/block's mutual-exclusion clear, or A4's
+   *  "closed in Jira" move to Completed ever removes a skip. */
   reactivateSkippedTicket(ticketKey: string) {
     if (!(ticketKey in this.state.dailyCommandSkips)) return;
-    const next = { ...this.state.dailyCommandSkips };
-    delete next[ticketKey];
-    this.set({ ...this.state, dailyCommandSkips: next });
+    this.setDailyCommand(ticketKey, null);
   }
 
   /** V2.26 — Daily Command Block: "not done, paused — waiting on something outside my
@@ -974,34 +1198,37 @@ export class CommandCenterStore {
    *  data.workItems, `reason` always optional (free text, trimmed, bounded; blank means no
    *  reason). Clears any completion/skip for the same ticketKey so the three states stay
    *  mutually exclusive. Re-blocking an already-blocked ticket replaces the record (new
-   *  timestamp/reason). */
-  blockTicketInDailyCommand(ticketKey: string, reason?: string) {
+   *  timestamp/reason). A4 — optional `revisitOn`, same as skip. */
+  blockTicketInDailyCommand(ticketKey: string, reason?: string, revisitOn?: string) {
+    const now = new Date().toISOString();
     const trimmed = reason?.trim().slice(0, MAX_BLOCK_REASON_LENGTH);
-    const block: DailyCommandBlock = {
-      ticketKey,
-      blockedAt: new Date().toISOString(),
-      blockedBy: this.state.personalIdentity?.displayName ?? this.state.ownerName,
-      reason: trimmed ? trimmed : undefined,
-    };
-    const dailyCommandCompletions = { ...this.state.dailyCommandCompletions };
-    delete dailyCommandCompletions[ticketKey];
-    const dailyCommandSkips = { ...this.state.dailyCommandSkips };
-    delete dailyCommandSkips[ticketKey];
-    this.set({ ...this.state, dailyCommandBlocks: { ...this.state.dailyCommandBlocks, [ticketKey]: block }, dailyCommandCompletions, dailyCommandSkips });
+    const block: DailyCommandBlock = { ticketKey, blockedAt: now, blockedBy: this.actorName(), reason: trimmed ? trimmed : undefined, ...(isIsoDate(revisitOn) ? { revisitOn } : {}) };
+    this.setDailyCommand(ticketKey, { kind: "block", record: block }, now);
   }
 
   /** The explicit "Unblock" action — BLOCKED -> ACTIVE. Never automatic, same rule as
    *  reactivateSkippedTicket: no sync, status change, or comment clears a block on its own. */
   unblockTicketInDailyCommand(ticketKey: string) {
     if (!(ticketKey in this.state.dailyCommandBlocks)) return;
-    const next = { ...this.state.dailyCommandBlocks };
-    delete next[ticketKey];
-    this.set({ ...this.state, dailyCommandBlocks: next });
+    this.setDailyCommand(ticketKey, null);
   }
 
-  /** V2.26 — records a Daily Review visit. `at` is injectable for tests. */
+  /** V2.26 — records a Daily Review visit. `at` is injectable for tests. A3 — no longer
+   *  called by the page (visiting must not clear "New"); kept for compatibility. */
   markDailyReviewVisited(at: string = new Date().toISOString()) {
     this.set({ ...this.state, dailyReviewLastVisitAt: at });
+  }
+
+  /** A3 — the user explicitly acknowledged these Daily Review "New" rows (one row's "Seen",
+   *  or "Mark all reviewed" with every listed key). Only ever moves an acknowledgment
+   *  forward. `at` is injectable for tests. */
+  markDailyReviewSeen(ticketKeys: string[], at: string = new Date().toISOString()) {
+    if (ticketKeys.length === 0) return;
+    const dailyReviewAcks = { ...this.state.dailyReviewAcks };
+    for (const ticketKey of ticketKeys) {
+      if (!dailyReviewAcks[ticketKey] || dailyReviewAcks[ticketKey].reviewedAt < at) dailyReviewAcks[ticketKey] = { ticketKey, reviewedAt: at };
+    }
+    this.set({ ...this.state, dailyReviewAcks });
   }
 
   /** V2.22 §3-4 — records one lightweight pilot-feedback entry (3 questions, 0-2 each, plus
@@ -1065,6 +1292,16 @@ export class CommandCenterStore {
       personalPlan: synced.actionPlanState.personalPlan,
       memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
       dailyReports: synced.dailyReports,
+      // A1 — every execution-state field is optional on a synced blob (pre-A1 writers never
+      // sent them): absent means "keep local", never "clear".
+      dailyCommandCompletions: synced.dailyCommandCompletions ?? this.state.dailyCommandCompletions,
+      dailyCommandSkips: synced.dailyCommandSkips ?? this.state.dailyCommandSkips,
+      dailyCommandBlocks: synced.dailyCommandBlocks ?? this.state.dailyCommandBlocks,
+      dailyCommandTombstones: synced.dailyCommandTombstones ?? this.state.dailyCommandTombstones,
+      syncLog: synced.syncLog ?? this.state.syncLog,
+      dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? this.state.dailyReviewLastVisitAt,
+      dailyReviewAcks: synced.dailyReviewAcks ?? this.state.dailyReviewAcks,
+      dailyReviewBaselineAt: synced.dailyReviewBaselineAt ?? this.state.dailyReviewBaselineAt,
       showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
       myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
       jiraProjectScope: synced.uiPreferences.jiraProjectScope,
@@ -1228,10 +1465,33 @@ export class CommandCenterStore {
     // "updated". Pre-existing items without firstSeenAt stay undefined — never back-filled
     // with a guess.
     const observedAt = new Date().toISOString();
+    // A3 — a ticket absent from the local store but already KNOWN (it left the synced dataset
+    // and came back, e.g. a project dropped from and re-added to Focus scope) keeps its
+    // original firstSeenAt instead of being re-stamped as new. Seeded from the current work
+    // items too, so installs from before knownTicketFirstSeen existed are covered from their
+    // first sync on ("" = provenance predates firstSeenAt → stays undefined, never "new").
+    const knownFirstSeen: Record<string, string> = { ...this.state.knownTicketFirstSeen };
+    for (const w of this.state.data.workItems) if (!(w.key in knownFirstSeen)) knownFirstSeen[w.key] = w.firstSeenAt ?? "";
+    // A3 — "assigned to you" since the last sync: assignment-detection.ts's ownerId diff,
+    // applied only to tickets already in the store (a brand-new ticket is a "New ticket").
+    const myAccountId = this.state.personalIdentity?.accountId;
+    const reassignedToMe = new Set(
+      detectNewAssignments(
+        { ...emptyData(), workItems: incoming.workItems.filter((w) => prevWorkItemsById.has(w.id)) },
+        { date: getTodayIso(), workItems: this.state.data.workItems, risks: [], requirements: [], dependencies: [], projects: [] },
+        myAccountId
+      ).map((e) => e.workItemId)
+    );
     const incomingWorkItems: WorkItem[] = incoming.workItems.map((w) => {
       const prev = prevWorkItemsById.get(w.id);
-      if (!prev) return { ...w, firstSeenAt: observedAt };
-      return prev.firstSeenAt ? { ...w, firstSeenAt: prev.firstSeenAt } : w;
+      if (!prev) {
+        const known = knownFirstSeen[w.key];
+        if (known === undefined) return { ...w, firstSeenAt: observedAt };
+        return known ? { ...w, firstSeenAt: known } : w;
+      }
+      const withFirstSeen = prev.firstSeenAt ? { ...w, firstSeenAt: prev.firstSeenAt } : w;
+      if (reassignedToMe.has(w.id)) return { ...withFirstSeen, assignedToMeAt: observedAt };
+      return prev.assignedToMeAt && myAccountId && w.ownerId === myAccountId ? { ...withFirstSeen, assignedToMeAt: prev.assignedToMeAt } : withFirstSeen;
     });
     let created = 0;
     let updated = 0;
@@ -1241,10 +1501,16 @@ export class CommandCenterStore {
       const prev = prevWorkItemsById.get(w.id);
       if (!prev) {
         created++;
-        newTicketKeys.push(w.key);
+        if (!(w.key in knownFirstSeen)) newTicketKeys.push(w.key);
       } else if (JSON.stringify(prev) !== JSON.stringify(w)) updated++;
       else unchanged++;
     }
+    for (const w of incomingWorkItems) if (!(w.key in knownFirstSeen)) knownFirstSeen[w.key] = w.firstSeenAt ?? "";
+    // A3 — pin the Daily Review baseline once, at the first sync that HAS a previous one: the
+    // legacy last visit if there was one, else that previous sync — exactly the cutoff the
+    // pre-A3 page used, but frozen, so neither a refresh nor later syncs move it.
+    const lastSyncEntry = this.state.syncLog[this.state.syncLog.length - 1];
+    const dailyReviewBaselineAt = this.state.dailyReviewBaselineAt ?? (lastSyncEntry ? (this.state.dailyReviewLastVisitAt ?? lastSyncEntry.completedAt) : undefined);
 
     // V2.18 §7 — same deduped manual+auto risk set every other snapshot-producing call site
     // now persists (see importData/closeDay's own comments) — closes the confirmed gap where
@@ -1349,8 +1615,14 @@ export class CommandCenterStore {
     // never touched by demo data, local-import, or any other mutation path.
     const workItemCalibrationHistory = updateWorkItemCalibrationHistory(this.state.workItemCalibrationHistory, merged, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), getTodayIso());
 
+    // A4 — a skipped/blocked ticket Jira has since closed (Done / COMPLETED) leaves the
+    // Skipped/Blocked lists on its own and lands in Completed history, source "jira", keeping
+    // the skip/block it replaced. Never the reverse: a Jira reopen does not un-complete it.
+    const jiraClosed = closePausedTicketsFinishedInJira(this.state, merged.workItems, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), observedAt, getTodayIso());
+
     this.set({
       ...this.state,
+      ...(jiraClosed.closedKeys.length > 0 ? jiraClosed.state : {}),
       data: merged,
       dataSource: "jira",
       loaded: true,
@@ -1363,6 +1635,8 @@ export class CommandCenterStore {
       mentionEvents: mergedMentionEvents,
       workItemCalibrationHistory,
       syncLog: [...this.state.syncLog, { startedAt, completedAt: observedAt, recordsCreated: created, recordsUpdated: updated, newTicketKeys }].slice(-MAX_SYNC_LOG),
+      knownTicketFirstSeen: capKnownTickets(knownFirstSeen),
+      dailyReviewBaselineAt,
       jiraSync: {
         lastSyncStartedAt: startedAt,
         // V2.18 §5 — on a partial sync, the incremental cursor advances only to the resume

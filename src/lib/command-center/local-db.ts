@@ -56,3 +56,34 @@ export async function idbSet(key: string, value: string): Promise<void> {
     db.close();
   }
 }
+
+/** A2 — atomic read-modify-write in ONE readwrite transaction: IndexedDB serializes readwrite
+ *  transactions on the same store across every tab of the origin, so no other tab's write can
+ *  land between this read and this write. `fn` runs synchronously inside the transaction (it
+ *  must not await) and returns the value to write, or null to write nothing. */
+export async function idbUpdate(key: string, fn: (current: string | null) => string | null): Promise<void> {
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.get(key);
+      req.onsuccess = () => {
+        let next: string | null;
+        try {
+          next = fn((req.result as string | undefined) ?? null);
+        } catch (err) {
+          tx.abort();
+          reject(err);
+          return;
+        }
+        if (next !== null) store.put(next, key);
+      };
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("IndexedDB update failed"));
+      tx.onabort = () => reject(tx.error ?? new Error("IndexedDB update aborted"));
+    });
+  } finally {
+    db.close();
+  }
+}

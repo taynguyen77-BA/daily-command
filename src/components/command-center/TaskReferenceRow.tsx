@@ -23,8 +23,9 @@ export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action
 
 export interface TaskRowActions {
   onComplete: () => void;
-  onSkip: (reason?: SkipReason) => void;
-  onBlock: (reason?: string) => void;
+  /** A4 — `revisitOn` (local YYYY-MM-DD) is optional: schedules a Daily Review re-check. */
+  onSkip: (reason?: SkipReason, revisitOn?: string) => void;
+  onBlock: (reason?: string, revisitOn?: string) => void;
   onReopen: () => void;
   onReactivateSkip: () => void;
   onUnblock: () => void;
@@ -108,6 +109,17 @@ export function TaskReferenceRowView({
   const [picker, setPicker] = useState<"skip" | "block" | null>(null);
   const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   const [blockReason, setBlockReason] = useState("");
+  const [revisitOn, setRevisitOn] = useState("");
+  const revisitInput = (
+    <input
+      type="date"
+      value={revisitOn}
+      onChange={(e) => setRevisitOn(e.target.value)}
+      aria-label="Re-check on (optional)"
+      title="Re-check on (optional) — shows up in Daily Review that day; nothing changes until you act"
+      className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+    />
+  );
   const record = formatExecutionRecord(execution, now);
   const Tag = as;
 
@@ -159,7 +171,8 @@ export function TaskReferenceRowView({
                   </option>
                 ))}
               </select>
-              <button onClick={() => { actions.onSkip(skipReason || undefined); setPicker(null); }} className={BTN}>
+              {revisitInput}
+              <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); setPicker(null); setRevisitOn(""); }} className={BTN}>
                 {L.skip}
               </button>
               <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
@@ -183,7 +196,8 @@ export function TaskReferenceRowView({
                   <option key={r} value={r} />
                 ))}
               </datalist>
-              <button onClick={() => { actions.onBlock(blockReason || undefined); setPicker(null); setBlockReason(""); }} className={BTN}>
+              {revisitInput}
+              <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined); setPicker(null); setBlockReason(""); setRevisitOn(""); }} className={BTN}>
                 {L.block}
               </button>
               <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
@@ -226,8 +240,8 @@ export function TaskReferenceRowView({
 export function storeActionsFor(ticketKey: string): TaskRowActions {
   return {
     onComplete: () => commandCenterStore.completeTicketInDailyCommand(ticketKey),
-    onSkip: (reason) => commandCenterStore.skipTicketInDailyCommand(ticketKey, reason),
-    onBlock: (reason) => commandCenterStore.blockTicketInDailyCommand(ticketKey, reason),
+    onSkip: (reason, revisitOn) => commandCenterStore.skipTicketInDailyCommand(ticketKey, reason, revisitOn),
+    onBlock: (reason, revisitOn) => commandCenterStore.blockTicketInDailyCommand(ticketKey, reason, revisitOn),
     onReopen: () => commandCenterStore.reopenTicketInDailyCommand(ticketKey),
     onReactivateSkip: () => commandCenterStore.reactivateSkippedTicket(ticketKey),
     onUnblock: () => commandCenterStore.unblockTicketInDailyCommand(ticketKey),

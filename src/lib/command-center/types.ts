@@ -256,6 +256,12 @@ export interface WorkItem {
   // data that predates this field (or never came from a Jira sync) — every read site must
   // treat undefined as "unknown", never as "new".
   firstSeenAt?: string;
+  // A3 — ISO datetime of the Jira sync that first observed this (already-known) work item's
+  // owner change TO the configured identity (assignment-detection.ts's diff, run per sync in
+  // store.ts). Carried forward while the owner stays the same; cleared when it changes away.
+  // Undefined = never observed being reassigned to me (including: created already assigned
+  // to me — that is a "New ticket", not an assignment).
+  assignedToMeAt?: string;
 }
 
 /** One successful Jira sync's provenance summary, kept in StoreState.syncLog (bounded). Counts
@@ -1607,6 +1613,16 @@ export interface DailyCommandCompletion {
   ticketKey: string;
   completedAt: string; // ISO datetime (not just a date — same precision as MentionEvent.mentionedAt, needed for reactivation comparisons)
   completedBy?: string; // PersonalIdentity.displayName at the moment of completion, when configured
+  // A1 — last-writer-wins clock for cross-device merge (execution-state-merge.ts). Optional:
+  // pre-A1 records fall back to completedAt.
+  updatedAt?: string;
+  // A4 — "jira" when the record was created automatically because a skipped/blocked ticket
+  // was closed in Jira (store.ts's runJiraSync). Undefined = recorded by the user ("daily-command").
+  source?: "daily-command" | "jira";
+  /** A4 — local YYYY-MM-DD the Jira close was detected, for "Closed in Jira on <date>". */
+  closedInJiraOn?: string;
+  /** A4 — the skip/block this completion replaced, kept so the history isn't lost. */
+  previousState?: { kind: "skipped" | "blocked"; at: string; reason?: string };
 }
 
 // ===== V2.23 — Skipped Work & Personal Execution Boundary =====
@@ -1628,6 +1644,10 @@ export interface DailyCommandSkip {
   skippedAt: string; // ISO datetime — same precision/purpose as DailyCommandCompletion.completedAt (reactivation-by-mention comparisons)
   skippedBy?: string;
   reason?: SkipReason; // optional — never required to skip an item
+  updatedAt?: string; // A1 — LWW clock, falls back to skippedAt
+  /** A4 — local YYYY-MM-DD; on/after it the ticket surfaces in Daily Review's "Due for
+   *  re-check today". It stays skipped until the user acts. */
+  revisitOn?: string;
 }
 
 // ===== V2.26 — Blocked as a universal per-ticket state =====
@@ -1652,6 +1672,31 @@ export interface DailyCommandBlock {
   blockedAt: string; // ISO datetime, same precision as DailyCommandSkip.skippedAt
   blockedBy?: string;
   reason?: string;
+  updatedAt?: string; // A1 — LWW clock, falls back to blockedAt
+  revisitOn?: string; // A4 — same as DailyCommandSkip.revisitOn
+}
+
+/** A1 — a removal from one of the three Daily Command maps (reopen/reactivate/unblock, or the
+ *  mutual-exclusion clear when another state is set). Kept beside the maps — never inside
+ *  them, so every existing `key in map` reader stays correct — so a cross-device merge can
+ *  tell "removed here after you set it there" from "never seen here", and never resurrects a
+ *  removed record. Pruned after TOMBSTONE_RETENTION_DAYS (execution-state-merge.ts). */
+export interface DailyCommandTombstone {
+  ticketKey: string;
+  deletedAt: string;
+}
+
+export interface DailyCommandTombstones {
+  completions: Record<string, DailyCommandTombstone>;
+  skips: Record<string, DailyCommandTombstone>;
+  blocks: Record<string, DailyCommandTombstone>;
+}
+
+/** A3 — the user explicitly acknowledged a Daily Review "New" row ("Seen" / "Mark all
+ *  reviewed"). A row stays hidden only while every reason it is new is at or before this. */
+export interface DailyReviewAck {
+  ticketKey: string;
+  reviewedAt: string;
 }
 
 /** V2.26 — why a ticket the user had already Completed/Skipped/Blocked in Daily Command is
