@@ -127,6 +127,8 @@ export const jiraChangelogHistoryItemSchema = z.object({
 
 export const jiraChangelogHistorySchema = z.object({
   created: z.string().optional(),
+  // D6 — who made the change; used only to find the configured user's own last activity.
+  author: jiraUserSchema.nullable().optional(),
   items: z.array(jiraChangelogHistoryItemSchema).default([]),
 });
 export type JiraChangelogHistory = z.infer<typeof jiraChangelogHistorySchema>;

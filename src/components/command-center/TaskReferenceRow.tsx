@@ -27,7 +27,7 @@ export interface TaskRowActions {
   onComplete: () => void;
   /** A4 — `revisitOn` (local YYYY-MM-DD) is optional: schedules a Daily Review re-check. */
   onSkip: (reason?: SkipReason, revisitOn?: string) => void;
-  onBlock: (reason?: string, revisitOn?: string) => void;
+  onBlock: (reason?: string, revisitOn?: string, pingOn?: string) => void;
   onReopen: () => void;
   onReactivateSkip: () => void;
   onUnblock: () => void;
@@ -89,6 +89,7 @@ export function TaskReferenceRowView({
   ticketScoped = false,
   as = "li",
   followUpRows,
+  showPingOn = false,
 }: {
   ticketKey: string;
   url?: string;
@@ -108,6 +109,8 @@ export function TaskReferenceRowView({
   as?: "li" | "div";
   /** C1 — blocked rows: the "Draft follow-up" message rows (who it waits on). */
   followUpRows?: NeedsFromOthersRow[];
+  /** D5 — offer "Ping on <date>" in the Block picker (Follow-up reminders feature). */
+  showPingOn?: boolean;
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
@@ -115,6 +118,7 @@ export function TaskReferenceRowView({
   const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   const [blockReason, setBlockReason] = useState("");
   const [revisitOn, setRevisitOn] = useState("");
+  const [pingOn, setPingOn] = useState("");
   const revisitInput = (
     <input
       type="date"
@@ -203,7 +207,17 @@ export function TaskReferenceRowView({
                 ))}
               </datalist>
               {revisitInput}
-              <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined); setPicker(null); setBlockReason(""); setRevisitOn(""); }} className={BTN}>
+              {showPingOn && (
+                <input
+                  type="date"
+                  value={pingOn}
+                  onChange={(e) => setPingOn(e.target.value)}
+                  aria-label="Ping on (optional)"
+                  title="Ping on (optional) — a reminder to chase whoever this waits on (Daily Review + Slack)"
+                  className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+                />
+              )}
+              <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined, pingOn || undefined); setPicker(null); setBlockReason(""); setRevisitOn(""); setPingOn(""); }} className={BTN}>
                 {L.block}
               </button>
               <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
@@ -247,7 +261,7 @@ export function storeActionsFor(ticketKey: string): TaskRowActions {
   return {
     onComplete: () => commandCenterStore.completeTicketInDailyCommand(ticketKey),
     onSkip: (reason, revisitOn) => commandCenterStore.skipTicketInDailyCommand(ticketKey, reason, revisitOn),
-    onBlock: (reason, revisitOn) => commandCenterStore.blockTicketInDailyCommand(ticketKey, reason, revisitOn),
+    onBlock: (reason, revisitOn, pingOn) => commandCenterStore.blockTicketInDailyCommand(ticketKey, reason, revisitOn, pingOn),
     onReopen: () => commandCenterStore.reopenTicketInDailyCommand(ticketKey),
     onReactivateSkip: () => commandCenterStore.reactivateSkippedTicket(ticketKey),
     onUnblock: () => commandCenterStore.unblockTicketInDailyCommand(ticketKey),
@@ -301,6 +315,7 @@ export function TaskReferenceRow({
       firstSeenAt={workItem?.firstSeenAt}
       execution={execution}
       followUpRows={followUpRows}
+      showPingOn={state.features.followUpReminders}
       reactivation={reactivation}
       actions={readOnly ? undefined : storeActionsFor(key)}
       caption={caption}

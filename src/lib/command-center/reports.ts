@@ -21,6 +21,8 @@ import type {
   DailyReviewAck,
   MemoryEvent,
   MentionEvent,
+  MentionReply,
+  MyTicketActivity,
   PersonalPlanItem,
   SyncLogEntry,
   WorkItem,
@@ -32,6 +34,7 @@ import { selectRecentMentions } from "./recent-mentions";
 import { matchesIdentity, type PersonalRelationIdentity } from "./personal-relation";
 import { isWorkItemDoneOrExcluded, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { slug } from "./attention-queue";
+import { isMentionReplied } from "./mention-replies";
 
 // ===== Shared shapes ===================================================================
 
@@ -51,6 +54,8 @@ export interface ReportTicket {
   ageBusinessDays?: number;
   waitsOn?: string[];
   revisitOn?: string;
+  /** D4 — set on "awaiting my reply" rows, so the UI can offer "Replied". */
+  mention?: { commentId: string };
 }
 
 export interface StandupState {
@@ -131,6 +136,9 @@ export interface StandupInput {
   baselineAt?: string;
   lastVisitAt?: string;
   reviewAcks?: Record<string, DailyReviewAck>;
+  /** D4 — answered mentions leave "awaiting my reply" (omit both = pre-D behavior). */
+  mentionReplies?: Record<string, MentionReply>;
+  myTicketActivity?: Record<string, MyTicketActivity>;
   now: Date;
 }
 
@@ -211,13 +219,15 @@ export function buildStandupState(input: StandupInput): StandupState {
     dailyCommandBlocks: input.dailyCommandBlocks,
   }).filter((m) => {
     if (input.attentionState[`MENTION:${slug(m.issueKey)}:${slug(m.commentId)}`]?.lifecycle === "ACKNOWLEDGED") return false;
+    if ((input.mentionReplies || input.myTicketActivity) && isMentionReplied(m, input.mentionReplies ?? {}, input.myTicketActivity ?? {})) return false;
     return !(m.workItem && isWorkItemDoneOrExcluded(m.workItem, index));
   });
   const mentionsAwaitingReply = mentions.map((m) => {
     const who = m.commentAuthor?.trim() || "Someone";
     const excerpt = m.excerpt.trim().replace(/\s+/g, " ");
     const note = `${who}: "${excerpt.length > 80 ? `${excerpt.slice(0, 77)}…` : excerpt}"`;
-    return m.workItem ? ticketFromWorkItem(m.workItem, data, { notes: [note], ...(m.commentUrl ? { url: m.commentUrl } : {}) }) : { key: m.issueKey, notes: [note], ...(m.commentUrl ? { url: m.commentUrl } : {}) };
+    const ref = { commentId: m.commentId };
+    return m.workItem ? ticketFromWorkItem(m.workItem, data, { notes: [note], mention: ref, ...(m.commentUrl ? { url: m.commentUrl } : {}) }) : { key: m.issueKey, notes: [note], mention: ref, ...(m.commentUrl ? { url: m.commentUrl } : {}) };
   });
 
   return {

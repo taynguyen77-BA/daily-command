@@ -1,5 +1,7 @@
 "use client";
 
+import { listDailySyncSummaries } from "@/lib/command-center/sync-history";
+import type { FeatureToggles } from "@/lib/command-center/types";
 import { NAV_GROUPS } from "@/components/command-center/Nav";
 import { LANDING_PAGES } from "@/lib/command-center/store";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
@@ -652,6 +654,17 @@ const TRUST_STATUS_STYLE: Record<TrustDiagnosticStatus, string> = {
   info: "text-text3",
 };
 
+
+// V2.30 (Prompt D) — one switch per helper, in the order they appear in a morning.
+const FEATURE_TOGGLE_LABELS: { key: keyof FeatureToggles; label: string; detail: string }[] = [
+  { key: "morningBrief", label: "Morning Brief", detail: "First open of the day: sync Jira, land on Daily Review with a 'since yesterday 18:00' summary." },
+  { key: "keyboardTriage", label: "Keyboard triage on Daily Review", detail: "J/K move, C complete, S skip, B block, R reviewed, O open in Jira." },
+  { key: "syncHistory", label: "Sync history per day", detail: "Roll every Jira sync into a per-day summary (kept 90 days), shown below." },
+  { key: "mentionReplyTracking", label: "Mention reply tracking", detail: "Mark a mention 'Replied' — or detect your own later comment — so it leaves 'awaiting my reply'." },
+  { key: "followUpReminders", label: "Follow-up reminders", detail: "'Ping on <date>' when blocking; due follow-ups show in Daily Review and (if configured) Slack." },
+  { key: "staleUseMyActivity", label: "Staleness from my own activity (off by default)", detail: "Measure 'no activity' from your last comment/transition where the sync could see it, instead of the ticket's 'updated' (which anyone's edit moves)." },
+  { key: "reportExport", label: "Send reports to Slack / email draft", detail: "Adds 'Send to Slack…' (with confirmation) and 'Email draft' to Reports. Never sends on its own." },
+];
 export default function DataSettingsPage() {
   const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const [confirmingReset, setConfirmingReset] = useState(false);
@@ -894,6 +907,55 @@ export default function DataSettingsPage() {
           <p className="text-xs text-text3">More reliable than display name — find it in your Jira profile URL.</p>
         </div>
       </Panel>
+
+      <Panel className="p-5" data-feature-toggles>
+        <SectionHeading title="Features" subtitle="Switch individual helpers on or off. Turning one off hides it and stops it from recording anything new; nothing already recorded is deleted." />
+        <ul className="space-y-2 text-sm text-text2">
+          {FEATURE_TOGGLE_LABELS.map(({ key, label, detail }) => (
+            <li key={key}>
+              <label className="flex items-start gap-2">
+                <input type="checkbox" checked={state.features[key]} onChange={(e) => store.setFeatureToggle(key, e.target.checked)} className="mt-1" />
+                <span>
+                  <span className="text-text">{label}</span>
+                  <span className="block text-xs text-text3">{detail}</span>
+                </span>
+              </label>
+            </li>
+          ))}
+        </ul>
+      </Panel>
+
+      {state.features.syncHistory && (
+        <Panel className="p-5" data-sync-history>
+          <SectionHeading title="Sync history" subtitle="Successful Jira syncs rolled up per day (last 90 days)." />
+          {listDailySyncSummaries(state.dailySyncSummary).length === 0 ? (
+            <p className="text-sm text-text3">No Jira sync recorded yet.</p>
+          ) : (
+            <table className="w-full text-left text-xs text-text2">
+              <thead className="text-text3">
+                <tr>
+                  <th className="py-1 pr-3 font-medium">Day</th>
+                  <th className="py-1 pr-3 font-medium">Syncs</th>
+                  <th className="py-1 pr-3 font-medium">New tickets</th>
+                  <th className="py-1 pr-3 font-medium">Assigned to you</th>
+                  <th className="py-1 pr-3 font-medium">Closed in Jira</th>
+                </tr>
+              </thead>
+              <tbody>
+                {listDailySyncSummaries(state.dailySyncSummary).map((d) => (
+                  <tr key={d.date} className="border-t border-border">
+                    <td className="py-1 pr-3">{d.date}</td>
+                    <td className="py-1 pr-3">{d.syncs}</td>
+                    <td className="py-1 pr-3">{d.newTickets}</td>
+                    <td className="py-1 pr-3">{d.assignedToMe}</td>
+                    <td className="py-1 pr-3">{d.closed}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Panel>
+      )}
 
       <Panel className="p-5">
         <SectionHeading title="Start page" subtitle="Which page the app opens on. Command Center stays one click away in the navigation." />

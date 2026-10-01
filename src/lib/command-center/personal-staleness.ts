@@ -15,8 +15,8 @@
 // Data & Settings) — never hardcoded, since a BA/PO covering fast-moving vs. slow-moving
 // projects needs different tolerances for "how long is too long".
 
-import { businessDaysBetween } from "./date-utils";
-import type { WorkItem } from "./types";
+import { businessDaysBetween, toLocalIso } from "./date-utils";
+import type { MyTicketActivity, WorkItem } from "./types";
 
 export interface StaleAssignedTicketThresholds {
   warnBusinessDays: number;
@@ -35,6 +35,9 @@ export interface StaleAssignedTicket {
   projectId: string;
   businessDaysSinceUpdate: number;
   severity: "WARN" | "ESCALATE";
+  /** D6 — what the silence is measured from: the ticket's Jira `updated` (changed by ANYONE),
+   *  or the configured user's own last comment/transition when that is known and opted in. */
+  basis?: "ticket" | "me";
 }
 
 /** Pure: given the caller's already-resolved "active, assigned to me" population
@@ -46,15 +49,22 @@ export interface StaleAssignedTicket {
 export function computeStaleAssignedTickets(
   activeAssignedWorkItems: WorkItem[],
   today: string,
-  thresholds: StaleAssignedTicketThresholds = DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS
+  thresholds: StaleAssignedTicketThresholds = DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS,
+  // D6 — optional: the user's own last activity per ticket key (comments/changelog the sync
+  // could see). When a ticket has an entry, silence is measured from MY last activity
+  // ("No activity by you…"); otherwise from the ticket's `updated`, as before.
+  myActivity?: Record<string, MyTicketActivity>
 ): StaleAssignedTicket[] {
   const out: StaleAssignedTicket[] = [];
   for (const item of activeAssignedWorkItems) {
-    if (!item.lastUpdated) continue;
-    const businessDaysSinceUpdate = businessDaysBetween(item.lastUpdated, today);
+    const mine = myActivity?.[item.key]?.lastActivityAt;
+    const mineDay = mine && !Number.isNaN(new Date(mine).getTime()) ? toLocalIso(new Date(mine)) : undefined;
+    const from = mineDay ?? item.lastUpdated;
+    if (!from) continue;
+    const businessDaysSinceUpdate = businessDaysBetween(from, today);
     if (businessDaysSinceUpdate < thresholds.warnBusinessDays) continue;
     const severity: "WARN" | "ESCALATE" = businessDaysSinceUpdate >= thresholds.escalateBusinessDays ? "ESCALATE" : "WARN";
-    out.push({ workItemId: item.id, issueKey: item.key, title: item.title, projectId: item.projectId, businessDaysSinceUpdate, severity });
+    out.push({ workItemId: item.id, issueKey: item.key, title: item.title, projectId: item.projectId, businessDaysSinceUpdate, severity, basis: mineDay ? "me" : "ticket" });
   }
   return out.sort((a, b) => b.businessDaysSinceUpdate - a.businessDaysSinceUpdate);
 }

@@ -59,6 +59,10 @@ import type {
   DailyCommandTombstone,
   DailyCommandTombstones,
   DailyReportSnapshot,
+  DailySyncSummary,
+  FeatureToggles,
+  MentionReply,
+  MyTicketActivity,
   DailyReviewAck,
   DailySnapshot,
   DataSourceType,
@@ -87,7 +91,9 @@ import type {
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
 } from "./types";
-import { DATA_SCHEMA_VERSION, emptyData } from "./types";
+import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, emptyData } from "./types";
+import { rollDailySyncSummary } from "./sync-history";
+import { mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
 export type { MyActionItemsOnlyByPage };
@@ -273,6 +279,19 @@ export interface StoreState {
   weeklyReportMode?: "workweek" | "calendar";
   // C2 — where the app opens ("/" = Command Center). Only ever one of the nav routes.
   defaultLandingPage?: string;
+  // ===== V2.30 (Prompt D) =====
+  /** Feature switches (Data & Settings). */
+  features: FeatureToggles;
+  /** D3 — per-day sync roll-up, 90 days. */
+  dailySyncSummary: Record<string, DailySyncSummary>;
+  /** D4 — mentions answered (by hand, or detected), keyed by comment id. Synced. */
+  mentionReplies: Record<string, MentionReply>;
+  /** D4/D6 — my own latest comment / activity per ticket key, as seen by syncs. */
+  myTicketActivity: Record<string, MyTicketActivity>;
+  /** D5 — ticket key → the ping date already sent to Slack (send once per date). */
+  followUpNotified: Record<string, string>;
+  /** D1 — local day the one-click morning flow last ran. */
+  morningBriefLastRunDay?: string;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -315,6 +334,11 @@ function initialState(): StoreState {
     dailyCommandTombstones: emptyTombstones(),
     dailyReviewAcks: {},
     knownTicketFirstSeen: {},
+    features: { ...DEFAULT_FEATURE_TOGGLES },
+    dailySyncSummary: {},
+    mentionReplies: {},
+    myTicketActivity: {},
+    followUpNotified: {},
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -587,6 +611,45 @@ function asStringRecord(v: unknown): Record<string, string> {
   return Object.fromEntries(Object.entries(obj).filter(([, value]) => typeof value === "string")) as Record<string, string>;
 }
 
+// D — same drop-malformed discipline as every parser here.
+function asFeatureToggles(v: unknown): FeatureToggles {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out = { ...DEFAULT_FEATURE_TOGGLES };
+  for (const key of Object.keys(out) as (keyof FeatureToggles)[]) if (typeof obj[key] === "boolean") out[key] = obj[key] as boolean;
+  return out;
+}
+function asDailySyncSummary(v: unknown): Record<string, DailySyncSummary> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, DailySyncSummary> = {};
+  for (const [k, raw] of Object.entries(obj)) {
+    const d = raw as Partial<DailySyncSummary> | null;
+    if (d && typeof d === "object" && typeof d.date === "string" && [d.syncs, d.newTickets, d.assignedToMe, d.closed].every((n) => typeof n === "number")) out[k] = d as DailySyncSummary;
+  }
+  return out;
+}
+export function asMentionReplies(v: unknown): Record<string, MentionReply> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, MentionReply> = {};
+  for (const [k, raw] of Object.entries(obj)) {
+    const r = raw as Partial<MentionReply> | null;
+    if (r && typeof r === "object" && typeof r.commentId === "string" && typeof r.issueKey === "string" && typeof r.repliedAt === "string" && (r.source === "manual" || r.source === "jira")) out[k] = r as MentionReply;
+  }
+  return out;
+}
+function asMyTicketActivity(v: unknown): Record<string, MyTicketActivity> {
+  const obj = asPlainObject<Record<string, unknown>>(v, {});
+  const out: Record<string, MyTicketActivity> = {};
+  for (const [k, raw] of Object.entries(obj)) {
+    const a = raw as MyTicketActivity | null;
+    if (!a || typeof a !== "object") continue;
+    const entry: MyTicketActivity = {};
+    if (typeof a.lastCommentAt === "string") entry.lastCommentAt = a.lastCommentAt;
+    if (typeof a.lastActivityAt === "string") entry.lastActivityAt = a.lastActivityAt;
+    if (entry.lastCommentAt || entry.lastActivityAt) out[k] = entry;
+  }
+  return out;
+}
+
 export function asDailyCommandTombstones(v: unknown): DailyCommandTombstones {
   const obj = asPlainObject<Record<string, unknown>>(v, {});
   return { completions: asTombstoneMap(obj.completions), skips: asTombstoneMap(obj.skips), blocks: asTombstoneMap(obj.blocks) };
@@ -736,6 +799,12 @@ export function parseStoredState(raw: string): StoreState {
       dailyReviewBaselineAt: typeof parsed.dailyReviewBaselineAt === "string" ? parsed.dailyReviewBaselineAt : undefined,
       knownTicketFirstSeen: asStringRecord(parsed.knownTicketFirstSeen),
       jiraSprintFieldId: typeof parsed.jiraSprintFieldId === "string" && /^customfield_\d{1,9}$/.test(parsed.jiraSprintFieldId) ? parsed.jiraSprintFieldId : undefined,
+      features: asFeatureToggles(parsed.features),
+      dailySyncSummary: asDailySyncSummary(parsed.dailySyncSummary),
+      mentionReplies: asMentionReplies(parsed.mentionReplies),
+      myTicketActivity: asMyTicketActivity(parsed.myTicketActivity),
+      followUpNotified: asStringRecord(parsed.followUpNotified),
+      morningBriefLastRunDay: typeof parsed.morningBriefLastRunDay === "string" ? parsed.morningBriefLastRunDay : undefined,
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
     };
@@ -1257,10 +1326,18 @@ export class CommandCenterStore {
    *  reason). Clears any completion/skip for the same ticketKey so the three states stay
    *  mutually exclusive. Re-blocking an already-blocked ticket replaces the record (new
    *  timestamp/reason). A4 — optional `revisitOn`, same as skip. */
-  blockTicketInDailyCommand(ticketKey: string, reason?: string, revisitOn?: string) {
+  blockTicketInDailyCommand(ticketKey: string, reason?: string, revisitOn?: string, pingOn?: string) {
     const now = new Date().toISOString();
     const trimmed = reason?.trim().slice(0, MAX_BLOCK_REASON_LENGTH);
-    const block: DailyCommandBlock = { ticketKey, blockedAt: now, blockedBy: this.actorName(), reason: trimmed ? trimmed : undefined, ...(isIsoDate(revisitOn) ? { revisitOn } : {}) };
+    const block: DailyCommandBlock = {
+      ticketKey,
+      blockedAt: now,
+      blockedBy: this.actorName(),
+      reason: trimmed ? trimmed : undefined,
+      ...(isIsoDate(revisitOn) ? { revisitOn } : {}),
+      // D5 — "ping on <date>": a reminder to chase whoever this waits on.
+      ...(isIsoDate(pingOn) ? { pingOn } : {}),
+    };
     this.setDailyCommand(ticketKey, { kind: "block", record: block }, now);
     this.recordTicketEvent("TICKET_BLOCKED", ticketKey, block.reason);
   }
@@ -1321,6 +1398,30 @@ export class CommandCenterStore {
     if (trimmed && !/^customfield_\d{1,9}$/.test(trimmed)) return false;
     this.set({ ...this.state, jiraSprintFieldId: trimmed || undefined });
     return true;
+  }
+
+  /** V2.30 — Data & Settings feature switches. */
+  setFeatureToggle(feature: keyof FeatureToggles, on: boolean) {
+    if (!(feature in DEFAULT_FEATURE_TOGGLES)) return;
+    this.set({ ...this.state, features: { ...this.state.features, [feature]: on } });
+  }
+
+  /** D4 — "Replied": the mention leaves "awaiting my reply". `at` injectable for tests. */
+  markMentionReplied(commentId: string, issueKey: string, at: string = new Date().toISOString()) {
+    this.set({ ...this.state, mentionReplies: { ...this.state.mentionReplies, [commentId]: { commentId, issueKey, repliedAt: at, source: "manual" } } });
+  }
+
+  /** D5 — remembers which ping dates were already sent, so each reminder goes out once. */
+  recordFollowUpsNotified(sent: { ticketKey: string; pingOn: string }[]) {
+    if (sent.length === 0) return;
+    const followUpNotified = { ...this.state.followUpNotified };
+    for (const s of sent) followUpNotified[s.ticketKey] = s.pingOn;
+    this.set({ ...this.state, followUpNotified });
+  }
+
+  /** D1 — the one-click morning flow ran today. */
+  recordMorningBriefRun(day: string) {
+    this.set({ ...this.state, morningBriefLastRunDay: day });
   }
 
   /** C2 — Data & Settings: the page the app opens on. Unknown routes are refused. */
@@ -1403,6 +1504,7 @@ export class CommandCenterStore {
       dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? this.state.dailyReviewLastVisitAt,
       dailyReviewAcks: synced.dailyReviewAcks ?? this.state.dailyReviewAcks,
       dailyReviewBaselineAt: synced.dailyReviewBaselineAt ?? this.state.dailyReviewBaselineAt,
+      mentionReplies: synced.mentionReplies ? asMentionReplies(synced.mentionReplies) : this.state.mentionReplies,
       showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
       myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
       jiraProjectScope: synced.uiPreferences.jiraProjectScope,
@@ -1757,6 +1859,15 @@ export class CommandCenterStore {
       syncLog: [...this.state.syncLog, { startedAt, completedAt: observedAt, recordsCreated: created, recordsUpdated: updated, newTicketKeys }].slice(-MAX_SYNC_LOG),
       knownTicketFirstSeen: capKnownTickets(knownFirstSeen),
       dailyReviewBaselineAt,
+      myTicketActivity: mergeMyTicketActivity(this.state.myTicketActivity, result.myActivity),
+      dailySyncSummary: this.state.features.syncHistory
+        ? rollDailySyncSummary(this.state.dailySyncSummary, getTodayIso(), {
+            at: observedAt,
+            newTickets: newTicketKeys.length,
+            assignedToMe: reassignedToMe.size,
+            closed: jiraCompletionEvents.filter((e) => e.kind === "JIRA_STATUS_COMPLETED").length,
+          })
+        : this.state.dailySyncSummary,
       jiraSync: {
         lastSyncStartedAt: startedAt,
         // V2.18 §5 — on a partial sync, the incremental cursor advances only to the resume
@@ -2297,6 +2408,7 @@ export class CommandCenterStore {
       baselineAt: this.state.dailyReviewBaselineAt,
       lastVisitAt: this.state.dailyReviewLastVisitAt,
       reviewAcks: this.state.dailyReviewAcks,
+      ...(this.state.features.mentionReplyTracking ? { mentionReplies: this.state.mentionReplies, myTicketActivity: this.state.myTicketActivity } : {}),
       now,
     });
   }

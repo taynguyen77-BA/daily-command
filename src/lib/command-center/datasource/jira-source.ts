@@ -3,7 +3,7 @@
 // client or touches credentials. Same "dumb caller, server does the real work" pattern as
 // ClaudeProvider (see ../ai/claude-provider.ts).
 
-import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary, MentionEvent } from "../types";
+import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary, MentionEvent, MyTicketActivity } from "../types";
 import type { DataSourceProvider, DataSourceSyncResult } from "./types";
 import { pairedAuthHeader } from "../device-pairing";
 
@@ -42,6 +42,7 @@ export class JiraDataSource implements DataSourceProvider {
         focusedProjectCount?: number;
         focusedProjects?: string[];
         mentionEvents?: MentionEvent[];
+        myActivity?: Record<string, MyTicketActivity>;
         truncated?: boolean;
         resumeSinceIso?: string;
       };
@@ -63,6 +64,7 @@ export class JiraDataSource implements DataSourceProvider {
         focusedProjectCount: json.focusedProjectCount,
         focusedProjects: json.focusedProjects,
         mentionEvents: json.mentionEvents,
+        myActivity: json.myActivity,
         truncated: json.truncated,
         resumeSinceIso: json.resumeSinceIso,
       };

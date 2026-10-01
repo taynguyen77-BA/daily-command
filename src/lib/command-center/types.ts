@@ -1718,6 +1718,59 @@ export interface DailyCommandBlock {
   reason?: string;
   updatedAt?: string; // A1 — LWW clock, falls back to blockedAt
   revisitOn?: string; // A4 — same as DailyCommandSkip.revisitOn
+  /** D5 — local YYYY-MM-DD to ping whoever this waits on; surfaces in Daily Review's
+   *  "Follow-ups to send" and (when configured) as a Slack reminder. */
+  pingOn?: string;
+}
+
+// ===== V2.30 (Prompt D) — opt-in/out features =====
+/** Each D feature can be switched off in Data & Settings. All default ON except
+ *  `staleUseMyActivity` (it needs changelog/comment coverage Jira doesn't always give). */
+export interface FeatureToggles {
+  morningBrief: boolean;
+  keyboardTriage: boolean;
+  syncHistory: boolean;
+  mentionReplyTracking: boolean;
+  followUpReminders: boolean;
+  staleUseMyActivity: boolean;
+  reportExport: boolean;
+}
+
+export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
+  morningBrief: true,
+  keyboardTriage: true,
+  syncHistory: true,
+  mentionReplyTracking: true,
+  followUpReminders: true,
+  staleUseMyActivity: false,
+  reportExport: true,
+};
+
+/** D3 — one day's roll-up of successful Jira syncs (kept 90 days). */
+export interface DailySyncSummary {
+  date: string;
+  syncs: number;
+  newTickets: number;
+  assignedToMe: number;
+  closed: number;
+  lastSyncAt?: string;
+}
+
+/** D4 — a mention the user has answered: marked by hand, or detected from their own later
+ *  comment on the same issue during a sync. */
+export interface MentionReply {
+  commentId: string;
+  issueKey: string;
+  repliedAt: string;
+  source: "manual" | "jira";
+}
+
+/** D4/D6 — the configured user's own latest activity on an issue, as far as the sync could
+ *  see it (their comments on comment-checked issues; their changelog entries on the issues
+ *  whose changelog was fetched). Absent = unknown, never "no activity". */
+export interface MyTicketActivity {
+  lastCommentAt?: string;
+  lastActivityAt?: string;
 }
 
 /** A1 — a removal from one of the three Daily Command maps (reopen/reactivate/unblock, or the

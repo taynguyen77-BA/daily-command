@@ -21,11 +21,11 @@ import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
-import { buildMentionEvents, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
+import { buildMentionEvents, latestOwnCommentAt, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
 import { buildIncrementalSinceParam, computeResumeCursor, isValidCustomFieldId, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
-import type { MentionEvent } from "@/lib/command-center/types";
+import type { MentionEvent, MyTicketActivity } from "@/lib/command-center/types";
 
 export const runtime = "nodejs";
 
@@ -152,10 +152,23 @@ export async function POST(req: Request) {
   // the sync — those items simply keep the documented scopeChangeCount: 0 limitation.
   const prioritizedKeys = selectPrioritizedIssueKeys(workItems.map((w) => ({ key: w.key, priority: w.priority, blocked: w.blocked, dueDate: w.dueDate, fixVersion: w.fixVersion })));
   const scopeChangeCounts = new Map<string, number>();
+  // D4/D6 — the configured user's own latest comment / changelog entry per issue, from the
+  // comments and changelogs this sync fetches anyway (no extra Jira calls).
+  const myActivity: Record<string, MyTicketActivity> = {};
+  const noteMine = (key: string, field: "lastCommentAt" | "lastActivityAt", at: string | undefined) => {
+    if (!at) return;
+    const cur = (myActivity[key] ??= {});
+    if (!cur[field] || at > cur[field]!) cur[field] = at;
+    if (field === "lastCommentAt" && (!cur.lastActivityAt || at > cur.lastActivityAt)) cur.lastActivityAt = at;
+  };
+  const requestAccountId = parsedRequest.data.accountId;
   await Promise.all(
     prioritizedKeys.map(async (key) => {
       try {
         const result = await fetchJiraIssueChangelog(config, key);
+        if (result.ok && requestAccountId) {
+          for (const h of result.data) if (h.author?.accountId === requestAccountId) noteMine(key, "lastActivityAt", h.created);
+        }
         if (result.ok) scopeChangeCounts.set(key, changelogToScopeSignals(`jira-${key}`, result.data).length);
       } catch {
         // best-effort — a changelog failure never fails the sync
@@ -187,6 +200,7 @@ export async function POST(req: Request) {
               const commentsResult = await fetchIssueComments(config, issue.key);
               if (commentsResult.ok) {
                 events.push(...buildMentionEvents(issue.key, commentsResult.data, accountId, { baseUrl: config.baseUrl, today }));
+                noteMine(issue.key, "lastCommentAt", latestOwnCommentAt(commentsResult.data, accountId));
               }
             } catch {
               // best-effort — a single issue's comment fetch failure never fails the sync
@@ -205,6 +219,7 @@ export async function POST(req: Request) {
               const commentsResult = await fetchIssueComments(config, issue.key);
               if (commentsResult.ok) {
                 events.push(...buildMentionEvents(issue.key, commentsResult.data, accountId, { baseUrl: config.baseUrl, today }));
+                noteMine(issue.key, "lastCommentAt", latestOwnCommentAt(commentsResult.data, accountId));
               }
             } catch {
               // best-effort — a single issue's comment fetch failure never fails the sync
@@ -228,6 +243,7 @@ export async function POST(req: Request) {
     scopeChangesDetected,
     projectsDiscovered: jiraProjects.length,
     mentionEvents,
+    ...(requestAccountId ? { myActivity } : {}),
     warnings,
     // V2.18 §5 — truncated/resumeSinceIso let the client (store.ts syncJira) distinguish a
     // genuinely complete sync from a partial one and advance its incremental cursor safely.

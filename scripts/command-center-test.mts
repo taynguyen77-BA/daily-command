@@ -229,6 +229,17 @@ import { needsFromOthersForBlockedTicket, needsFromOthersForDependency, needsFro
 import { NAV_GROUPS } from "../src/components/command-center/Nav";
 import { LANDING_PAGES } from "../src/lib/command-center/store";
 import { DEFAULT_AI_MODEL, DEFAULT_AI_MODEL_FAST, resolveAiModel } from "../src/lib/command-center/ai/model-config";
+import { buildMorningBrief, morningBriefSentence, morningBriefSince, morningBriefSinceLabel, shouldRunMorningBrief } from "../src/lib/command-center/morning-brief";
+import { triageCommand } from "../src/lib/command-center/triage-keys";
+import { listDailySyncSummaries, rollDailySyncSummary } from "../src/lib/command-center/sync-history";
+import { isMentionReplied } from "../src/lib/command-center/mention-replies";
+import { latestOwnCommentAt } from "../src/lib/command-center/jira/mentions";
+import { dueFollowUps } from "../src/lib/command-center/follow-up-reminders";
+import { runFollowUpRemindersOnce } from "../src/lib/command-center/follow-up-runner";
+import { emailDraftUrl, slackReportText } from "../src/lib/command-center/report-export";
+import { renderSlackText, slackSignalSchema } from "../src/lib/server/slack-notify";
+import { DEFAULT_FEATURE_TOGGLES } from "../src/lib/command-center/types";
+import type { StaleAssignedTicket } from "../src/lib/command-center/personal-staleness";
 import { applyDailyCommandChange, emptyTombstones, mergeDailyCommandState, TOMBSTONE_RETENTION_DAYS, type DailyCommandState } from "../src/lib/command-center/execution-state-merge";
 import { RiskCard } from "../src/components/command-center/RiskCard";
 import { DecisionCard } from "../src/components/command-center/DecisionCard";
@@ -8797,7 +8808,7 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 {
   const repoRoot = path.resolve(process.cwd());
   const syncRouteSrc2 = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
-  ok("V2.17 Sync route wiring", /import \{ buildMentionEvents, selectRecentMentionCandidates \}/.test(syncRouteSrc2), "the route imports the shared, directly-tested selectRecentMentionCandidates rather than a second inline implementation");
+  ok("V2.17 Sync route wiring", /import \{ buildMentionEvents, (latestOwnCommentAt, )?selectRecentMentionCandidates \}/.test(syncRouteSrc2), "the route imports the shared, directly-tested selectRecentMentionCandidates rather than a second inline implementation");
   ok("V2.17 Sync route wiring", /selectRecentMentionCandidates\(issuesResult\.data, checkedKeys, Date\.now\(\)\)/.test(syncRouteSrc2), "the recency fallback runs over this sync's own already-fetched issue batch (never a second Jira fetch) and excludes issues the JQL search already covered");
   ok("V2.17 Sync route wiring", (syncRouteSrc2.match(/buildMentionEvents\(issue\.key, commentsResult\.data, accountId/g) ?? []).length === 2, "both the JQL-search pass and the recency-fallback pass call the exact same buildMentionEvents/commentMentionsAccount verification — no second, divergent detection rule for the fallback path");
 }
@@ -10852,7 +10863,7 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   ok(group, dueRow.includes("re-check due"), "a due row says so in its label");
   const trSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/TaskReferenceRow.tsx"), "utf8");
   const drSrc = fs.readFileSync(path.join(process.cwd(), "src/app/daily-review/page.tsx"), "utf8");
-  ok(group, /type="date"/.test(trSrc) && /skipTicketInDailyCommand\(ticketKey, reason, revisitOn\)/.test(trSrc) && /blockTicketInDailyCommand\(ticketKey, reason, revisitOn\)/.test(trSrc), "the Skip/Block pickers offer an optional re-check date, wired through to the store");
+  ok(group, /type="date"/.test(trSrc) && /skipTicketInDailyCommand\(ticketKey, reason, revisitOn\)/.test(trSrc) && /blockTicketInDailyCommand\(ticketKey, reason, revisitOn(, pingOn)?\)/.test(trSrc), "the Skip/Block pickers offer an optional re-check date, wired through to the store");
   ok(group, /Due for re-check today/.test(drSrc) && /review\.dueForRecheck\.map/.test(drSrc), "Daily Review renders the 'Due for re-check today' block");
 
   // --- Age on every Skipped/Blocked row ---
@@ -11309,6 +11320,162 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   ok(group, resolveAiModel("analyzePriorities", { ANTHROPIC_MODEL: "claude-sonnet-5-5" }).model === "claude-sonnet-5-5" && resolveAiModel("interpretTrend", { ANTHROPIC_MODEL_FAST: "claude-sonnet-5-5" }).model === "claude-sonnet-5-5" && resolveAiModel("analyzePriorities", { ANTHROPIC_MODEL: "bad model; rm" }).model === DEFAULT_AI_MODEL, "ANTHROPIC_MODEL / ANTHROPIC_MODEL_FAST override the defaults; a malformed value is ignored");
   const routeSrc = fs.readFileSync(path.join(process.cwd(), "src/app/api/command-center/ai/route.ts"), "utf8");
   ok(group, !/"claude-[a-z0-9.-]+"/.test(routeSrc) && /resolveAiModel\(task/.test(routeSrc), "the AI route never hardcodes a model id");
+}
+
+
+// ===== V2.30 (Prompt D) — seven toggleable helpers =====
+{
+  const group = "D Toggleable helpers";
+  const src = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
+  const iso = () => ({ stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
+  const tay = { accountId: "acc-tay", displayName: "Tay" };
+
+  // ---- toggles ----
+  ok(group, Object.entries(DEFAULT_FEATURE_TOGGLES).every(([k, v]) => v === (k !== "staleUseMyActivity")), "every feature defaults ON except 'staleness from my own activity'");
+  const parsedToggles = parseStoredState(JSON.stringify({ features: { morningBrief: false, keyboardTriage: "yes", bogus: true } })).features;
+  ok(group, parsedToggles.morningBrief === false && parsedToggles.keyboardTriage === true && !("bogus" in parsedToggles) && parseStoredState("{}").features.reportExport === true, "stored toggles parse defensively; pre-D state gets the defaults");
+  const settingsSrc = src("src/app/data-settings/page.tsx");
+  ok(group, Object.keys(DEFAULT_FEATURE_TOGGLES).every((k) => settingsSrc.includes(`key: "${k}"`)) && /store\.setFeatureToggle\(key, e\.target\.checked\)/.test(settingsSrc), "each of the 7 features has a toggle in Data & Settings");
+  const readme = src("README.md");
+  ok(group, ["Morning Brief", "Keyboard triage", "Sync history", "Mention reply tracking", "Follow-up reminders", "No ticket activity", "Send reports to Slack"].every((t) => readme.includes(t)), "each feature has a README entry");
+
+  // ---- D1 Morning Brief ----
+  const tue = new Date(2026, 8, 29, 8, 30); // Tue Sep 29
+  const mon = new Date(2026, 8, 28, 8, 30); // Mon Sep 28
+  ok(group, morningBriefSince(tue).getDate() === 28 && morningBriefSince(tue).getHours() === 18 && morningBriefSinceLabel(morningBriefSince(tue), tue) === "Since yesterday 18:00", "Tuesday morning: since yesterday (Monday) 18:00");
+  ok(group, morningBriefSince(mon).getDate() === 25 && morningBriefSinceLabel(morningBriefSince(mon), mon) === "Since Fri 18:00", "Monday morning: since Friday 18:00 — the weekend isn't 'yesterday'");
+  const at = (d: number, h: number) => new Date(2026, 8, d, h, 0).toISOString();
+  const briefItems = [
+    v226Actionable("MB-NEW", { firstSeenAt: at(28, 20) }),
+    v226Actionable("MB-OLD", { firstSeenAt: at(28, 9) }),
+    v226Actionable("MB-ASG", { firstSeenAt: at(1, 9), assignedToMeAt: at(29, 7) }),
+    v226Actionable("MB-TEAM", { owner: "Bob", ownerId: "acc-bob", firstSeenAt: at(29, 7) }),
+  ];
+  const brief = buildMorningBrief({
+    workItems: briefItems,
+    identity: tay,
+    mentionEvents: [{ issueKey: "MB-OLD", commentId: "m1", excerpt: "x", mentionedAt: at(28, 19) }, { issueKey: "MB-OLD", commentId: "m0", excerpt: "x", mentionedAt: at(28, 10) }],
+    memoryEvents: [
+      { id: "e1", date: "2026-09-29", kind: "JIRA_STATUS_COMPLETED", title: "", impact: "", evidence: [], ticketKey: "T-9", assigneeId: "acc-bob" },
+      { id: "e2", date: "2026-09-29", kind: "JIRA_STATUS_COMPLETED", title: "", impact: "", evidence: [], ticketKey: "MB-MINE", assigneeId: "acc-tay" },
+    ],
+    dailyCommandSkips: { S: { ticketKey: "S", skippedAt: at(1, 9), revisitOn: "2026-09-29" } },
+    dailyCommandBlocks: { B: { ticketKey: "B", blockedAt: at(1, 9), revisitOn: "2026-10-05" } },
+    now: tue,
+  });
+  ok(group, morningBriefSentence(brief) === "Since yesterday 18:00: 1 new, 1 assigned, 1 mention, 1 due re-check, 1 closed by team", `the brief header counts only what happened since the boundary (got: ${morningBriefSentence(brief)})`);
+  ok(group, brief.counts.find((c) => c.id === "new")!.href === "#review-new" && brief.counts.find((c) => c.id === "recheck")!.href === "#review-due" && brief.counts.find((c) => c.id === "team-closed")!.href === "/reports", "each count is a jump link");
+  ok(group, shouldRunMorningBrief(true, "2026-09-28", "2026-09-29") && !shouldRunMorningBrief(true, "2026-09-29", "2026-09-29") && !shouldRunMorningBrief(false, undefined, "2026-09-29"), "the one-click flow runs once per day, only when on");
+  const navSrc = src("src/components/command-center/Nav.tsx");
+  const reviewSrc = src("src/app/daily-review/page.tsx");
+  ok(group, /shouldRunMorningBrief\(state\.features\.morningBrief/.test(navSrc) && /syncJira\(\{ trigger: "auto" \}\)/.test(navSrc) && /router\.replace\("\/daily-review"\)/.test(navSrc) && /data-morning-brief/.test(reviewSrc) && /id="review-new"/.test(reviewSrc) && /id="review-due"/.test(reviewSrc), "opening the app syncs and lands on Daily Review, whose header carries the brief");
+
+  // ---- D2 Keyboard triage ----
+  const rows = [{ ticketKey: "A", url: "https://j/A", reviewable: true, actionable: true }, { ticketKey: "B", reviewable: false, actionable: true }];
+  ok(group, JSON.stringify(triageCommand("j", rows, 0)) === '{"kind":"move","index":1}' && JSON.stringify(triageCommand("J", rows, 1)) === '{"kind":"move","index":1}' && JSON.stringify(triageCommand("k", rows, 0)) === '{"kind":"move","index":0}', "J/K move and clamp at the ends");
+  ok(group, triageCommand("c", rows, 0).kind === "complete" && triageCommand("s", rows, 1).kind === "skip" && triageCommand("b", rows, 1).kind === "block" && triageCommand("r", rows, 0).kind === "reviewed" && JSON.stringify(triageCommand("o", rows, 0)) === '{"kind":"open","url":"https://j/A"}', "C/S/B/R/O map to complete / skip / block / reviewed / open in Jira");
+  ok(group, triageCommand("r", rows, 1).kind === "none" && triageCommand("o", rows, 1).kind === "none" && triageCommand("c", rows, 0, { inTextField: true }).kind === "none" && triageCommand("c", rows, 0, { meta: true }).kind === "none" && triageCommand("x", rows, 0).kind === "none" && triageCommand("j", [], 0).kind === "none", "R only on New rows, O only with a link; typing in a field, modifier keys and other keys do nothing");
+  ok(group, /useTriageKeys\(triageOn, triageRows, runTriage\)/.test(reviewSrc) && /state\.features\.keyboardTriage/.test(reviewSrc) && /markDailyReviewSeen\(\[cmd\.ticketKey\]\)/.test(reviewSrc), "Daily Review wires the keys to the store, behind the toggle");
+
+  // ---- D3 Sync history ----
+  let hist = rollDailySyncSummary({}, "2026-09-29", { at: "t1", newTickets: 2, assignedToMe: 1, closed: 0 });
+  hist = rollDailySyncSummary(hist, "2026-09-29", { at: "t2", newTickets: 1, assignedToMe: 0, closed: 3 });
+  hist = rollDailySyncSummary({ ...hist, "2026-06-01": { date: "2026-06-01", syncs: 1, newTickets: 0, assignedToMe: 0, closed: 0 } }, "2026-09-30", { at: "t3", newTickets: 0, assignedToMe: 0, closed: 0 });
+  ok(group, JSON.stringify(hist["2026-09-29"]) === '{"date":"2026-09-29","syncs":2,"newTickets":3,"assignedToMe":1,"closed":3,"lastSyncAt":"t2"}' && !hist["2026-06-01"] && listDailySyncSummaries(hist)[0].date === "2026-09-30", "syncs roll into a per-day summary; days older than 90 are dropped");
+  {
+    const { store, setJira } = v226ConfiguredStore(iso());
+    setJira([v226Actionable("SH-1")]);
+    await store.syncJira();
+    await v226Tick();
+    setJira([v226Actionable("SH-1", { status: "Done", jiraStatusName: "Done" }), v226Actionable("SH-2")]);
+    await store.syncJira();
+    const day = store.getSnapshot().dailySyncSummary[getTodayIso()];
+    ok(group, day?.syncs === 2 && day.newTickets === 2 && day.closed === 1, `each sync is recorded in today's summary (got ${JSON.stringify(day)})`);
+    store.setFeatureToggle("syncHistory", false);
+    await store.syncJira();
+    ok(group, store.getSnapshot().dailySyncSummary[getTodayIso()].syncs === 2, "with the toggle off, nothing new is recorded");
+    ok(group, /data-sync-history/.test(settingsSrc) && /listDailySyncSummaries\(state\.dailySyncSummary\)/.test(settingsSrc), "the history is visible in Data & Settings");
+  }
+
+  // ---- D4 Mention reply tracking ----
+  const m = { issueKey: "MR-1", commentId: "c1", mentionedAt: "2026-09-29T10:00:00.000Z" };
+  ok(group, isMentionReplied(m, { c1: { commentId: "c1", issueKey: "MR-1", repliedAt: "x", source: "manual" } }, {})?.source === "manual", "marked 'Replied' by hand");
+  ok(group, isMentionReplied(m, {}, { "MR-1": { lastCommentAt: "2026-09-29T11:00:00.000Z" } })?.source === "jira" && !isMentionReplied(m, {}, { "MR-1": { lastCommentAt: "2026-09-29T09:00:00.000Z" } }), "auto-detected: my comment on the same issue AFTER the mention counts; an earlier one doesn't");
+  ok(group, latestOwnCommentAt([{ author: { accountId: "acc-tay" }, created: "2026-09-29T08:00:00.000Z" }, { author: { accountId: "acc-bob" }, created: "2026-09-29T12:00:00.000Z" }, { author: { accountId: "acc-tay" }, created: "2026-09-29T11:00:00.000Z" }], "acc-tay") === "2026-09-29T11:00:00.000Z", "the sync finds my own latest comment among the comments it already fetched");
+  {
+    let payload: DataSourceSyncResult = { ok: true, data: emptyData(), recordsFetched: 0 };
+    const store = new CommandCenterStore({ createJiraDataSource: () => ({ type: "jira", sync: async () => payload }), jiraSyncLockManager: null, ...iso() });
+    store.getSnapshot();
+    store.setPersonalIdentity({ displayName: "Tay", accountId: "acc-tay" });
+    store.setJiraStatusRelevance("In Progress", "ACTIONABLE");
+    const mentionAt = new Date(Date.now() - 3600_000).toISOString();
+    payload = {
+      ok: true,
+      data: { ...emptyData(), projects: [{ id: "jira-project-V226", name: "V226 Project", clientId: "c-1", status: "on-track", sourceType: "jira", sourceId: "V226" } as never], workItems: [v226Actionable("MR-1"), v226Actionable("MR-2")] },
+      recordsFetched: 2,
+      syncedAt: new Date().toISOString(),
+      mentionEvents: [{ issueKey: "MR-1", commentId: "c-mr1", commentAuthor: "Anna", excerpt: "?", mentionedAt: mentionAt }, { issueKey: "MR-2", commentId: "c-mr2", commentAuthor: "Bo", excerpt: "?", mentionedAt: mentionAt }],
+      myActivity: { "MR-1": { lastCommentAt: new Date().toISOString(), lastActivityAt: new Date().toISOString() } },
+    };
+    await store.syncJira();
+    const awaiting = () => store.buildLiveStandup().mentionsAwaitingReply.map((t) => t.key).join(",");
+    ok(group, awaiting() === "MR-2" && !!store.getSnapshot().myTicketActivity["MR-1"]?.lastCommentAt, "a mention I already answered in Jira leaves 'awaiting my reply' automatically");
+    store.markMentionReplied("c-mr2", "MR-2");
+    ok(group, awaiting() === "" && store.getSnapshot().mentionReplies["c-mr2"]?.source === "manual", "marking 'Replied' removes the other one");
+    store.setFeatureToggle("mentionReplyTracking", false);
+    ok(group, awaiting() === "MR-1,MR-2" || awaiting() === "MR-2,MR-1", "with the toggle off, reply tracking is not applied");
+    const merged = mergeSyncedAppState(extractSyncedAppState(store.getSnapshot(), "t"), { ...extractSyncedAppState(store.getSnapshot(), "t"), mentionReplies: { other: { commentId: "other", issueKey: "X", repliedAt: "z", source: "manual" } } });
+    ok(group, !!merged.mentionReplies?.["c-mr2"] && !!merged.mentionReplies?.["other"], "'Replied' marks sync across devices (grow-only merge)");
+  }
+  ok(group, /latestOwnCommentAt\(commentsResult\.data, accountId\)/.test(src("src/app/api/command-center/jira/sync/route.ts")) && /markMentionReplied\(m\.commentId, m\.issueKey\)/.test(src("src/components/command-center/RecentlyMentioned.tsx")), "the sync route reports my comments; Recently Mentioned offers 'Replied'");
+
+  // ---- D5 Follow-up reminders ----
+  {
+    const { store, setJira } = v226ConfiguredStore(iso());
+    setJira([v226Actionable("FU-1"), v226Actionable("FU-2")]);
+    await store.syncJira();
+    store.blockTicketInDailyCommand("FU-1", "Waiting on Anna", undefined, getTodayIso());
+    store.blockTicketInDailyCommand("FU-2", "Waiting on Bo", undefined, addDays(getTodayIso(), 2));
+    store.blockTicketInDailyCommand("FU-3", "x", undefined, "nope");
+    const st = store.getSnapshot();
+    ok(group, st.dailyCommandBlocks["FU-1"].pingOn === getTodayIso() && st.dailyCommandBlocks["FU-3"].pingOn === undefined, "Block accepts an optional 'ping on' date (invalid dates ignored)");
+    const due = dueFollowUps(st.dailyCommandBlocks, getTodayIso(), st.data.workItems);
+    ok(group, due.map((d) => d.ticketKey).join(",") === "FU-1" && due[0].url === "https://jira.example.com/browse/FU-1" && due[0].reason === "Waiting on Anna", "only follow-ups whose ping date has come are due");
+    const sent: unknown[][] = [];
+    const deps = { slackConfigured: async () => true, send: async (s: unknown[]) => (sent.push(s), { sent: true }) };
+    const first = await runFollowUpRemindersOnce(store, deps as never);
+    const second = await runFollowUpRemindersOnce(store, deps as never);
+    ok(group, first === 1 && second === 0 && sent.length === 1 && (sent[0][0] as { kind: string }).kind === "FOLLOW_UP", "the Slack reminder goes out once per ticket per ping date");
+    store.blockTicketInDailyCommand("FU-1", "Waiting on Anna", undefined, getTodayIso());
+    ok(group, (await runFollowUpRemindersOnce(store, { slackConfigured: async () => false, send: deps.send } as never)) === 0, "nothing is sent when Slack isn't configured");
+    store.setFeatureToggle("followUpReminders", false);
+    ok(group, (await runFollowUpRemindersOnce(store, deps as never)) === 0, "nothing is sent with the toggle off");
+    ok(group, renderSlackText({ issueKey: "FU-1", summary: "Card vault", kind: "FOLLOW_UP", detail: "blocked: Waiting on Anna", url: "https://j/FU-1" }) === "⏰ Follow-up due: FU-1 — Card vault — blocked: Waiting on Anna (https://j/FU-1)" && slackSignalSchema.safeParse({ issueKey: "a", summary: "b", kind: "FOLLOW_UP", detail: "c" }).success, "the notify route renders FOLLOW_UP reminders");
+    ok(group, /id="review-followups"/.test(reviewSrc) && /dueFollowUps\(state\.dailyCommandBlocks/.test(reviewSrc) && /aria-label="Ping on \(optional\)"/.test(src("src/components/command-center/TaskReferenceRow.tsx")), "due follow-ups show in Daily Review; the Block picker offers 'Ping on'");
+  }
+
+  // ---- D6 Staleness wording + my activity ----
+  const staleItem = v226Actionable("ST-1", { lastUpdated: "2026-09-21" });
+  const byTicket = computeStaleAssignedTickets([staleItem], "2026-09-29");
+  const byMe = computeStaleAssignedTickets([v226Actionable("ST-1", { lastUpdated: "2026-09-29" })], "2026-09-29", undefined, { "ST-1": { lastActivityAt: new Date(2026, 8, 21, 10).toISOString() } });
+  ok(group, byTicket[0]?.basis === "ticket" && byMe[0]?.basis === "me" && byMe[0].businessDaysSinceUpdate === 6, "without my activity, silence is measured from the ticket; with it, from my last comment/transition (even if others touched the ticket today)");
+  const staleQueue = (s: StaleAssignedTicket[]) =>
+    buildAttentionQueue(
+      { drift: computeDeliveryDrift([], null as never), releaseDrift: [], riskEscalations: [], openRisks: [], dependencyRadar: [], decisionRadar: [], ineffectiveActions: [], stakeholderAttention: [], communicationPriority: [], staleAssignedTickets: s },
+      {},
+      "2026-09-29"
+    ).items.find((i) => i.category === "STALE");
+  ok(group, /^No ticket activity for 6 business day\(s\): /.test(staleQueue(byTicket)?.what ?? "") && /^No activity by you for 6 business day\(s\): /.test(staleQueue(byMe)?.what ?? ""), `the label reads "No ticket activity for N days" (or "No activity by you…" when measured from my activity) — got: ${staleQueue(byTicket)?.what}`);
+  ok(group, /state\.features\?\.staleUseMyActivity \? state\.myTicketActivity : undefined/.test(src("src/components/command-center/use-command-center.ts")), "my-activity staleness is applied only when its toggle is on");
+  ok(group, /author: jiraUserSchema/.test(src("src/lib/command-center/jira/types.ts")) && /h\.author\?\.accountId === requestAccountId/.test(src("src/app/api/command-center/jira/sync/route.ts")), "changelog entries carry their author, so my transitions count as my activity where the changelog was fetched");
+
+  // ---- D7 Report export ----
+  const draft = emailDraftUrl("Daily Report — 2026-09-29", "Done (1)\n- PAY-1 Fix & ship", "me@example.com");
+  ok(group, draft.url === "mailto:me%40example.com?subject=Daily%20Report%20%E2%80%94%202026-09-29&body=Done%20(1)%0A-%20PAY-1%20Fix%20%26%20ship" && !draft.truncated, "email export is a mailto: DRAFT with encoded subject/body");
+  ok(group, emailDraftUrl("s", "x".repeat(5000)).truncated && slackReportText("y".repeat(50000)).length <= 35000, "long reports are shortened for mailto/Slack, and say so");
+  const reportsPageSrc = src("src/app/reports/page.tsx");
+  ok(group, /window\.confirm\("Send this report to the Slack channel/.test(reportsPageSrc) && /sendReportToSlack\(slackReportText\(render\("slack"\)\)\)/.test(reportsPageSrc) && /state\.features\.reportExport && <ShareButtons/.test(reportsPageSrc), "Send to Slack needs an explicit click + confirmation, behind the toggle");
+  ok(group, /report: z\.object\(\{ text: z\.string\(\)\.min\(1\)\.max\(40000\) \}\)/.test(src("src/app/api/command-center/notify/route.ts")), "reports go through the existing notify route (which holds the webhook)");
 }
 
 if (skipped > 0) console.log(`\n⏭️  ${skipped} check group(s) skipped for missing runtime capabilities (see SKIPPED lines above).`);

@@ -24,7 +24,7 @@ import { selectAllReleaseHealth } from "./release-health";
 import { computeReleaseDrift } from "./release-drift";
 import { computeRiskEscalations } from "./risk-escalation";
 import { computeStakeholderAttention, rankCommunicationPriority } from "./stakeholder-radar";
-import type { AttentionItem, AttentionItemState, CommandCenterData, DailySnapshot, DecisionEffectivenessResult, EvidenceSourceType, MentionEvent, WorkItem } from "./types";
+import type { AttentionItem, AttentionItemState, CommandCenterData, DailySnapshot, DecisionEffectivenessResult, EvidenceSourceType, MentionEvent, WorkItem, MyTicketActivity } from "./types";
 import type { DerivedData } from "./selectors";
 
 export interface ProactiveIntelligence {
@@ -93,7 +93,9 @@ export function computeProactiveIntelligence(
   // omitting this reproduces DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS exactly, matching what
   // an install that has never opened Data & Settings' Stale Assigned Ticket control already
   // gets by default.
-  staleAssignedTicketThresholds: StaleAssignedTicketThresholds = DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS
+  staleAssignedTicketThresholds: StaleAssignedTicketThresholds = DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS,
+  // D6 — optional; passed only when "measure from my own activity" is switched on.
+  myTicketActivity?: Record<string, MyTicketActivity>
 ): ProactiveIntelligence {
   const currentMetrics = buildDailySnapshot(data, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds).metrics!;
 
@@ -168,7 +170,7 @@ export function computeProactiveIntelligence(
       // with no Work Relevance Policy configured has no WAITING classification to exclude.
       (!workRelevanceIndex || resolveWorkRelevance(w, workRelevanceIndex) !== "WAITING")
   );
-  const staleAssignedTickets = computeStaleAssignedTickets(activeAssignedForStaleness, today, staleAssignedTicketThresholds);
+  const staleAssignedTickets = computeStaleAssignedTickets(activeAssignedForStaleness, today, staleAssignedTicketThresholds, myTicketActivity);
 
   const { items: attentionQueue, nextAttentionState } = buildAttentionQueue(
     {

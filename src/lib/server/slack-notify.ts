@@ -17,7 +17,8 @@ export const slackSignalSchema = z.object({
   issueKey: z.string(),
   summary: z.string(),
   url: z.string().optional(),
-  kind: z.enum(["MENTION", "ASSIGNMENT"]),
+  // D5 — FOLLOW_UP: a blocked ticket whose "ping on" date has come.
+  kind: z.enum(["MENTION", "ASSIGNMENT", "FOLLOW_UP"]),
   detail: z.string(),
 });
 export type SlackSignal = z.infer<typeof slackSignalSchema>;
@@ -25,6 +26,7 @@ export type SlackSignal = z.infer<typeof slackSignalSchema>;
 export function renderSlackText(signal: SlackSignal): string {
   const link = signal.url ? ` (${signal.url})` : "";
   if (signal.kind === "ASSIGNMENT") return `📌 ${signal.issueKey} — ${signal.summary} — assigned to you.${link}`;
+  if (signal.kind === "FOLLOW_UP") return `⏰ Follow-up due: ${signal.issueKey} — ${signal.summary} — ${signal.detail}${link}`;
   return `💬 ${signal.issueKey} — ${signal.summary} — mentioned you: ${signal.detail}${link}`;
 }
 

@@ -311,11 +311,19 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
       id: `STALE:${slug(s.workItemId)}`,
       category: "STALE",
       severity: s.severity === "ESCALATE" ? "HIGH" : "MEDIUM",
-      what: `No activity in ${s.businessDaysSinceUpdate} business day(s): ${s.title}`,
-      why: `${s.issueKey} is assigned to you and still active, but nobody has updated it in ${s.businessDaysSinceUpdate} business day(s).`,
+      // D6 — Jira's `updated` moves on ANYONE's edit, so the default label says "ticket
+      // activity", not "you"; "by you" only when measured from the user's own activity.
+      what:
+        s.basis === "me"
+          ? `No activity by you for ${s.businessDaysSinceUpdate} business day(s): ${s.title}`
+          : `No ticket activity for ${s.businessDaysSinceUpdate} business day(s): ${s.title}`,
+      why:
+        s.basis === "me"
+          ? `${s.issueKey} is assigned to you and still active, but your last comment or transition on it was ${s.businessDaysSinceUpdate} business day(s) ago.`
+          : `${s.issueKey} is assigned to you and still active, but the ticket hasn't been updated by anyone in ${s.businessDaysSinceUpdate} business day(s).`,
       impact: "This ticket may have been missed — silence is not the same as no action needed.",
       nowWhat: s.severity === "ESCALATE" ? "Check on this ticket today — it's been silent for a while." : "Take a look — activity has slowed on this ticket.",
-      evidence: [`${s.issueKey} last updated ${s.businessDaysSinceUpdate} business day(s) ago`],
+      evidence: [s.basis === "me" ? `${s.issueKey}: your last activity ${s.businessDaysSinceUpdate} business day(s) ago` : `${s.issueKey} last updated ${s.businessDaysSinceUpdate} business day(s) ago`],
       sourceRef: { type: "workItem", id: s.workItemId },
       ownershipExplicit: true,
     });

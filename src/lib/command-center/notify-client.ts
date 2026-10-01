@@ -62,3 +62,33 @@ export async function sendTestSlackNotification(): Promise<SlackTestNotification
     return { sent: false, reason: "network-error" };
   }
 }
+
+/** D5 — follow-up reminders (kind FOLLOW_UP), through the same notify route as mention /
+ *  assignment signals. The caller only calls this for reminders not yet sent. */
+export async function sendFollowUpReminders(signals: { issueKey: string; summary: string; url?: string; kind: "FOLLOW_UP"; detail: string }[]): Promise<{ sent: boolean; reason?: string }> {
+  if (signals.length === 0) return { sent: false, reason: "no-signals" };
+  try {
+    const res = await fetch(NOTIFY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
+      body: JSON.stringify({ signals }),
+    });
+    return (await res.json()) as { sent: boolean; reason?: string };
+  } catch {
+    return { sent: false, reason: "network-error" };
+  }
+}
+
+/** D7 — post a report the user explicitly chose to send to the configured Slack webhook. */
+export async function sendReportToSlack(text: string): Promise<SlackTestNotificationResult> {
+  try {
+    const res = await fetch(NOTIFY_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
+      body: JSON.stringify({ report: { text } }),
+    });
+    return (await res.json()) as SlackTestNotificationResult;
+  } catch {
+    return { sent: false, reason: "network-error" };
+  }
+}

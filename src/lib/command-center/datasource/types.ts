@@ -3,7 +3,7 @@
 // the app. The store only ever talks to a DataSourceProvider, never to Jira or the import
 // pipeline directly.
 
-import type { CommandCenterData, DataSourceType, JiraErrorKind, JiraProjectScopeMode, MentionEvent } from "../types";
+import type { CommandCenterData, DataSourceType, JiraErrorKind, JiraProjectScopeMode, MentionEvent, MyTicketActivity } from "../types";
 
 export interface DataSourceSyncResult {
   ok: boolean;
@@ -26,6 +26,8 @@ export interface DataSourceSyncResult {
   focusedProjects?: string[];
   // V2.10 §2 — "who mentioned me in a comment?", additive/optional: only ever populated when
   // the sync request carried a configured accountId (see DataSourceProvider.sync below).
+  /** D4/D6 — the configured user's own latest comment/changelog activity per issue key. */
+  myActivity?: Record<string, MyTicketActivity>;
   mentionEvents?: MentionEvent[];
   // V2.18 §5 — true when this sync stopped at the JIRA_MAX_ISSUES safety cap before reaching
   // the real end of matching issues; resumeSinceIso is the boundary the NEXT sync must ask

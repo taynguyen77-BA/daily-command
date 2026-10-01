@@ -38,7 +38,13 @@ export const dynamic = "force-dynamic";
 
 const TEST_NOTIFICATION_TEXT = "✅ Daily Command test notification — if you can see this, your Slack destination is correctly configured.";
 
-const notifyRequestSchema = z.union([z.object({ test: z.literal(true) }), z.object({ signals: z.array(slackSignalSchema) })]);
+// D7 — `report`: a Daily/Weekly report the user explicitly chose to send (Slack mrkdwn text,
+// rendered client-side by reports.ts). Bounded; never produced without a click.
+const notifyRequestSchema = z.union([
+  z.object({ test: z.literal(true) }),
+  z.object({ signals: z.array(slackSignalSchema) }),
+  z.object({ report: z.object({ text: z.string().min(1).max(40000) }) }),
+]);
 
 /** V2.13 §3 — true iff both PERSONAL_JIRA_ACCOUNT_ID and the KV env vars are present
  *  server-side, exactly the same two conditions jira/sync/route.ts checks before calling
@@ -81,6 +87,11 @@ export async function POST(req: Request) {
 
   if ("test" in parsed.data) {
     const result = await postToSlack(webhookUrl, TEST_NOTIFICATION_TEXT);
+    return NextResponse.json({ sent: result.ok, reason: result.ok ? undefined : "delivery-failed", detail: result.detail });
+  }
+
+  if ("report" in parsed.data) {
+    const result = await postToSlack(webhookUrl, parsed.data.report.text);
     return NextResponse.json({ sent: result.ok, reason: result.ok ? undefined : "delivery-failed", detail: result.detail });
   }
 

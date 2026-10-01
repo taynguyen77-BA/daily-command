@@ -7,6 +7,9 @@ import { commandCenterStore } from "@/lib/command-center/store";
 import { initAppStateSync } from "@/lib/command-center/app-state-sync";
 import { initAutoJiraSync } from "@/lib/command-center/auto-sync";
 import { initAutoDailyReport } from "@/lib/command-center/auto-daily-report";
+import { initFollowUpReminders } from "@/lib/command-center/follow-up-runner";
+import { shouldRunMorningBrief } from "@/lib/command-center/morning-brief";
+import { getTodayIso } from "@/lib/command-center/store";
 
 interface NavLink {
   href: string;
@@ -81,6 +84,29 @@ function useDailyReviewBadge(): number {
   }, [state]);
 }
 
+/** D1 — Morning Brief one-click: the first time the app is opened on a day (feature on), it
+ *  syncs Jira (when connected) and lands on Daily Review, whose header then summarizes what
+ *  happened since yesterday 18:00. Runs once per day, only when entered at "/". */
+let morningBriefRedirected = false;
+function useMorningBrief(pathname: string | null): boolean {
+  const router = useRouter();
+  const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
+  const ran = useRef(false);
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    if (ran.current || !state.loaded) return;
+    ran.current = true;
+    const today = getTodayIso();
+    if (!shouldRunMorningBrief(state.features.morningBrief, state.morningBriefLastRunDay, today) || pathname !== "/") return;
+    setActive(true);
+    morningBriefRedirected = true; // the landing-page redirect below must not override this
+    commandCenterStore.recordMorningBriefRun(today);
+    if (state.dataSource === "jira" && state.jiraSync.lastSyncStatus !== "never") void commandCenterStore.syncJira({ trigger: "auto" });
+    router.replace("/daily-review");
+  }, [state, pathname, router]);
+  return active;
+}
+
 /** C2 — opens the configured landing page once per browser session, only when the app was
  *  entered at "/" (clicking "Command Center" later always goes to "/"). */
 function useLandingRedirect(pathname: string | null) {
@@ -101,7 +127,7 @@ function useLandingRedirect(pathname: string | null) {
     } catch {
       // storage unavailable — redirect at most once per page load instead
     }
-    if (!alreadyRedirected && pathname === "/" && landing !== "/") router.replace(landing);
+    if (!alreadyRedirected && !morningBriefRedirected && pathname === "/" && landing !== "/") router.replace(landing);
   }, [landing, pathname, router]);
 }
 
@@ -200,7 +226,8 @@ export function Nav() {
   );
   const links = LINKS.filter((link) => !link.advanced || showAdvanced);
   const reviewBadge = useDailyReviewBadge();
-  useLandingRedirect(pathname);
+  const morningBriefActive = useMorningBrief(pathname);
+  useLandingRedirect(morningBriefActive ? "/daily-review" : pathname);
   const activeLink = links.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? links[0];
 
   // V2.15 §3 point 1 — Nav is mounted exactly once, app-wide, by the root layout (persists
@@ -229,6 +256,11 @@ export function Nav() {
   // on-load check is specifically the safety net for the paths that never sync at all.
   useEffect(() => {
     initAutoDailyReport(commandCenterStore);
+  }, []);
+
+  // D5 — Slack follow-up reminders for blocked tickets whose "ping on" date has come.
+  useEffect(() => {
+    initFollowUpReminders(commandCenterStore);
   }, []);
 
   return (

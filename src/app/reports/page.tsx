@@ -19,6 +19,8 @@ import {
   type ReportTicket,
   type WeeklyGroupBy,
 } from "@/lib/command-center/reports";
+import { emailDraftUrl, slackReportText } from "@/lib/command-center/report-export";
+import { sendReportToSlack } from "@/lib/command-center/notify-client";
 
 const FORMATS: { format: ReportFormat; label: string }[] = [
   { format: "markdown", label: "Copy Markdown" },
@@ -27,7 +29,7 @@ const FORMATS: { format: ReportFormat; label: string }[] = [
 ];
 const BTN = "rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text";
 
-function TicketList({ tickets, showAssignee = false, empty = "None." }: { tickets: ReportTicket[]; showAssignee?: boolean; empty?: string }) {
+function TicketList({ tickets, showAssignee = false, empty = "None.", onReplied }: { tickets: ReportTicket[]; showAssignee?: boolean; empty?: string; onReplied?: (t: ReportTicket) => void }) {
   if (tickets.length === 0) return <p className="text-sm text-text3">{empty}</p>;
   return (
     <ul className="space-y-1">
@@ -42,19 +44,49 @@ function TicketList({ tickets, showAssignee = false, empty = "None." }: { ticket
           ) : null}{" "}
           {/* The rest of the line, exactly as the plain-text export prints it. */}
           {formatTicketLine({ ...t, key: undefined, url: undefined }, "text", { showAssignee })}
+          {onReplied && t.mention && (
+            <button onClick={() => onReplied(t)} title="I've answered this — remove it from 'awaiting my reply'" className="ml-2 rounded border border-border px-1.5 py-0.5 text-[11px] text-text3 hover:border-accent hover:text-text">
+              Replied
+            </button>
+          )}
         </li>
       ))}
     </ul>
   );
 }
 
-function Section({ title, tickets, showAssignee, empty }: { title: string; tickets: ReportTicket[]; showAssignee?: boolean; empty?: string }) {
+function Section({ title, tickets, showAssignee, empty, onReplied }: { title: string; tickets: ReportTicket[]; showAssignee?: boolean; empty?: string; onReplied?: (t: ReportTicket) => void }) {
   return (
     <div>
       <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">
         {title} ({tickets.length})
       </h3>
-      <TicketList tickets={tickets} showAssignee={showAssignee} empty={empty} />
+      <TicketList tickets={tickets} showAssignee={showAssignee} empty={empty} onReplied={onReplied} />
+    </div>
+  );
+}
+
+/** D7 — send to Slack (explicit click + confirmation) or open an email DRAFT. Never automatic. */
+function ShareButtons({ subject, render }: { subject: string; render: (format: ReportFormat) => string }) {
+  const [status, setStatus] = useState<string | null>(null);
+  const email = emailDraftUrl(subject, render("text"));
+  return (
+    <div className="flex flex-wrap items-center gap-1.5" data-report-share>
+      <button
+        className={BTN}
+        onClick={async () => {
+          if (!window.confirm("Send this report to the Slack channel configured on the server?")) return;
+          setStatus("Sending…");
+          const result = await sendReportToSlack(slackReportText(render("slack")));
+          setStatus(result.sent ? "Sent to Slack ✓" : result.reason === "not-configured" ? "Slack isn't configured (SLACK_WEBHOOK_URL)" : `Not sent${result.detail ? ` — ${result.detail}` : ""}`);
+        }}
+      >
+        Send to Slack…
+      </button>
+      <a className={BTN} href={email.url} title={email.truncated ? "Long report — the draft is shortened; paste the full text from 'Copy plain text'" : "Opens a draft in your mail app — nothing is sent from here"}>
+        Email draft
+      </a>
+      {status && <span className="text-xs text-text3">{status}</span>}
     </div>
   );
 }
@@ -139,6 +171,7 @@ export default function ReportsPage() {
               <input type="date" value={date} max={today} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded border border-border bg-surface px-1.5 py-1 text-xs" />
             </label>
             <CopyButtons render={(format) => renderDailyReport(v, format, { includeTeam })} />
+            {state.features.reportExport && <ShareButtons subject={`Daily Report — ${v.date}`} render={(format) => renderDailyReport(v, format, { includeTeam })} />}
           </div>
           {!daily.snapshot && date !== today ? (
             <p className="text-sm text-text3">No Daily Report was generated for {date}.</p>
@@ -151,7 +184,11 @@ export default function ReportsPage() {
               <Section title="Blocked" tickets={v.blocked} />
               <Section title="Skipped" tickets={v.skipped} />
               <Section title="New today" tickets={v.newToday} />
-              <Section title="Mentions awaiting my reply" tickets={v.mentionsAwaitingReply} />
+              <Section
+                title="Mentions awaiting my reply"
+                tickets={v.mentionsAwaitingReply}
+                onReplied={date === today && state.features.mentionReplyTracking ? (t) => t.mention && t.key && store.markMentionReplied(t.mention.commentId, t.key) : undefined}
+              />
               {v.removedFromScope.length > 0 && <Section title="Removed from scope" tickets={v.removedFromScope} showAssignee />}
               {v.decisions.length > 0 && (
                 <div>
@@ -192,6 +229,7 @@ export default function ReportsPage() {
               </label>
             </div>
             <CopyButtons render={(format) => renderWeeklyReport(w, format, { includeTeam })} />
+            {state.features.reportExport && <ShareButtons subject={`Weekly Report — ${w.weekStart} to ${w.weekEnd}`} render={(format) => renderWeeklyReport(w, format, { includeTeam })} />}
           </div>
           <p className="text-xs text-text3">
             Done {w.totals.doneMine} · New {w.totals.newReceived} · Blocked {w.totals.blocked} · Skipped {w.totals.skipped} · Decisions {w.totals.decisions}

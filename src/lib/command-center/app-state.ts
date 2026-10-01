@@ -23,6 +23,7 @@ import type {
   DailyCommandTombstones,
   DailyReportSnapshot,
   DailyReviewAck,
+  MentionReply,
   Decision,
   JiraProjectScope,
   JiraWorkRelevancePolicyMap,
@@ -65,6 +66,8 @@ export interface SyncedAppState {
   // A3 — Daily Review acknowledgments and the "New" baseline.
   dailyReviewAcks?: Record<string, DailyReviewAck>;
   dailyReviewBaselineAt?: string;
+  // D4 — answered mentions (grow-only merge).
+  mentionReplies?: Record<string, MentionReply>;
   updatedAtIso: string;
 }
 
@@ -157,6 +160,7 @@ export const syncedAppStateSchema = z.object({
   dailyReviewLastVisitAt: z.string().optional(),
   dailyReviewAcks: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   dailyReviewBaselineAt: z.string().optional(),
+  mentionReplies: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   uiPreferences: z.object({
     showAdvancedSettings: z.boolean(),
     myActionItemsOnly: z.object({ attention: z.boolean(), myDay: z.boolean(), priorities: z.boolean() }),

@@ -5,6 +5,8 @@
 // recent-mentions.ts's own top comment). Answers "what recently involved me?", not "what's
 // still unresolved" (that's the Attention Queue's job).
 
+import { isMentionReplied } from "@/lib/command-center/mention-replies";
+import type { MentionReply } from "@/lib/command-center/types";
 import { useEffect, useMemo, useState } from "react";
 import { selectRecentMentions, type RecentMention } from "@/lib/command-center/recent-mentions";
 import { slug } from "@/lib/command-center/attention-queue";
@@ -21,7 +23,7 @@ function formatRecency(mentionedAt: string, nowMs: number): string {
   return `${Math.round(minutes / 60)}h ago`;
 }
 
-function MentionRow({ mention, nowMs, onResolve, onComplete }: { mention: RecentMention; nowMs: number; onResolve: () => void; onComplete: () => void }) {
+function MentionRow({ mention, nowMs, onResolve, onComplete, replied, onReplied }: { mention: RecentMention; nowMs: number; onResolve: () => void; onComplete: () => void; replied?: MentionReply; onReplied?: () => void }) {
   return (
     <li className="border-b border-border py-2 last:border-b-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -30,8 +32,18 @@ function MentionRow({ mention, nowMs, onResolve, onComplete }: { mention: Recent
           <span>Mentioned {formatRecency(mention.mentionedAt, nowMs)}</span>
           {mention.groupCount > 1 && <span className="text-accent2">{mentionGroupLabel(mention.groupCount)}</span>}
           {mention.reactivation && <ReactivatedBadge reactivation={mention.reactivation} now={new Date(nowMs)} />}
+          {replied && (
+            <span data-mention-replied={replied.source} className="rounded bg-green/15 px-1.5 py-0.5 text-[10px] font-medium text-green">
+              {replied.source === "jira" ? "✓ You replied in Jira" : "✓ Replied"}
+            </span>
+          )}
         </div>
         <div className="flex shrink-0 gap-2">
+          {onReplied && !replied && (
+            <button onClick={onReplied} title="I've answered this — it leaves 'awaiting my reply'" className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+              Replied
+            </button>
+          )}
           <button onClick={onResolve} className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
             Mark read
           </button>
@@ -88,6 +100,9 @@ export function RecentlyMentioned() {
                 nowMs={nowMs}
                 onResolve={() => store.resolveAttentionItem(`MENTION:${slug(m.issueKey)}:${slug(m.commentId)}`)}
                 onComplete={() => store.completeTicketInDailyCommand(m.issueKey)}
+                // D4 — reply tracking (manual, or auto-detected from my later comment).
+                replied={state.features.mentionReplyTracking ? isMentionReplied(m, state.mentionReplies, state.myTicketActivity) : undefined}
+                onReplied={state.features.mentionReplyTracking ? () => store.markMentionReplied(m.commentId, m.issueKey) : undefined}
               />
             ))}
           </ul>

@@ -126,6 +126,18 @@ Every mutation to a synced field debounces a single `POST` a few seconds later (
 
 Project Settings → Environment Variables → add the ones you need for the **Production** (and optionally **Preview**) environment, then redeploy. Never commit real values to the repo — `.env*.local` is already git-ignored.
 
+## Daily helpers (V2.30) — each can be switched off in Data & Settings → Features
+
+| Feature | Default | What it does |
+| --- | --- | --- |
+| **Morning Brief** | on | The first time the app is opened on a day (entered at `/`), it syncs Jira (when connected) and lands on Daily Review, whose header reads e.g. "Since yesterday 18:00: 4 new, 2 assigned, 3 mentions, 1 due re-check, 5 closed by team" — each count a jump link. "Yesterday" is the previous business day (Monday reads "Since Fri 18:00"). |
+| **Keyboard triage** | on | On Daily Review: `J`/`K` move, `C` complete, `S` skip, `B` block, `R` reviewed (New rows), `O` open in Jira. Ignored while typing in a field or with Ctrl/Cmd/Alt held. |
+| **Sync history** | on | Every successful Jira sync rolls into a per-day summary (syncs, new tickets, newly assigned to you, closed in Jira), kept 90 days and shown in Data & Settings. |
+| **Mention reply tracking** | on | Mark a mention "Replied" (Recently Mentioned, Reports), or let the sync detect your own later comment on the same issue — either way it leaves "Mentions awaiting my reply". Replies sync across devices. |
+| **Follow-up reminders** | on | Blocking a ticket can take an optional "Ping on <date>". From that day it is listed in Daily Review's "Follow-ups to send" (with the Draft follow-up text), and — when `SLACK_WEBHOOK_URL` is configured — one Slack reminder is sent per ticket per ping date. |
+| **Staleness wording / my activity** | wording always; "my activity" off | The stale-ticket item now says **"No ticket activity for N business days"**, because Jira's `updated` changes on anyone's edit. Optionally (off by default) measure from **your own** last comment/transition where the sync could see it ("No activity by you for N business days") — available only for tickets whose comments or changelog the sync fetched. |
+| **Send reports to Slack / email draft** | on | Reports gets "Send to Slack…" (explicit click + confirmation, through the existing notify route) and "Email draft" (a `mailto:` draft your mail app opens). Nothing is ever sent automatically. |
+
 ## Page smoke test (C3)
 
 `npm test` renders **every route** with `react-dom/server` against the real app store, twice — once with the demo dataset and once with a seeded Jira-like dataset (synced through the real `syncJira` path with a mocked sync endpoint) — and asserts: no runtime error, no `undefined`/`NaN` text, no empty/`undefined` link, and every ticket row links to its Jira URL. It then runs every ticket action the rows expose (Mark completed, Reopen, Skip with reason + re-check date, Reactivate, Block with reason, Unblock, Daily Review "Seen") through the exact functions the buttons call and checks each result again after a reload. The same 16 routes were also loaded in a real browser (dev server, demo data) with console errors captured.

@@ -64,6 +64,16 @@ export function mentionCommentId(issueKey: string, comment: { id?: string; creat
   return comment.id ?? `${issueKey}:no-id:${comment.created ?? ""}`;
 }
 
+/** D4/D6 — the latest comment `accountId` itself wrote in this list (ISO), if any. */
+export function latestOwnCommentAt(comments: JiraComment[], accountId: string): string | undefined {
+  let latest: string | undefined;
+  for (const c of comments) {
+    if (c.author?.accountId !== accountId || !c.created) continue;
+    if (!latest || c.created > latest) latest = c.created;
+  }
+  return latest;
+}
+
 /** One issue's raw comment list -> the MentionEvents that actually mention `accountId`.
  *  `today` is only ever used as a safe fallback when Jira omits a comment's `created`
  *  timestamp — never fabricated otherwise, same convention as jira/normalize.ts. */

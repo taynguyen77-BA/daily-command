@@ -14,6 +14,7 @@
 import type { CommandCenterStore, StoreState } from "./store";
 import { mergeById } from "./store";
 import type { SyncedAppState } from "./app-state";
+import { mergeMentionReplies } from "./mention-replies";
 import { emptyTombstones, maxIso, mergeDailyCommandState, mergeReviewAcks, type DailyCommandState } from "./execution-state-merge";
 import { pairedAuthHeader, isDevicePaired } from "./device-pairing";
 
@@ -41,6 +42,7 @@ export function extractSyncedAppState(state: StoreState, updatedAtIso: string): 
     dailyReviewLastVisitAt: state.dailyReviewLastVisitAt,
     dailyReviewAcks: state.dailyReviewAcks,
     dailyReviewBaselineAt: state.dailyReviewBaselineAt,
+    mentionReplies: state.mentionReplies,
     uiPreferences: {
       showAdvancedSettings: state.showAdvancedSettings,
       myActionItemsOnly: state.myActionItemsOnly,
@@ -133,6 +135,7 @@ export function mergeSyncedAppState(local: SyncedAppState, server: SyncedAppStat
     dailyReviewLastVisitAt: maxIso(local.dailyReviewLastVisitAt, server.dailyReviewLastVisitAt),
     dailyReviewAcks: mergeReviewAcks(local.dailyReviewAcks ?? {}, server.dailyReviewAcks ?? {}),
     dailyReviewBaselineAt: maxIso(local.dailyReviewBaselineAt, server.dailyReviewBaselineAt),
+    mentionReplies: mergeMentionReplies(local.mentionReplies ?? {}, server.mentionReplies),
     uiPreferences: server.uiPreferences,
     updatedAtIso: server.updatedAtIso,
   };
