@@ -59,7 +59,7 @@ export function ProjectMemoryContent({ state, store }: { state: StoreState; stor
           {!confirmingClear ? (
             <button
               onClick={() => setConfirmingClear(true)}
-              className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-red hover:text-red"
+              className="btn btn-secondary"
             >
               Clear memory
             </button>

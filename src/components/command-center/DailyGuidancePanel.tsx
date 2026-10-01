@@ -33,7 +33,7 @@ export function DailyGuidancePanel({ personalFocus, planItems, outcomeScorecard 
         <span className="text-xs uppercase tracking-wide text-text3">AI daily guidance (on-demand)</span>
       </div>
       {!result ? (
-        <button onClick={generate} disabled={loading} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-60">
+        <button onClick={generate} disabled={loading} className="btn btn-secondary disabled:opacity-60">
           {loading ? "Generating…" : "Generate Daily Guidance"}
         </button>
       ) : (

@@ -63,7 +63,7 @@ export function HealthTrend({ trend, currentConfidence }: { trend: HealthTrendTy
             </div>
 
             {!interp ? (
-              <button onClick={explain} disabled={loading} className="mt-4 text-sm font-medium text-accent2 hover:underline disabled:opacity-50">
+              <button onClick={explain} disabled={loading} className="mt-4 text-sm link disabled:opacity-50">
                 {loading ? "Asking Claude…" : "Explain this trend"}
               </button>
             ) : (

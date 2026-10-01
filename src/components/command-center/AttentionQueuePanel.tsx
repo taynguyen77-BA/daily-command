@@ -14,7 +14,6 @@ import { AskClaudeAbout } from "./AskClaudeAbout";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
-import { TicketLink } from "./TicketLink";
 import { ReactivatedBadge, TaskRow } from "./TaskReferenceRow";
 import { groupMentionItems, mentionGroupLabel } from "@/lib/command-center/mention-grouping";
 
@@ -51,8 +50,8 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
   }
 
   return (
-    <Panel className="p-4">
-      <div className="mb-1 flex flex-wrap items-center gap-2">
+    <Panel className="flex flex-col p-4">
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {/* V2.17 Task 3 §2 — relation ("is this mine?") leads, then category/severity; the
             ticket link and lifecycle recede into the quieter tail of the row. */}
         <RelationBadge relation={item.relation} />
@@ -61,16 +60,18 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         {item.relatedDecisionId && <MetaPill variant="accent">Decision needed</MetaPill>}
         {item.lifecycle === "REOPENED" && <span className="text-xs text-red">Reopened — previously resolved</span>}
         {item.lifecycle === "RE_ESCALATED" && <span className="text-xs text-red">Re-escalated — severity increased</span>}
-        <LifecycleBadge lifecycle={item.lifecycle} />
-        {item.ticketKey && <TicketLink ticketKey={item.ticketKey} url={item.ticketUrl} className="text-xs text-text3" />}
         {item.reactivation && <ReactivatedBadge reactivation={item.reactivation} />}
+        {/* The ticket key/link lives in the ticket row below (no duplicate up here). */}
+        <span className="ml-auto">
+          <LifecycleBadge lifecycle={item.lifecycle} />
+        </span>
       </div>
-      <p className="font-display text-sm text-text">{item.what}</p>
-      <p className="mt-1 text-xs text-text2">
+      <p className="font-display text-[15px] font-semibold leading-snug text-text">{item.what}</p>
+      <p className="mt-1.5 text-xs leading-relaxed text-text2">
         <span className="font-medium text-text3">Why now: </span>
         {item.why}
       </p>
-      <p className="mt-1 text-xs text-text2">
+      <p className="mt-1 text-xs leading-relaxed text-text2">
         <span className="font-medium text-text3">Impact: </span>
         {item.impact}
       </p>
@@ -79,8 +80,8 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         // fixed, non-causal continuation of the item's own already-computed impact above.
         <p className="mt-1 text-xs text-text3">If no intervention occurs, this condition is expected to remain unresolved.</p>
       )}
-      <p className="mt-1 text-xs text-text2">
-        <span className="font-medium text-text3">Now what: </span>
+      <p className="mt-1.5 rounded-md bg-surface2/70 px-2.5 py-1.5 text-xs leading-relaxed text-text">
+        <span className="font-semibold text-accent2">Now what: </span>
         {item.nowWhat}
       </p>
 
@@ -88,16 +89,16 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
           and the full ticket action set; "Done" there resolves this and every other open signal
           on the ticket. Resolve below only dismisses this one signal. */}
       {item.ticketKey && (
-        <div className="mt-2 rounded-md border border-border bg-surface2 px-2">
-          <TaskRow as="div" ticketKey={item.ticketKey} url={item.ticketUrl} showTitle={false} surface="attention" />
+        <div className="mt-3 rounded-lg border border-border bg-surface2/60 px-3">
+          <TaskRow stacked as="div" ticketKey={item.ticketKey} url={item.ticketUrl} showTitle={false} surface="attention" />
         </div>
       )}
 
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="mt-2 text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link mt-3 self-start text-xs">
         {open ? "Hide evidence" : `Evidence (${item.evidence.length})`}
       </button>
       {open && (
-        <ul className="mt-2 space-y-0.5 rounded-md border border-border bg-surface2 p-2 text-xs text-text2">
+        <ul className="mt-2 space-y-0.5 rounded-lg border border-border bg-surface2 p-3 text-xs text-text2">
           {item.evidence.map((e, i) => (
             <li key={i}>- {e}</li>
           ))}
@@ -106,27 +107,30 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
 
       <AskClaudeAbout subject={item.what} entityId={item.id} facts={facts} evidence={evidence} />
 
-      <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <button onClick={() => setAssisting(true)} className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent2">
+      {/* Primary moves on the left; the signal's lifecycle (acknowledge / snooze / resolve) on
+          the right, quieter — every action is still one click. */}
+      <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-border pt-3">
+        <button onClick={() => setAssisting(true)} className="btn btn-sm btn-primary">
           What should I do?
         </button>
-        <button onClick={() => setCreatingUpdate(true)} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+        <button onClick={() => setCreatingUpdate(true)} className="btn btn-sm btn-secondary">
           Create Stakeholder Update
         </button>
+        <span className="flex flex-wrap items-center gap-1 sm:ml-auto">
         {item.lifecycle !== "ACKNOWLEDGED" && item.lifecycle !== "SNOOZED" && (
-          <button onClick={() => commandCenterStore.acknowledgeAttentionItem(item.id)} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+          <button onClick={() => commandCenterStore.acknowledgeAttentionItem(item.id)} className="btn btn-sm btn-ghost">
             Acknowledge
           </button>
         )}
         {item.lifecycle !== "SNOOZED" && (
           <div className="relative">
-            <button onClick={() => setSnoozing((s) => !s)} aria-expanded={snoozing} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+            <button onClick={() => setSnoozing((s) => !s)} aria-expanded={snoozing} className="btn btn-sm btn-ghost">
               Snooze
             </button>
             {snoozing && (
-              <div className="absolute left-0 top-full z-10 mt-1 flex gap-1 rounded-md border border-border bg-surface p-1 shadow-lg">
+              <div className="absolute right-0 top-full z-10 mt-1 flex gap-1 rounded-lg border border-border2 bg-surface p-1 shadow-pop">
                 {[1, 3, 7].map((d) => (
-                  <button key={d} onClick={() => snooze(d)} className="rounded px-2 py-1 text-xs text-text2 hover:bg-surface2">
+                  <button key={d} onClick={() => snooze(d)} className="btn btn-sm btn-ghost">
                     {d}d
                   </button>
                 ))}
@@ -134,11 +138,12 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
             )}
           </div>
         )}
-        <button onClick={() => commandCenterStore.resolveAttentionItem(item.id)} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+        <button onClick={() => commandCenterStore.resolveAttentionItem(item.id)} className="btn btn-sm btn-ghost">
           Resolve
         </button>
+        </span>
         {showViewLink && (
-          <Link href="/attention" className="ml-auto text-xs font-medium text-accent2 hover:underline">
+          <Link href="/attention" className="link ml-auto text-xs">
             View all →
           </Link>
         )}
@@ -160,7 +165,7 @@ export function AttentionQueuePanel({ items, limit = 6 }: { items: AttentionItem
         title="Attention Queue"
         subtitle="Consolidated, deduplicated, evidence-backed — every item explains why it needs you now."
         action={
-          <Link href="/attention" className="text-xs font-medium text-accent2 hover:underline">
+          <Link href="/attention" className="link text-xs">
             View all →
           </Link>
         }

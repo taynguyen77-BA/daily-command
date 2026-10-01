@@ -40,14 +40,14 @@ function MentionRow({ mention, nowMs, onResolve, onComplete, replied, onReplied 
         </div>
         <div className="flex shrink-0 gap-2">
           {onReplied && !replied && (
-            <button onClick={onReplied} title="I've answered this — it leaves 'awaiting my reply'" className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+            <button onClick={onReplied} title="I've answered this — it leaves 'awaiting my reply'" className="btn btn-sm btn-secondary">
               Replied
             </button>
           )}
-          <button onClick={onResolve} className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+          <button onClick={onResolve} className="btn btn-sm btn-secondary">
             Mark read
           </button>
-          <button onClick={onComplete} className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+          <button onClick={onComplete} className="btn btn-sm btn-secondary">
             Mark ticket completed
           </button>
         </div>

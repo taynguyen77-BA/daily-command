@@ -76,8 +76,8 @@ export function PriorityCard({
   }, [open]);
 
   return (
-    <div className="rounded-lg border border-border bg-surface p-4">
-      <div className="mb-2 flex items-center gap-2">
+    <div className="flex min-w-0 flex-col rounded-xl border border-border bg-surface p-4 shadow-card">
+      <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
         {/* V2.17 Task 3 §2 — relation ("is this mine?") leads the row, ahead of severity —
             the most visually prominent signal on this card, per the audit's hierarchy pass. */}
         <RelationBadge relation={relation} />
@@ -97,7 +97,7 @@ export function PriorityCard({
         <TrustLabel kind="calculated" />
         {item.sourceType === "jira" && item.sourceUrl && <TrustLabel kind="source" />}
       </div>
-      <h3 className="font-display text-base text-text">{item.title}</h3>
+      <h3 className="font-display text-base font-semibold leading-snug text-text">{item.title}</h3>
       <p className="mt-1 text-sm text-text2">{result.reasoning}</p>
       <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-text3">
         <span>Status: {item.status}</span>
@@ -117,7 +117,7 @@ export function PriorityCard({
       </div>
 
       <div className="mt-2">
-        <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="text-xs font-medium text-accent2 hover:underline">
+        <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link text-xs">
           {open ? "Hide" : "Why am I seeing this?"}
         </button>
         {open && (
@@ -142,11 +142,11 @@ export function PriorityCard({
       )}
 
       <div className="mt-2 rounded-md border border-border bg-surface2 px-2">
-        <TaskRow as="div" workItem={item} showTitle={false} surface={surface} />
+        <TaskRow stacked as="div" workItem={item} showTitle={false} surface={surface} />
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button onClick={onTakeAction} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2">
+        <button onClick={onTakeAction} className="btn btn-primary">
           Take Action
         </button>
       </div>

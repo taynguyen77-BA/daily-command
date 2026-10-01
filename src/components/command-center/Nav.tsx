@@ -162,7 +162,7 @@ function SyncJiraHeaderButton() {
 
   if (jiraSync.lastSyncStatus === "never") {
     return (
-      <Link href="/data-settings" className="rounded-md border border-border px-2.5 py-1.5 text-xs text-text3 hover:text-text2">
+      <Link href="/data-settings" className="btn btn-sm btn-ghost">
         Connect Jira
       </Link>
     );
@@ -188,7 +188,7 @@ function SyncJiraHeaderButton() {
       onClick={handleClick}
       disabled={syncing || syncingElsewhere}
       title={`Last synced: ${lastSyncedLabel}`}
-      className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-text2 hover:border-accent hover:text-text disabled:opacity-60"
+      className="btn btn-sm btn-secondary"
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className={syncing || syncingElsewhere ? "animate-spin" : undefined}>
         <path
@@ -262,12 +262,12 @@ export function Nav() {
   }, []);
 
   return (
-    <nav className="border-b border-border">
+    <nav className="sticky top-0 z-30 border-b border-border bg-bg/85 backdrop-blur supports-[backdrop-filter]:bg-bg/70">
       {/* V2.9 §F-04 fix — below md, 14 flat links plus the filter bar used to fill an
           entire mobile screen before any real content appeared, and long link labels
           overflowed the viewport width. Collapsed behind a toggle showing the current
           page; the full flat flex-wrap layout is unchanged at md and above. */}
-      <div className="flex items-center justify-between gap-2 px-4 py-2.5 md:hidden">
+      <div className="mx-auto flex w-full max-w-shell items-center justify-between gap-2 px-4 py-2.5 sm:px-6 md:hidden">
         <span className="text-sm font-medium text-text">{activeLink.label}</span>
         <div className="flex items-center gap-2">
           <SyncJiraHeaderButton />
@@ -276,7 +276,7 @@ export function Nav() {
             aria-expanded={open}
             aria-controls="mobile-nav-links"
             aria-label={open ? "Close navigation menu" : "Open navigation menu"}
-            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs text-text2"
+            className="btn btn-sm btn-secondary"
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
               {open ? (
@@ -291,14 +291,16 @@ export function Nav() {
       </div>
       <div
         id="mobile-nav-links"
-        className={`${open ? "flex" : "hidden"} flex-col gap-0.5 px-4 pb-3 md:flex md:flex-row md:flex-wrap md:items-center md:gap-1 md:px-6 md:py-2 md:pb-2`}
+        className={`${open ? "flex" : "hidden"} mx-auto w-full max-w-shell flex-col gap-0.5 px-4 pb-3 sm:px-6 md:flex md:flex-row md:flex-wrap md:items-center md:gap-x-1 md:gap-y-1 md:py-1.5`}
       >
-        {NAV_GROUPS.map((group) => {
+        {NAV_GROUPS.map((group, groupIndex) => {
           const groupLinks = group.links.filter((link) => !link.advanced || showAdvanced);
           if (groupLinks.length === 0) return null;
           return (
-            <div key={group.label} data-nav-group={group.label} className="flex flex-col gap-0.5 md:flex-row md:items-center md:gap-1">
-              <span className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-text3 md:px-1 md:pt-0">{group.label}</span>
+            <div key={group.label} data-nav-group={group.label} className="flex flex-col gap-0.5 md:flex-row md:items-center md:gap-0.5">
+              {/* Group names label the mobile menu; on desktop the dividers between groups carry
+                  the grouping (names come back on very wide screens) so the bar stays one row. */}
+              <span className="eyebrow px-3 pt-3 md:hidden 2xl:block 2xl:px-1.5 2xl:pt-0">{group.label}</span>
               {groupLinks.map((link) => {
                 const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
                 const badge = link.href === "/my-work" ? myWorkBadge : 0;
@@ -307,20 +309,21 @@ export function Nav() {
                     key={link.href}
                     href={link.href}
                     onClick={() => setOpen(false)}
-                    className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                      active ? "bg-surface2 text-text" : "text-text3 hover:text-text2"
+                    aria-current={active ? "page" : undefined}
+                    className={`relative flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium transition-colors md:px-2.5 ${
+                      active ? "bg-surface2 text-text" : "text-text3 hover:bg-surface2/60 hover:text-text"
                     }`}
                   >
                     {link.label}
                     {badge > 0 && (
-                      <span data-nav-badge title="Unreviewed New tickets + re-checks due today" className="rounded-full bg-accent px-1.5 text-[10px] font-semibold leading-4 text-bg">
+                      <span data-nav-badge title="Unreviewed New tickets + re-checks due today" className="tabular rounded-full bg-accent px-1.5 text-[11px] font-semibold leading-4 text-white">
                         {badge}
                       </span>
                     )}
                   </Link>
                 );
               })}
-              <span aria-hidden="true" className="hidden h-4 w-px bg-border md:mx-1 md:block" />
+              {groupIndex < NAV_GROUPS.length - 1 && <span aria-hidden="true" className="hidden h-4 w-px bg-border2 md:mx-1.5 md:block" />}
             </div>
           );
         })}

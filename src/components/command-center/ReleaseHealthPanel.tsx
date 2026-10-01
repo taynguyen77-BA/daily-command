@@ -25,7 +25,7 @@ function ReleaseCard({ release, data }: { release: ReleaseHealth; data: CommandC
           </span>
           <TrustLabel kind="calculated" />
         </div>
-        <button onClick={() => setCreatingUpdate(true)} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+        <button onClick={() => setCreatingUpdate(true)} className="btn btn-sm btn-secondary">
           Create Release Update
         </button>
       </div>

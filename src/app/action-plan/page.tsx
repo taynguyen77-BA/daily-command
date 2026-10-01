@@ -31,14 +31,15 @@ export default function ActionPlanPage() {
 
   return (
     <div className="space-y-4 pb-16">
-      <SectionHeading title="Today's Action Plan" subtitle="Selection and ordering are deterministic — by priority, urgency, effort, and dependency risk." />
+      <SectionHeading level="page" title="Today's Action Plan" subtitle="Selection and ordering are deterministic — by priority, urgency, effort, and dependency risk." />
 
-      <div className="flex flex-wrap gap-1">
+      <div className="seg">
         {BUDGETS.map((b) => (
           <button
             key={b}
             onClick={() => setBudget(b)}
-            className={`rounded-md px-3 py-1.5 text-sm font-medium ${budget === b ? "bg-surface2 text-text" : "text-text3 hover:text-text2"}`}
+            aria-pressed={budget === b}
+            className={`seg-item ${budget === b ? "seg-item-active" : ""}`}
           >
             {TIME_BUDGET_LABELS[b]}
           </button>
@@ -46,9 +47,15 @@ export default function ActionPlanPage() {
       </div>
 
       <Panel className="p-4">
-        <p className="text-xs text-text3">
-          {plan.length} item(s) selected · {totalMinutes} of {budget} minutes used
-        </p>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <p className="text-sm text-text2">
+            {plan.length} item(s) selected · {totalMinutes} of {budget} minutes used
+          </p>
+          <p className="tabular text-xs text-text3">{Math.min(100, Math.round((totalMinutes / budget) * 100))}% of the time budget</p>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2" role="progressbar" aria-label="Time budget used" aria-valuemin={0} aria-valuemax={budget} aria-valuenow={totalMinutes}>
+          <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${Math.min(100, (totalMinutes / budget) * 100)}%` }} />
+        </div>
       </Panel>
 
       {plan.length === 0 ? (

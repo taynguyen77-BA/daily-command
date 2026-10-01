@@ -46,8 +46,8 @@ export function ControlTower({
 
   return (
     <Panel className="p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <TrustLabel kind="calculated" />
           <span className="text-xs text-text3">Control tower</span>
           {/* V2.4 §16 — the current Focus Project Scope is always visible on this surface,
@@ -57,7 +57,7 @@ export function ControlTower({
         </div>
         <button
           onClick={() => setCreatingUpdate(true)}
-          className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+          className="btn btn-sm btn-secondary"
         >
           Create Status Update
         </button>

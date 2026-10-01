@@ -44,7 +44,7 @@ export function CommunicationCard({ comm }: { comm: Communication }) {
             await navigator.clipboard.writeText(comm.suggestedMessage);
             setCopied(true);
           }}
-          className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-text"
+          className="btn btn-sm btn-secondary"
         >
           {copied ? "Copied ✓" : "Copy"}
         </button>
@@ -58,21 +58,21 @@ export function CommunicationCard({ comm }: { comm: Communication }) {
             });
             setAdded(true);
           }}
-          className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-text"
+          className="btn btn-sm btn-secondary"
         >
           {added ? "Added ✓" : "Add to plan"}
         </button>
         <button
           onClick={() => store.updateCommunication(comm.id, { status: "handled" })}
           disabled={comm.status !== "open"}
-          className="rounded border border-border px-2 py-1 text-text2 hover:border-green hover:text-green disabled:opacity-50"
+          className="btn btn-sm btn-secondary disabled:opacity-50"
         >
           Mark handled
         </button>
         <button
           onClick={() => store.updateCommunication(comm.id, { status: "snoozed" })}
           disabled={comm.status !== "open"}
-          className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-accent2 disabled:opacity-50"
+          className="btn btn-sm btn-secondary disabled:opacity-50"
         >
           Snooze
         </button>

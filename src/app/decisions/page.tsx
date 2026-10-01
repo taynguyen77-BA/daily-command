@@ -48,7 +48,7 @@ export default function DecisionLogPage() {
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading title="Decision Log" subtitle="Decision Memory — every decision, its status, and whether current data still supports it." />
+      <SectionHeading level="page" title="Decision Log" subtitle="Decision Memory — every decision, its status, and whether current data still supports it." />
 
       {filteredData.decisions.length === 0 && (
         <p className="py-10 text-center text-sm text-text3">No decisions recorded yet.</p>

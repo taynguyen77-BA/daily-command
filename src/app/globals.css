@@ -4,13 +4,84 @@
 
 :root {
   color-scheme: dark;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: var(--font-sans);
   --font-mono: "SF Mono", "IBM Plex Mono", ui-monospace, monospace;
 }
 
-body {
-  background: #0b0e14;
-  color: #e7eaf0;
-  font-family: var(--font-sans);
+@layer base {
+  body {
+    background: #0b0e14;
+    color: #e7eaf0;
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: rgb(79 124 255 / 0.35);
+  }
+  /* Visible keyboard focus everywhere (mouse clicks don't show it). */
+  :focus-visible {
+    outline: 2px solid #7da0ff;
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  /* Numbers line up in tables, counts and KPIs. */
+  table,
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  * {
+    scrollbar-color: #333c4c transparent;
+    scrollbar-width: thin;
+  }
+}
+
+@layer components {
+  /* ---- Buttons: one height scale, three emphasis levels ---- */
+  .btn {
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border px-3 py-1.5 text-sm font-medium leading-5 transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1 text-xs leading-4;
+  }
+  .btn-primary {
+    @apply border-accent bg-accent text-white hover:border-accent2 hover:bg-accent2;
+  }
+  .btn-secondary {
+    @apply border-border2 bg-surface2 text-text hover:border-accent/60 hover:bg-surface3;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-text2 hover:bg-surface2 hover:text-text;
+  }
+  .btn-success {
+    @apply border-green/40 bg-green/10 text-green hover:border-green/70 hover:bg-green/20;
+  }
+  .btn-danger {
+    @apply border-red/40 bg-red/10 text-red hover:border-red/70 hover:bg-red/20;
+  }
+
+  /* ---- Segmented tabs (view switchers, filters, time budgets) ---- */
+  .seg {
+    @apply inline-flex max-w-full flex-wrap gap-1 rounded-lg border border-border bg-surface p-1;
+  }
+  .seg-item {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium text-text3 transition-colors hover:bg-surface2 hover:text-text2;
+  }
+  .seg-item-active {
+    @apply bg-surface3 text-text shadow-card;
+  }
+  .count-pill {
+    @apply rounded-full bg-surface2 px-1.5 text-[11px] font-semibold leading-4 text-text3;
+  }
+
+  /* ---- Small uppercase label above a group of content ---- */
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-wider text-text3;
+  }
+
+  /* ---- Text link ---- */
+  .link {
+    @apply font-medium text-accent2 underline-offset-2 hover:underline;
+  }
 }

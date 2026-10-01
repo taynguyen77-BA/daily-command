@@ -39,7 +39,7 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
         subtitle="Deterministic personal focus — ranked from project intelligence, never a second task system."
         action={
           !compact ? (
-            <Link href="/my-work?view=today" className="text-xs font-medium text-accent2 hover:underline">
+            <Link href="/my-work?view=today" className="link text-xs">
               Open My Work →
             </Link>
           ) : undefined
@@ -52,7 +52,7 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
         <>
           <div className="mb-2 flex items-center gap-2">
             <TrustLabel kind="calculated" />
-            <button onClick={() => setShowWhyOrder((s) => !s)} aria-expanded={showWhyOrder} className="text-xs font-medium text-accent2 hover:underline">
+            <button onClick={() => setShowWhyOrder((s) => !s)} aria-expanded={showWhyOrder} className="link text-xs">
               {showWhyOrder ? "Hide" : "Why this order?"}
             </button>
           </div>
@@ -110,7 +110,7 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
                     <span>
                       {i + 1}. {c.title} — {c.estimatedMinutes}m
                     </span>
-                    <button onClick={() => startFocus(c)} className="rounded border border-border px-2 py-0.5 text-xs text-text2 hover:border-accent hover:text-text">
+                    <button onClick={() => startFocus(c)} className="btn btn-sm btn-secondary">
                       Focus
                     </button>
                   </div>

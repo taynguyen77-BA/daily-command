@@ -53,7 +53,7 @@ function RiskAgingAssessment({ risk, escalation }: { risk: Risk; escalation: Ris
 
   if (!aging) {
     return (
-      <button onClick={assess} disabled={loading} className="mt-2 text-xs font-medium text-accent2 hover:underline disabled:opacity-50">
+      <button onClick={assess} disabled={loading} className="mt-2 link text-xs disabled:opacity-50">
         {loading ? "Assessing aging risk…" : "Assess aging risk"}
       </button>
     );

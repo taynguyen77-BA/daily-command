@@ -91,10 +91,10 @@ export function PolicyChangeImpactDialog({ change, onCancel, onApply }: { change
         </p>
 
         <div className="mt-4 flex justify-end gap-2">
-          <button onClick={onCancel} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text">
+          <button onClick={onCancel} className="btn btn-secondary">
             Cancel
           </button>
-          <button onClick={onApply} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2">
+          <button onClick={onApply} className="btn btn-primary">
             Apply Policy Change
           </button>
         </div>

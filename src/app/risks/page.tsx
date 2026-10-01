@@ -23,7 +23,7 @@ export default function RisksPage() {
 
   return (
     <div className="space-y-4 pb-16">
-      <SectionHeading title="What Might Go Wrong?" subtitle="Detected deterministically from combinations of underlying data — not guesses." />
+      <SectionHeading level="page" title="What Might Go Wrong?" subtitle="Detected deterministically from combinations of underlying data — not guesses." />
       {derived.risks.length === 0 ? (
         <p className="py-10 text-center text-sm text-text3">No emerging risks detected.</p>
       ) : (

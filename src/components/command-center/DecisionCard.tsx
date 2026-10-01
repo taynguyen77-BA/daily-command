@@ -169,7 +169,7 @@ export function DecisionCard({
 
       {decision.options && decision.options.length > 0 && (
         <div className="mt-3 border-t border-border pt-3">
-          <button onClick={() => setShowOptions((o) => !o)} aria-expanded={showOptions} className="text-xs font-medium text-accent2 hover:underline">
+          <button onClick={() => setShowOptions((o) => !o)} aria-expanded={showOptions} className="link text-xs">
             {showOptions ? "Hide" : `View considered options (${decision.options.length})`}
           </button>
           {showOptions && (
@@ -219,19 +219,19 @@ export function DecisionCard({
           <span className="text-xs text-text3">V1.4 §12 — never changed automatically:</span>
           <button
             onClick={() => commandCenterStore.updateDecision(decision.id, { status: "REVISIT_REQUIRED" })}
-            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+            className="btn btn-sm btn-secondary"
           >
             Review
           </button>
           <button
             onClick={() => commandCenterStore.updateDecision(decision.id, { status: "ACTIVE" })}
-            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+            className="btn btn-sm btn-secondary"
           >
             Keep decision
           </button>
           <button
             onClick={() => commandCenterStore.updateDecision(decision.id, { status: "SUPERSEDED" })}
-            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+            className="btn btn-sm btn-secondary"
           >
             Mark superseded
           </button>

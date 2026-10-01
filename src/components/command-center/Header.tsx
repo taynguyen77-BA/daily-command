@@ -21,7 +21,7 @@ function DataSourceBadge() {
 
   const label = SOURCE_LABEL[state.dataSource] ?? state.dataSource;
   if (state.dataSource !== "jira") {
-    return <span className="rounded border border-border px-2 py-0.5 text-[11px] text-text3">Data source: {label}</span>;
+    return <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2.5 py-0.5 text-[11px] text-text3"><span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-text3" />Data source: {label}</span>;
   }
 
   const freshness = computeFreshness(state.jiraSync.lastSyncCompletedAt);
@@ -37,8 +37,11 @@ function DataSourceBadge() {
       ? "Sync failed"
       : "Not synced";
   return (
-    <span className="flex items-center gap-2 rounded border border-border px-2 py-0.5 text-[11px] text-text3">
-      <span>Data source: {label}</span>
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-full border border-border bg-surface px-2.5 py-0.5 text-[11px] text-text3">
+      <span className="inline-flex items-center gap-1.5">
+        <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${state.jiraSync.lastSyncStatus === "success" ? "bg-green" : state.jiraSync.lastSyncStatus === "failed" ? "bg-red" : "bg-yellow"}`} />
+        Data source: {label}
+      </span>
       <span>·</span>
       <span>Last synced: {time}</span>
       <span>·</span>
@@ -83,7 +86,7 @@ function SyncFailedBanner() {
     stale === undefined ? "Jira has never synced successfully on this device." : stale === 0 ? "Your last successful sync was earlier today." : `Your data has not refreshed from Jira in ${stale} day${stale === 1 ? "" : "s"}.`;
 
   return (
-    <div className="mx-6 mb-4 rounded-md border border-red/40 bg-red/10 px-4 py-3 text-sm text-text" role="alert">
+    <div className="mx-auto mb-4 w-full max-w-shell px-4 sm:px-6"><div className="rounded-lg border border-red/40 bg-red/10 px-4 py-3 text-sm text-text" role="alert">
       <p className="font-semibold text-red">⚠ Jira sync is failing — what you see may be missing recent tickets.</p>
       <p className="mt-1 text-text2">
         {staleLabel} {state.jiraSync.lastSyncError ?? "The last sync attempt failed."}{" "}
@@ -94,7 +97,7 @@ function SyncFailedBanner() {
           Fix this in Data &amp; Settings
         </Link>
       </p>
-    </div>
+    </div></div>
   );
 }
 
@@ -102,15 +105,20 @@ export function Header() {
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   return (
     <>
-      <header className="flex flex-wrap items-baseline justify-between gap-2 px-6 pb-4 pt-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-text">BA/PO/PM COMMAND CENTER</h1>
-          <p className="text-sm text-text3">{today}</p>
+      <header className="mx-auto flex w-full max-w-shell flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 pb-3 pt-4 sm:px-6 md:pt-5">
+        <div className="flex min-w-0 items-center gap-3">
+          <span aria-hidden="true" className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-accent/15 text-sm font-bold text-accent2 ring-1 ring-inset ring-accent/30">
+            CC
+          </span>
+          <div className="min-w-0">
+            <h1 className="truncate font-display text-[15px] font-semibold tracking-tight text-text sm:text-base">BA/PO/PM Command Center</h1>
+            <p className="truncate text-xs text-text3">
+              {today}
+              <span className="hidden sm:inline"> · {greeting()}. Here&apos;s what matters today.</span>
+            </p>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <DataSourceBadge />
-          <p className="text-sm text-text2">{greeting()}. Here&apos;s what matters today.</p>
-        </div>
+        <DataSourceBadge />
       </header>
       <SyncFailedBanner />
     </>

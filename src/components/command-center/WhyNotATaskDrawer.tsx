@@ -25,7 +25,7 @@ export function WhyNotATaskDrawer({ item, workRelevanceIndex }: { item: WorkItem
 
   return (
     <div className="mt-2">
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link text-xs">
         {open ? "Hide" : "Why isn't this on my work list?"}
       </button>
       {open && (
@@ -47,7 +47,7 @@ export function WhyNotATaskDrawer({ item, workRelevanceIndex }: { item: WorkItem
             <p className="text-text2">{explanation.answer}</p>
           </div>
           <div className="border-t border-border pt-2">
-            <Link href="/data-settings#jira-work-relevance-policy-panel" className="font-medium text-accent2 hover:underline">
+            <Link href="/data-settings#jira-work-relevance-policy-panel" className="link">
               {explanation.relevance === "UNKNOWN" ? "Classify this status" : "Change status policy"}
             </Link>
           </div>

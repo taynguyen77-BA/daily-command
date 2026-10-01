@@ -12,7 +12,7 @@ export default function ProjectMemoryPage() {
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading
+      <SectionHeading level="page"
         title="Project Memory"
         subtitle="Every daily snapshot, close-of-day summary, decision, and action this app has stored — nothing hidden, all of it deletable."
       />

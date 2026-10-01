@@ -113,12 +113,12 @@ export default function WeeklyReviewPage() {
 
   return (
     <div className="space-y-4 pb-16">
-      <SectionHeading title="Weekly Review" subtitle="Grounded in the daily snapshots this app has stored — never fabricated." />
+      <SectionHeading level="page" title="Weekly Review" subtitle="Grounded in the daily snapshots this app has stored — never fabricated." />
 
       <section>
         <div className="mb-2 flex items-center justify-between gap-2">
           <p className="font-display text-sm text-text">WEEKLY REPORT</p>
-          <button onClick={copyWeeklyReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+          <button onClick={copyWeeklyReportMarkdown} className="btn btn-sm btn-secondary">
             {weeklyReportCopied ? "Copied ✓" : "Copy as Markdown"}
           </button>
         </div>
@@ -157,10 +157,10 @@ export default function WeeklyReviewPage() {
         <div className="mb-2 flex items-center justify-between gap-2">
           <p className="font-display text-sm text-text">CLIENT REPORT</p>
           <div className="flex gap-2">
-            <button onClick={downloadClientReport} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+            <button onClick={downloadClientReport} className="btn btn-sm btn-secondary">
               Download .md
             </button>
-            <button onClick={copyClientReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+            <button onClick={copyClientReportMarkdown} className="btn btn-sm btn-secondary">
               {clientReportCopied ? "Copied ✓" : "Copy as Markdown"}
             </button>
           </div>

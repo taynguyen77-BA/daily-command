@@ -97,24 +97,25 @@ function PrioritiesInner() {
 
   return (
     <div className="space-y-4 pb-16">
-      <SectionHeading title="Priorities" subtitle="Every open work item, scored by the deterministic priority model." />
+      <SectionHeading level="page" title="Priorities" subtitle="Every open work item, scored by the deterministic priority model." />
 
       {/* V2.17 Task 3 §3 — severity tabs stay visible (the primary, most-scanned filter on
           this page); Relation + "My action items only" — secondary, lower-traffic — fold
           behind one "Filters" disclosure instead of sitting in the same always-visible row.
           No filtering capability removed, same as the Attention Queue consolidation. */}
-      <div className="flex flex-wrap items-center gap-1">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="seg">
         {FILTERS.map((f) => (
           <button
             key={f.key}
             onClick={() => setFilter(f.key)}
-            className={`rounded-md px-3 py-1.5 text-sm font-medium ${
-              filter === f.key ? "bg-surface2 text-text" : "text-text3 hover:text-text2"
-            }`}
+            aria-pressed={filter === f.key}
+            className={`seg-item ${filter === f.key ? "seg-item-active" : ""}`}
           >
             {f.label}
           </button>
         ))}
+        </div>
         <div className="ml-auto">
           <FilterPanel summary={relationFilter !== "ALL" || myActionItemsOnly ? String([relationFilter !== "ALL", myActionItemsOnly].filter(Boolean).length) : undefined}>
             <Filter

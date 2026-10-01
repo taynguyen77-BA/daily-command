@@ -59,7 +59,7 @@ export function WhyShouldICareDrawer({
 
   return (
     <div className="mt-2">
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link text-xs">
         {open ? "Hide" : triggerLabel}
       </button>
       {open && (
@@ -119,7 +119,7 @@ export function WhyShouldICareDrawer({
 
           {onCreateUpdate && (
             <section className="border-t border-border pt-2">
-              <button onClick={onCreateUpdate} className="text-xs font-medium text-accent2 hover:underline">
+              <button onClick={onCreateUpdate} className="link text-xs">
                 Create Update
               </button>
             </section>
@@ -128,7 +128,7 @@ export function WhyShouldICareDrawer({
           {askClaude && (
             <section className="border-t border-border pt-2">
               {!ai ? (
-                <button onClick={askClaudeNow} disabled={loading} className="text-xs font-medium text-accent2 hover:underline disabled:opacity-50">
+                <button onClick={askClaudeNow} disabled={loading} className="link text-xs disabled:opacity-50">
                   {loading ? "Asking Claude…" : (askClaude.label ?? "Ask Claude for a recommendation")}
                 </button>
               ) : (

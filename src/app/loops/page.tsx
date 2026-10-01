@@ -59,7 +59,7 @@ function CreateFollowUpAction({ loop, onDone }: { loop: DeliveryLoop; onDone: ()
             setOpen(false);
             onDone();
           }}
-          className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent2"
+          className="btn btn-sm btn-primary"
         >
           Confirm &amp; create
         </button>
@@ -83,7 +83,7 @@ export default function DeliveryLoopsPage() {
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading title="Delivery Loops" subtitle="Attention -> Decision -> Action -> Outcome. Where is each management loop stuck?" />
+      <SectionHeading level="page" title="Delivery Loops" subtitle="Attention -> Decision -> Action -> Outcome. Where is each management loop stuck?" />
 
       {loops.length === 0 ? (
         <Panel className="p-6 text-sm text-text3">No active decision loops right now.</Panel>

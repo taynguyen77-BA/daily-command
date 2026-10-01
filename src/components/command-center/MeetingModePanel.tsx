@@ -54,7 +54,7 @@ export function MeetingModePanel() {
   return (
     <div className="space-y-4 pb-16">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <SectionHeading title="Meeting Mode" subtitle="Before a stand-up or status meeting — six questions, each backed by evidence you can inspect." />
+        <SectionHeading level="page" title="Meeting Mode" subtitle="Before a stand-up or status meeting — six questions, each backed by evidence you can inspect." />
         <label className="flex items-center gap-1.5 text-xs text-text3">
           Meeting scope
           <select
@@ -93,13 +93,13 @@ export function MeetingModePanel() {
       </div>
 
       <div className="flex flex-wrap gap-2 border-t border-border pt-4">
-        <button onClick={copySummary} className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent2">
+        <button onClick={copySummary} className="btn btn-primary">
           {copied ? "Copied ✓" : "Copy meeting summary"}
         </button>
         {stakeholderDraft && (
           <button
             onClick={() => setEditingArtifact(true)}
-            className="rounded-md border border-border px-4 py-2 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+            className="btn btn-secondary"
           >
             Create stakeholder update
           </button>
