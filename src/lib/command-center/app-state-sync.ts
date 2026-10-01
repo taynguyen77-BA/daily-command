@@ -17,6 +17,7 @@ import type { SyncedAppState } from "./app-state";
 import { mergeMentionReplies } from "./mention-replies";
 import { emptyTombstones, maxIso, mergeDailyCommandState, mergeReviewAcks, type DailyCommandState } from "./execution-state-merge";
 import { pairedAuthHeader, isDevicePaired } from "./device-pairing";
+import { deriveLegacyDailyCommandState, mergeTicketWorkStates, migrateLegacyIntoTicketStates } from "./ticket-work-state";
 
 const STATE_ENDPOINT = "/api/command-center/state";
 
@@ -34,6 +35,7 @@ export function extractSyncedAppState(state: StoreState, updatedAtIso: string): 
     actionPlanState: { actions: state.data.actions, personalPlan: state.personalPlan },
     memoryEvents: state.memoryEvents,
     dailyReports: state.dailyReports,
+    ticketWorkStates: state.ticketWorkStates,
     dailyCommandCompletions: state.dailyCommandCompletions,
     dailyCommandSkips: state.dailyCommandSkips,
     dailyCommandBlocks: state.dailyCommandBlocks,
@@ -61,6 +63,7 @@ export function looksUnused(state: StoreState): boolean {
   // A1 — a device whose only use so far is Complete/Skip/Block is NOT unused: adopting the
   // server wholesale would otherwise drop those records.
   const hasExecutionState =
+    Object.keys(state.ticketWorkStates ?? {}).length > 0 ||
     Object.keys(state.dailyCommandCompletions).length > 0 || Object.keys(state.dailyCommandSkips).length > 0 || Object.keys(state.dailyCommandBlocks).length > 0;
   return Object.keys(state.attentionState).length === 0 && state.data.decisions.length === 0 && state.personalPlan.length === 0 && !hasExecutionState;
 }
@@ -84,6 +87,18 @@ function dailyCommandStateOf(s: SyncedAppState): DailyCommandState {
     dailyCommandBlocks: s.dailyCommandBlocks ?? {},
     dailyCommandTombstones: s.dailyCommandTombstones ?? emptyTombstones(),
   };
+}
+
+/** The canonical ticket state merges per ticket (newest updatedAt wins); a blob from a client
+ *  that predates TicketWorkState contributes through its legacy maps (migrated in, strictly-newer
+ *  only), and the deprecated maps are re-derived from the result. Legacy tombstones from both
+ *  sides are kept so an even older device can't resurrect a cleared record. */
+function mergeTicketState(local: SyncedAppState, server: SyncedAppState): Pick<SyncedAppState, "ticketWorkStates" | "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones"> {
+  const legacyMerged = mergeDailyCommandState(dailyCommandStateOf(local), dailyCommandStateOf(server));
+  let states = mergeTicketWorkStates(local.ticketWorkStates, server.ticketWorkStates);
+  states = migrateLegacyIntoTicketStates(states, dailyCommandStateOf(local));
+  states = migrateLegacyIntoTicketStates(states, dailyCommandStateOf(server));
+  return { ticketWorkStates: states, ...deriveLegacyDailyCommandState(states, undefined, legacyMerged.dailyCommandTombstones) };
 }
 
 const MAX_MEMORY_EVENTS = 200; // mirrors store.ts's own MAX_MEMORY_EVENTS cap
@@ -130,7 +145,7 @@ export function mergeSyncedAppState(local: SyncedAppState, server: SyncedAppStat
     // A1 — per-record LWW with tombstones (execution-state-merge.ts), NOT "server wins": the
     // blob-level recency above says nothing about which device touched a given ticket last.
     // A field missing from a pre-A1 server blob merges as empty — local records survive.
-    ...mergeDailyCommandState(dailyCommandStateOf(local), dailyCommandStateOf(server)),
+    ...mergeTicketState(local, server),
     syncLog: mergeSyncLogs(local.syncLog, server.syncLog),
     dailyReviewLastVisitAt: maxIso(local.dailyReviewLastVisitAt, server.dailyReviewLastVisitAt),
     dailyReviewAcks: mergeReviewAcks(local.dailyReviewAcks ?? {}, server.dailyReviewAcks ?? {}),

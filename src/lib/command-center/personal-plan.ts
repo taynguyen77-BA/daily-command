@@ -8,8 +8,17 @@ import type { CommandCenterData, PersonalFocusCandidate, PersonalPlanItem, PlanR
 const ACTIVE_STATUSES = new Set(["planned", "in-progress", "blocked"]);
 const UNFINISHED_STATUSES = new Set(["planned", "in-progress"]);
 
-function candidateFor(item: PersonalPlanItem, candidates: PersonalFocusCandidate[]): PersonalFocusCandidate | undefined {
-  return candidates.find((c) => c.sourceType === item.sourceType && c.sourceId === item.sourceId);
+/** Candidates are deduped by ticket (personal-focus.ts), so a plan item's source can live on as
+ *  one of a row's merged signals — or, failing that, the row for the same ticket. */
+export function candidateMatchesPlanItem(c: PersonalFocusCandidate, item: Pick<PersonalPlanItem, "sourceType" | "sourceId" | "ticketKey">): boolean {
+  if (c.sourceType === item.sourceType && c.sourceId === item.sourceId) return true;
+  const id = `focus:${item.sourceType}:${item.sourceId}`;
+  if (c.signals?.some((s) => s.candidateId === id) || c.mergedCandidateIds?.includes(id)) return true;
+  return !!item.ticketKey && c.ticketKey === item.ticketKey;
+}
+
+export function candidateFor(item: Pick<PersonalPlanItem, "sourceType" | "sourceId" | "ticketKey">, candidates: PersonalFocusCandidate[]): PersonalFocusCandidate | undefined {
+  return candidates.find((c) => c.sourceType === item.sourceType && c.sourceId === item.sourceId) ?? candidates.find((c) => candidateMatchesPlanItem(c, item));
 }
 
 /** V1.7 §23 — wraps what would otherwise be a REMOVE for a pinned item into a REVIEW that
@@ -82,7 +91,8 @@ export function reconcilePersonalPlan(planItems: PersonalPlanItem[], candidates:
  *  at all (any status), for any planned date. Additive-only detection — never removes. */
 export function detectNewCriticalArrivals(candidates: PersonalFocusCandidate[], planItems: PersonalPlanItem[]): PersonalFocusCandidate[] {
   const known = new Set(planItems.map((p) => `${p.sourceType}:${p.sourceId}`));
-  return candidates.filter((c) => c.category === "DO_NOW" && !known.has(`${c.sourceType}:${c.sourceId}`));
+  const knownTickets = new Set(planItems.map((p) => p.ticketKey).filter((k): k is string => !!k));
+  return candidates.filter((c) => c.category === "DO_NOW" && !known.has(`${c.sourceType}:${c.sourceId}`) && !(c.ticketKey && knownTickets.has(c.ticketKey)));
 }
 
 /** §51-52 — only unfinished, still-relevant items from a previous day carry forward, and
@@ -90,12 +100,15 @@ export function detectNewCriticalArrivals(candidates: PersonalFocusCandidate[], 
  *  forward list", never an automatic copy). */
 export function buildCarryForward(planItems: PersonalPlanItem[], candidates: PersonalFocusCandidate[], today: string): CarryForwardSuggestion[] {
   const out: CarryForwardSuggestion[] = [];
-  const alreadyToday = new Set(planItems.filter((p) => p.plannedDate === today).map((p) => `${p.sourceType}:${p.sourceId}`));
+  const todays = planItems.filter((p) => p.plannedDate === today);
+  const alreadyToday = new Set(todays.map((p) => `${p.sourceType}:${p.sourceId}`));
+  const ticketsToday = new Set(todays.map((p) => p.ticketKey).filter((k): k is string => !!k));
 
   for (const item of planItems) {
     if (item.plannedDate >= today) continue;
     if (!UNFINISHED_STATUSES.has(item.status)) continue;
     if (alreadyToday.has(`${item.sourceType}:${item.sourceId}`)) continue;
+    if (item.ticketKey && ticketsToday.has(item.ticketKey)) continue;
     const live = candidateFor(item, candidates);
     if (!live) continue; // not still relevant/unresolved — don't suggest it
     if (live.category === "DEFER") continue; // no longer important enough to carry forward

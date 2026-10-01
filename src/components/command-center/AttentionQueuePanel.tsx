@@ -15,7 +15,7 @@ import { ArtifactEditor } from "./ArtifactEditor";
 import { makeEvidence } from "@/lib/command-center/evidence";
 import { buildStakeholderUpdateDraft } from "@/lib/command-center/communicate";
 import { TicketLink } from "./TicketLink";
-import { ReactivatedBadge } from "./TaskReferenceRow";
+import { ReactivatedBadge, TaskRow } from "./TaskReferenceRow";
 import { groupMentionItems, mentionGroupLabel } from "@/lib/command-center/mention-grouping";
 
 /** V2.17 §1a point 4 — folds several still-visible MENTION items on the same ticket into one
@@ -83,6 +83,15 @@ export function AttentionItemCard({ item, showViewLink = false }: { item: Attent
         <span className="font-medium text-text3">Now what: </span>
         {item.nowWhat}
       </p>
+
+      {/* A signal about a ticket shows that ticket's status (one TicketWorkState for every list)
+          and the full ticket action set; "Done" there resolves this and every other open signal
+          on the ticket. Resolve below only dismisses this one signal. */}
+      {item.ticketKey && (
+        <div className="mt-2 rounded-md border border-border bg-surface2 px-2">
+          <TaskRow as="div" ticketKey={item.ticketKey} url={item.ticketUrl} showTitle={false} surface="attention" />
+        </div>
+      )}
 
       <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="mt-2 text-xs font-medium text-accent2 hover:underline">
         {open ? "Hide evidence" : `Evidence (${item.evidence.length})`}

@@ -44,7 +44,7 @@ function PilotScoreRow({ label, value, onChange }: { label: string; value: 0 | 1
 }
 
 export function CloseDayModal({ onClose }: { onClose: () => void }) {
-  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scopedMentionEvents, store } = useCommandCenter();
+  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scopedMentionEvents, store, dailyCommandMaps } = useCommandCenter();
   const [entry, setEntry] = useState<EodEntry | null>(null);
   const [entryMode, setEntryMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
@@ -71,15 +71,11 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
       filteredData.workItems,
       identity,
       workRelevanceIndex,
-      new Set(Object.keys(state.dailyCommandCompletions)),
-      new Set(Object.keys(state.dailyCommandSkips)),
-      new Set(Object.keys(state.dailyCommandBlocks))
+      new Set(Object.keys(dailyCommandMaps.dailyCommandCompletions)),
+      new Set(Object.keys(dailyCommandMaps.dailyCommandSkips)),
+      new Set(Object.keys(dailyCommandMaps.dailyCommandBlocks))
     ).length;
-    const recentMentionsCount = selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, Date.now(), {
-      dailyCommandCompletions: state.dailyCommandCompletions,
-      dailyCommandSkips: state.dailyCommandSkips,
-      dailyCommandBlocks: state.dailyCommandBlocks,
-    }).length;
+    const recentMentionsCount = selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, Date.now(), dailyCommandMaps).length;
     const waitingForCount = proactive ? buildWaitingFor(filteredData, proactive.dependencyRadar, workRelevanceIndex, dailyCommandCompletedWorkItemIds).length : 0;
     const attentionQueueActiveCount = proactive ? proactive.attentionQueue.filter((a) => a.lifecycle !== "SNOOZED" && a.lifecycle !== "RESOLVED").length : 0;
     const context = buildPilotFeedbackContext({

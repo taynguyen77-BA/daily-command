@@ -59,7 +59,7 @@ function MentionRow({ mention, nowMs, onResolve, onComplete, replied, onReplied 
 }
 
 export function RecentlyMentioned() {
-  const { state, filteredData, scopedMentionEvents, store } = useCommandCenter();
+  const { state, filteredData, scopedMentionEvents, store, dailyCommandMaps } = useCommandCenter();
   // A ticking `now` so the 24h window (and the relative "Xh ago" labels) stays correct across
   // a long-lived tab, not frozen at first render — recomputed only on an interval, never per
   // keystroke/render.
@@ -74,12 +74,8 @@ export function RecentlyMentioned() {
     // this panel) and blocks are passed too, so the suppress-then-reactivate rule applies to
     // all three Daily Command states.
     () =>
-      selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, {
-        dailyCommandCompletions: state.dailyCommandCompletions,
-        dailyCommandSkips: state.dailyCommandSkips,
-        dailyCommandBlocks: state.dailyCommandBlocks,
-      }),
-    [scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, state.dailyCommandCompletions, state.dailyCommandSkips, state.dailyCommandBlocks]
+      selectRecentMentions(scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, dailyCommandMaps),
+    [scopedMentionEvents, filteredData.workItems, state.attentionState, nowMs, dailyCommandMaps]
   );
 
   return (
@@ -99,7 +95,7 @@ export function RecentlyMentioned() {
                 mention={m}
                 nowMs={nowMs}
                 onResolve={() => store.resolveAttentionItem(`MENTION:${slug(m.issueKey)}:${slug(m.commentId)}`)}
-                onComplete={() => store.completeTicketInDailyCommand(m.issueKey)}
+                onComplete={() => store.completeTicketInDailyCommand(m.issueKey, "recent-mentions")}
                 // D4 — reply tracking (manual, or auto-detected from my later comment).
                 replied={state.features.mentionReplyTracking ? isMentionReplied(m, state.mentionReplies, state.myTicketActivity) : undefined}
                 onReplied={state.features.mentionReplyTracking ? () => store.markMentionReplied(m.commentId, m.issueKey) : undefined}

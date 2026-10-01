@@ -929,7 +929,11 @@ export interface MemoryEvent {
     | "TICKET_SKIPPED"
     | "TICKET_BLOCKED"
     | "TICKET_UNBLOCKED"
-    | "TICKET_REACTIVATED";
+    | "TICKET_REACTIVATED"
+    // Canonical ticket work state (ticket-work-state.ts) — the two statuses the Daily Command
+    // maps never had.
+    | "TICKET_STARTED"
+    | "TICKET_DEFERRED";
   title: string;
   impact: string;
   evidence: string[];
@@ -1140,6 +1144,23 @@ export interface PersonalFocusCandidate {
   // candidate resolves to at least a relation-less stub when no work item is related, and
   // classifyPersonalRelation itself always returns a real value (down to UNKNOWN/FOLLOWING).
   relation: PersonalRelation;
+  /** Every signal behind this row once candidates are deduped by ticketKey (personal-focus.ts):
+   *  one entry per merged candidate, highest-priority first. Absent on a ticketless candidate. */
+  signals?: FocusSignal[];
+  /** Ids of the candidates folded into this row by the per-ticket dedupe. */
+  mergedCandidateIds?: string[];
+}
+
+/** One reason a ticket is in Your Delivery Focus — rendered as a chip (Mention, Stale, Risk…). */
+export interface FocusSignal {
+  /** Attention category (MENTION, STALE, RISK…) or "LOOP". */
+  kind: string;
+  label: string;
+  candidateId: string;
+  attentionItemId?: string;
+  score: number;
+  /** How many signals of this kind are on the ticket (e.g. two risks) — one chip, "Risk ×2". */
+  count?: number;
 }
 
 /** §29 — a workload observation, never an emotional/psychological inference. */
@@ -1166,7 +1187,10 @@ export interface ProjectFocusShare {
 }
 
 export interface PersonalFocusResult {
-  candidates: PersonalFocusCandidate[]; // all, sorted by score desc
+  candidates: PersonalFocusCandidate[]; // one row per ticket (deduped, signals as chips), sorted by score desc
+  /** Every candidate before the per-ticket dedupe — one per signal. For diagnostics and tests;
+   *  lists render `candidates`. Optional so hand-built results stay valid. */
+  allCandidates?: PersonalFocusCandidate[];
   top3: PersonalFocusCandidate[];
   thirtyMinutePlan: PersonalFocusCandidate[];
   thirtyMinutePlanTotalMinutes: number;
@@ -1224,6 +1248,12 @@ export interface PersonalPlanItem {
   // remains valid — the UI just shows no reason rather than inventing one.
   blockedReason?: string;
   blockedNote?: string;
+  /** The Jira ticket this plan item is about, when it resolves to exactly one. Set when created
+   *  from a candidate that has one; backfilled on hydrate (ticket-work-state.ts). A plan item
+   *  with a ticketKey takes its displayed status from TicketWorkState, never its own `status`. */
+  ticketKey?: string;
+  /** Free-text defer date (local YYYY-MM-DD) recorded with a ticket-level Defer. */
+  deferredUntil?: string;
 }
 
 /** §50 — plan reconciliation verdict for one persisted PersonalPlanItem. */
@@ -1845,3 +1875,60 @@ export interface PilotFeedbackEntry {
 }
 
 export const DATA_SCHEMA_VERSION = 5;
+
+// ===== Canonical per-ticket work state (single source of truth) =====
+// One record per Jira ticket KEY for "what am I doing about this ticket": the only place a
+// ticket's personal status lives. Replaces the three Daily Command maps (which are now a
+// derived, deprecated projection — see ticket-work-state.ts) and drives plan items, actions and
+// attention items linked to the ticket. Jira's own status is NEVER stored here: it stays a
+// read-only overlay shown next to this status. TODO is implicit — no record means TODO; a
+// record with status TODO exists only after a ticket came back to TODO, so its history (and
+// the cross-device "it was cleared" fact) survives.
+export type TicketWorkStatus = "TODO" | "IN_PROGRESS" | "BLOCKED" | "SKIPPED" | "DEFERRED" | "DONE";
+
+/** Where a status change came from — recorded in history, never used for logic. */
+export type TicketStatusSurface =
+  | "command-center"
+  | "my-work"
+  | "focus-session"
+  | "my-day"
+  | "daily-review"
+  | "priorities"
+  | "action-plan"
+  | "attention"
+  | "recent-mentions"
+  | "related-ticket"
+  | "keyboard"
+  | "jira-sync"
+  | "migration"
+  | "other";
+
+export interface TicketStatusTransition {
+  from: TicketWorkStatus;
+  to: TicketWorkStatus;
+  at: string;
+  reason?: string;
+  surface: TicketStatusSurface;
+}
+
+export interface TicketWorkState {
+  ticketKey: string;
+  status: TicketWorkStatus;
+  /** Block/skip/defer reason, free text (trimmed, bounded). */
+  reason?: string;
+  /** DEFERRED/SKIPPED/BLOCKED revisit date, local YYYY-MM-DD. */
+  until?: string;
+  /** When the ticket entered its current status — also the cross-device LWW clock. */
+  updatedAt: string;
+  updatedBy?: string;
+  /** Newest last, capped at TICKET_HISTORY_CAP. */
+  history: TicketStatusTransition[];
+  /** BLOCKED — D5 "ping on <date>" follow-up reminder. */
+  pingOn?: string;
+  /** DONE — "jira" when a skipped/blocked ticket was closed in Jira (A4). */
+  source?: "user" | "jira";
+  closedInJiraOn?: string;
+}
+
+export const TICKET_HISTORY_CAP = 50;
+

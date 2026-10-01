@@ -16,6 +16,7 @@ import { repeatedlyIneffective } from "@/lib/command-center/action-effectiveness
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 
 const ACTION_TITLE = "Updates only this planned action — the ticket's own state is set with the \u201c… ticket\u201d buttons.";
+const COMPLETE_ACTION_TITLE = "Completes this planned action — and, when it is about a ticket, marks the ticket done everywhere.";
 
 // V1.5 §18, §52 — "Did It Work?" outcome capture, the second signature interaction.
 const OUTCOME_STATUSES: ActionOutcomeStatus[] = ["RESOLVED", "IMPROVED", "PARTIALLY_IMPROVED", "NO_CHANGE", "WORSENED", "UNKNOWN"];
@@ -46,6 +47,13 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
   }
 
   const status = liveAction?.status ?? "open";
+
+  // Completing the planned work on a ticket-backed candidate completes the ticket too (one
+  // TicketWorkState, so every list agrees); a ticketless action only completes itself.
+  function completeActionAndTicket() {
+    store.completeAction(ensureActionId());
+    if (candidate.item) store.setTicketStatus(candidate.item.key, "DONE", { surface: "action-plan" });
+  }
 
   // C1 — "If nothing changes" (impact-projection.ts), the same block Risk/Decision cards use.
   // A candidate with no logged Action yet is projected as the open action it would become.
@@ -91,7 +99,7 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
           {candidate.item ? (
             <>
               {candidate.action && <p className="font-display text-sm text-text">{candidate.action.title}</p>}
-              <TaskReferenceRow workItem={candidate.item} as="div" ticketScoped />
+              <TaskReferenceRow workItem={candidate.item} as="div" ticketScoped surface="action-plan" />
             </>
           ) : (
             <p className="font-display text-sm text-text">{candidate.title}</p>
@@ -113,7 +121,7 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
       {/* Action-level controls: they update this planned Action only. The ticket's own
           Daily Command state is the "… ticket" buttons above (TaskReferenceRow ticketScoped). */}
       <div className="mt-3 flex flex-wrap gap-2 text-xs">
-        <button onClick={() => store.completeAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-green hover:text-green">
+        <button onClick={() => completeActionAndTicket()} title={COMPLETE_ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-green hover:text-green">
           Complete action
         </button>
         <button onClick={() => store.deferAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">

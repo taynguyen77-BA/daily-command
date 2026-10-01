@@ -12,6 +12,7 @@
 // Never fabricates: a missing title/link/project is left out of the line, never "undefined".
 
 import type {
+  TicketWorkState,
   AttentionItemState,
   CommandCenterData,
   DailyCommandBlock,
@@ -94,29 +95,10 @@ function ageInBusinessDays(at: string | undefined, now: Date): number | undefine
   return businessDaysBetween(toLocalIso(d), toLocalIso(now));
 }
 
-/** A Focus-plan item's ticket, through the explicit ids its attention/loop source carries. */
-export function ticketKeyForPlanItem(item: PersonalPlanItem, data: Pick<CommandCenterData, "workItems" | "actions" | "dependencies">): string | undefined {
-  const [kind, ...rest] = item.sourceId.split(":");
-  const ref = rest.join(":");
-  const bySlugId = (s: string) => data.workItems.find((w) => slug(w.id) === s);
-  switch (kind) {
-    case "MENTION":
-      return data.workItems.find((w) => slug(w.key) === rest[0])?.key;
-    case "ASSIGNMENT":
-    case "STALE":
-      return bySlugId(ref)?.key;
-    case "ACTION": {
-      const action = data.actions.find((a) => slug(a.id) === ref);
-      return action?.relatedWorkItemId ? data.workItems.find((w) => w.id === action.relatedWorkItemId)?.key : undefined;
-    }
-    case "DEPENDENCY": {
-      const dep = data.dependencies.find((d) => slug(d.id) === ref);
-      return dep ? data.workItems.find((w) => w.id === dep.workItemId)?.key : undefined;
-    }
-    default:
-      return undefined;
-  }
-}
+/** A plan item's ticket — moved to ticket-work-state.ts (shared by the store's linking and
+ *  the standup); re-exported here for existing importers. */
+export { ticketKeyForPlanItem } from "./ticket-work-state";
+import { ticketKeyForPlanItem } from "./ticket-work-state";
 
 // ===== Standup state (live → frozen into the day's report) ===============================
 
@@ -129,6 +111,8 @@ export interface StandupInput {
   dailyCommandSkips: Record<string, DailyCommandSkip>;
   dailyCommandBlocks: Record<string, DailyCommandBlock>;
   personalPlan: PersonalPlanItem[];
+  /** Canonical ticket state — IN_PROGRESS tickets lead "In progress". Optional for old callers. */
+  ticketWorkStates?: Record<string, TicketWorkState>;
   mentionEvents: MentionEvent[];
   attentionState: Record<string, AttentionItemState>;
   memoryEvents: MemoryEvent[];
@@ -151,6 +135,7 @@ export function buildStandupState(input: StandupInput): StandupState {
 
   // Planned today first (Focus plan), then the rest of the active assigned work.
   const plannedKeys: string[] = [];
+  for (const r of Object.values(input.ticketWorkStates ?? {})) if (r.status === "IN_PROGRESS" && !plannedKeys.includes(r.ticketKey)) plannedKeys.push(r.ticketKey);
   for (const item of input.personalPlan) {
     if (item.plannedDate !== today || (item.status !== "planned" && item.status !== "in-progress")) continue;
     const key = ticketKeyForPlanItem(item, data);
@@ -161,7 +146,7 @@ export function buildStandupState(input: StandupInput): StandupState {
   for (const key of plannedKeys) {
     const w = byKey.get(key);
     if (!w || paused(key) || isWorkItemDoneOrExcluded(w, index)) continue;
-    inProgress.push(ticketFromWorkItem(w, data, { notes: ["planned today"] }));
+    inProgress.push(ticketFromWorkItem(w, data, { notes: [input.ticketWorkStates?.[key]?.status === "IN_PROGRESS" ? "in progress" : "planned today"] }));
   }
   for (const w of active) if (!plannedKeys.includes(w.key)) inProgress.push(ticketFromWorkItem(w, data, w.status === "In Progress" ? { notes: ["in progress"] } : {}));
 

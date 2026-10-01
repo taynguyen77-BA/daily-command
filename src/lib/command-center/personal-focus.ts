@@ -33,6 +33,7 @@
 
 import type {
   Action,
+  FocusSignal,
   AttentionItem,
   AttentionSeverity,
   CommandCenterData,
@@ -641,6 +642,55 @@ function buildProjectBalance(candidates: PersonalFocusCandidate[]): ProjectFocus
     .sort((a, b) => b.itemCount - a.itemCount);
 }
 
+const SIGNAL_LABEL: Record<string, string> = {
+  MENTION: "Mention",
+  STALE: "Stale",
+  RISK: "Risk",
+  ASSIGNMENT: "Assigned",
+  DEPENDENCY: "Dependency",
+  DECISION: "Decision",
+  ACTION: "Action",
+  COMMUNICATION: "Communication",
+  DRIFT: "Drift",
+  LOOP: "Loop",
+};
+
+function signalOf(c: PersonalFocusCandidate): FocusSignal {
+  const kind = c.sourceType === "loop" ? "LOOP" : (c.attentionItemId ?? c.sourceId).split(":")[0];
+  return { kind, label: SIGNAL_LABEL[kind] ?? kind, candidateId: c.id, ...(c.attentionItemId ? { attentionItemId: c.attentionItemId } : {}), score: c.score };
+}
+
+/** One row per ticket: candidates that resolve to the same ticketKey (a MENTION + STALE + RISK
+ *  on one ticket) fold into the highest-ranked one — the input is already sorted, so that's the
+ *  first — which carries every signal as a chip (highest first). Ticketless candidates (loops,
+ *  portfolio signals) stay as they are. Order is preserved, so ranking is by the highest signal. */
+export function dedupeCandidatesByTicket(ranked: PersonalFocusCandidate[]): PersonalFocusCandidate[] {
+  const byTicket = new Map<string, PersonalFocusCandidate>();
+  const out: PersonalFocusCandidate[] = [];
+  for (const c of ranked) {
+    if (!c.ticketKey) {
+      out.push(c);
+      continue;
+    }
+    const lead = byTicket.get(c.ticketKey);
+    if (!lead) {
+      const withSignals: PersonalFocusCandidate = { ...c, signals: [signalOf(c)] };
+      byTicket.set(c.ticketKey, withSignals);
+      out.push(withSignals);
+      continue;
+    }
+    // One chip per kind (Mention, Stale, Risk…); several signals of one kind count on it.
+    const signal = signalOf(c);
+    const same = lead.signals!.find((s) => s.kind === signal.kind);
+    if (same) same.count = (same.count ?? 1) + 1;
+    else lead.signals!.push(signal);
+    // Every merged candidate stays findable (plan items join through it — personal-plan.ts).
+    lead.mergedCandidateIds = [...(lead.mergedCandidateIds ?? []), c.id];
+    lead.evidence = Array.from(new Set([...lead.evidence, ...c.evidence]));
+  }
+  return out;
+}
+
 /** V2.0 §6 — "DON'T FORGET": important unresolved items that didn't make the Top 3.
  *  A pure selector over the already-computed candidate list, not a new scoring pass —
  *  DO_NOW/DO_TODAY candidates beyond the Top 3, highest score first, bounded to a short
@@ -703,7 +753,8 @@ export function computePersonalFocus(
     .map((loop) => candidateFromLoop(loop, data, identity, attentionDecisionIds, today, workRelevanceIndex, relationIdentity, mentionedIssueKeys, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds))
     .filter((c): c is PersonalFocusCandidate => c !== null);
 
-  const candidates = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);
+  const ranked = [...fromAttention, ...fromLoops].sort((a, b) => b.score - a.score || CATEGORY_ORDER[a.category] - CATEGORY_ORDER[b.category]);
+  const candidates = dedupeCandidatesByTicket(ranked);
 
   const top3 = candidates.filter((c) => c.category !== "BLOCKED" && c.category !== "DEFER").slice(0, 3);
   const thirtyMinutePlan = buildThirtyMinutePlan(candidates, 30);
@@ -714,6 +765,7 @@ export function computePersonalFocus(
 
   return {
     candidates,
+    allCandidates: ranked,
     top3,
     thirtyMinutePlan,
     thirtyMinutePlanTotalMinutes,

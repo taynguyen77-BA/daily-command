@@ -30,6 +30,7 @@ import type {
   MemoryEvent,
   MyActionItemsOnlyByPage,
   PersonalIdentity,
+  TicketWorkState,
   PersonalPlanItem,
   SyncLogEntry,
 } from "./types";
@@ -57,6 +58,12 @@ export interface SyncedAppState {
   // none of them, and a missing field always means "server knows nothing" (local is kept), never
   // "server says empty". The three maps merge per record (LWW + tombstones — see
   // execution-state-merge.ts), never by whole-blob recency.
+  /** The canonical per-ticket work state (ticket-work-state.ts). Optional on read: a blob
+   *  from an older client has only the legacy maps below, which are migrated in on apply.
+   *  Merged per ticket, newest updatedAt wins. */
+  ticketWorkStates?: Record<string, TicketWorkState>;
+  /** @deprecated derived from ticketWorkStates; still sent for one version so older devices
+   *  keep reading the same truth. */
   dailyCommandCompletions?: Record<string, DailyCommandCompletion>;
   dailyCommandSkips?: Record<string, DailyCommandSkip>;
   dailyCommandBlocks?: Record<string, DailyCommandBlock>;
@@ -146,6 +153,7 @@ export const syncedAppStateSchema = z.object({
   dailyReports: z.record(z.string(), z.record(z.string(), z.unknown())),
   // A1/A3 — optional so pre-A1 clients keep posting successfully. Listed explicitly because
   // z.object strips unknown keys: without these the route would silently drop them.
+  ticketWorkStates: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   dailyCommandCompletions: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   dailyCommandSkips: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),
   dailyCommandBlocks: z.record(z.string(), z.record(z.string(), z.unknown())).optional(),

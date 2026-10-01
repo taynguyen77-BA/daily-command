@@ -21,9 +21,11 @@ const FILTERS: { key: string; label: string }[] = [
   // the explicit discoverability entry point for Daily-Command-skipped work items. Every other
   // tab above continues to exclude skipped items (see the filter logic below) — skip never
   // pollutes the default view.
-  { key: "SKIPPED", label: "Skipped" },
+  { key: "SKIPPED", label: "Skipped / Deferred" },
   // V2.26 — same discoverability exception for Daily-Command-BLOCKED work, and the same
-  // rule: every other tab excludes blocked items.
+  // rule: every other tab excludes blocked items. Both tabs read the TicketWorkState-derived
+  // sets (SKIPPED includes DEFERRED-until-future); every card has Block / Done / Unblock /
+  // Reactivate through the shared TaskRow.
   { key: "BLOCKED", label: "Blocked" },
 ];
 
@@ -151,9 +153,7 @@ function PrioritiesInner() {
                 proactive={proactive}
                 personalFocus={personalFocus}
                 relation={classifyPersonalRelation(item, relationIdentity, mentionedIssueKeys, item.key)}
-                isSkipped={!!dailyCommandSkippedWorkItemIds?.has(item.id)}
-                onSkip={(reason) => store.skipTicketInDailyCommand(item.key, reason)}
-                onReactivate={() => store.reactivateSkippedTicket(item.key)}
+                surface="priorities"
               />
             );
           })}

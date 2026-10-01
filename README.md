@@ -130,13 +130,100 @@ Project Settings → Environment Variables → add the ones you need for the **P
 
 | Feature | Default | What it does |
 | --- | --- | --- |
-| **Morning Brief** | on | The first time the app is opened on a day (entered at `/`), it syncs Jira (when connected) and lands on Daily Review, whose header reads e.g. "Since yesterday 18:00: 4 new, 2 assigned, 3 mentions, 1 due re-check, 5 closed by team" — each count a jump link. "Yesterday" is the previous business day (Monday reads "Since Fri 18:00"). |
-| **Keyboard triage** | on | On Daily Review: `J`/`K` move, `C` complete, `S` skip, `B` block, `R` reviewed (New rows), `O` open in Jira. Ignored while typing in a field or with Ctrl/Cmd/Alt held. |
+| **Morning Brief** | on | The first time the app is opened on a day (entered at `/`), it syncs Jira (when connected) and lands on My Work → New (formerly Daily Review), whose header reads e.g. "Since yesterday 18:00: 4 new, 2 assigned, 3 mentions, 1 due re-check, 5 closed by team" — each count a jump link. "Yesterday" is the previous business day (Monday reads "Since Fri 18:00"). |
+| **Keyboard triage** | on | On My Work (current view): `J`/`K` move, `C` done, `S` skip, `B` block, `R` reviewed (New rows), `O` open in Jira. Ignored while typing in a field or with Ctrl/Cmd/Alt held. |
 | **Sync history** | on | Every successful Jira sync rolls into a per-day summary (syncs, new tickets, newly assigned to you, closed in Jira), kept 90 days and shown in Data & Settings. |
 | **Mention reply tracking** | on | Mark a mention "Replied" (Recently Mentioned, Reports), or let the sync detect your own later comment on the same issue — either way it leaves "Mentions awaiting my reply". Replies sync across devices. |
-| **Follow-up reminders** | on | Blocking a ticket can take an optional "Ping on <date>". From that day it is listed in Daily Review's "Follow-ups to send" (with the Draft follow-up text), and — when `SLACK_WEBHOOK_URL` is configured — one Slack reminder is sent per ticket per ping date. |
+| **Follow-up reminders** | on | Blocking a ticket can take an optional "Ping on <date>". From that day it is listed in My Work → Blocked, under "Follow-ups to send" (with the Draft follow-up text), and — when `SLACK_WEBHOOK_URL` is configured — one Slack reminder is sent per ticket per ping date. |
 | **Staleness wording / my activity** | wording always; "my activity" off | The stale-ticket item now says **"No ticket activity for N business days"**, because Jira's `updated` changes on anyone's edit. Optionally (off by default) measure from **your own** last comment/transition where the sync could see it ("No activity by you for N business days") — available only for tickets whose comments or changelog the sync fetched. |
 | **Send reports to Slack / email draft** | on | Reports gets "Send to Slack…" (explicit click + confirmation, through the existing notify route) and "Email draft" (a `mailto:` draft your mail app opens). Nothing is ever sent automatically. |
+
+## Task status model (V2.31) — one status per ticket, the same on every page
+
+Every surface that shows a ticket reads the same status from one record. Before V2.31 there
+were five parallel stores, which is why lists diverged. The full audit (before/after, plus
+the surface-by-surface table) is in [AUDIT_TASK_STATE.md](AUDIT_TASK_STATE.md).
+
+**The model.** `StoreState.ticketWorkStates[ticketKey]`, defined in `types.ts`
+`TicketWorkState` and handled in `ticket-work-state.ts`:
+
+`{ ticketKey, status: TODO | IN_PROGRESS | BLOCKED | SKIPPED | DEFERRED | DONE, reason?, until?, updatedAt, updatedBy?, history[≤50] }`
+
+- **TODO is implicit.** A missing record means TODO. A record with status TODO exists only
+  after a ticket came back to TODO, so its history survives.
+- **Jira status is a read-only overlay.** It is shown next to the personal status
+  ("Jira: In Review") and never stored in it.
+- **Only one write path:** `store.setTicketStatus(ticketKey, status, { reason, until, surface })`.
+  The named wrappers (`completeTicketInDailyCommand`, `skip…`, `block…`, `reopen…`,
+  `reactivate…`, `unblock…`, `startTicket`, `stopTicket`, `deferTicket`) all call it.
+  Focus Session start/complete/block/skip, My Day Defer, Action Plan "Complete action" and
+  the Attention card's ticket row call it too when the item has a ticket.
+- **One change, everything updated together.** Each change applies the transition table,
+  appends history, records a `TICKET_*` memory event (reports read only these), and updates
+  linked plan items, actions and attention items — all in one store write:
+  - **DONE:** plan items are completed, open actions completed, attention items resolved.
+  - **BLOCKED / SKIPPED / DEFERRED / IN_PROGRESS:** linked plan items mirror the status;
+    BLOCKED keeps the reason, and no Follow-up Action is created automatically.
+  - **TODO:** today's plan items go back to planned. On a Reopen, the latest completed
+    linked action reopens too.
+
+**Transition table.** Every pair is tested.
+
+| from \ to | TODO | IN_PROGRESS | BLOCKED | SKIPPED | DEFERRED | DONE |
+|---|---|---|---|---|---|---|
+| TODO | no-op | ✔ | ✔ | ✔ | ✔ | ✔ |
+| IN_PROGRESS | ✔ Stop | update | ✔ | ✔ | ✔ | ✔ |
+| BLOCKED | ✔ Unblock | ✔ | update | ✔ | ✔ | ✔ |
+| SKIPPED | ✔ Reactivate | ✔ | ✔ | update | ✔ | ✔ |
+| DEFERRED | ✔ Reactivate | ✔ | ✔ | ✔ | update | ✔ |
+| DONE | ✔ **Reopen only** | ✘ | ✘ | ✘ | ✘ | no-op |
+
+**Buckets.** `ticketBucket` puts every ticket in exactly one bucket:
+
+| Bucket | Rule |
+|---|---|
+| Today | TODO, or DEFERRED with `until ≤ today` |
+| In progress | IN_PROGRESS |
+| Blocked | BLOCKED |
+| Skipped / Deferred | SKIPPED, or DEFERRED until a future date |
+| Done | DONE |
+
+**Migration (on load, idempotent, lossless).** `dailyCommandCompletions` → DONE,
+`dailyCommandSkips` → SKIPPED, `dailyCommandBlocks` → BLOCKED. Ticket-linked plan items
+(completed / blocked / skipped / in-progress / deferred) migrate when they are newer than any
+existing record. `PersonalPlanItem.ticketKey` is backfilled from the plan item's attention
+id.
+
+**Deprecated maps.** The old maps stay in the state and in the synced blob for one version,
+**derived** from `ticketWorkStates` on every write, so older code and older devices see the
+same truth. Engines read the today-aware projection, `selectDailyCommandMaps(state, today)`.
+
+**Cross-device sync.** `ticketWorkStates` merges per ticket; the newest `updatedAt` wins.
+An older device's legacy records and tombstones are migrated in only when strictly newer.
+
+**Surface → selector map.**
+
+| Surface | Population | Status per row |
+|---|---|---|
+| **My Work** (`/my-work`: Today · New · In progress · Blocked · Skipped/Deferred · Done 7d) | `buildMyWork()` (`my-work.ts`): assigned work ∪ Your Delivery Focus ∪ today's plan ∪ recorded statuses ∪ Daily Review New — views partition the tickets | `getTicketView` → `TaskRow` |
+| Command Center → My Work summary | `buildMyWork()` counts + top Today rows | `TaskRow` |
+| Your Delivery Focus / 30-minute plan | `computePersonalFocus` (excludes `ticketExclusionSets` done/paused), **one row per ticket**, signals as chips | `TaskRow` |
+| My Day agenda (My Work → Today) | today's `personalPlan`; a ticket row's status is the ticket's | `TaskRow` (ticketless rows: plan status, same labels) |
+| Focus Session | one plan item | read-only `TaskRow`; its buttons call `setTicketStatus` |
+| Daily Review (My Work → New, plus the Blocked / Skipped / Done views) | `buildDailyReview(selectDailyCommandMaps(...))` | `TaskRow` |
+| Priorities | `derived.scores`; Skipped/Deferred and Blocked tabs from `ticketExclusionSets` | `TaskRow` on every card (Block / Done added) |
+| Action Plan | `buildPlan(…, doneIds, pausedIds)` | ticket line `TaskRow` (ticket-scoped labels) |
+| Attention | `proactive.attentionQueue` | `TaskRow` on every card with a ticket |
+| Risk / Decision / Loop / Dependency / Change cards | linked work items | `RelatedTickets` → `TaskRow` |
+
+**Same actions everywhere.** Every `TaskRow` offers Open in Jira · Start · Done · Block
+(+reason) · Skip (+reason) · Defer (+date), plus Reopen / Unblock / Reactivate / Stop when
+they apply. A surface hides actions only through the documented `readOnly` / `hideActions`
+props.
+
+**Navigation.** One "My Work" entry. Its badge counts unreviewed New tickets plus
+skips/blocks due for a re-check today, plus deferrals coming back today. `/focus` redirects
+to `/my-work?view=today` and `/daily-review` to `/my-work?view=new`.
 
 ## Page smoke test (C3)
 
@@ -145,8 +232,9 @@ Project Settings → Environment Variables → add the ones you need for the **P
 | Route | Demo data | Jira-like data | Browser |
 | --- | --- | --- | --- |
 | `/` Command Center | ✅ | ✅ | ✅ |
-| `/daily-review` | ✅ | ✅ | ✅ |
-| `/focus` My Day | ✅ | ✅ | ✅ |
+| `/my-work` (absorbs Daily Review + My Day) | ✅ | ✅ | ✅ |
+| `/daily-review` → redirect to `/my-work?view=new` | ✅ (redirect asserted) | ✅ | ✅ |
+| `/focus` → redirect to `/my-work?view=today` | ✅ (redirect asserted) | ✅ | ✅ |
 | `/priorities` | ✅ | ✅ | ✅ |
 | `/action-plan` | ✅ | ✅ | ✅ |
 | `/attention` | ✅ | ✅ | ✅ |
