@@ -142,7 +142,7 @@ function MyWorkInner() {
         <SectionHeading title={`${view === "today" ? "My open tickets" : MY_WORK_VIEWS.find((v) => v.id === view)!.label} (${visibleRows.length})`} subtitle={VIEW_SUBTITLE[view]} />
         {view === "new" && visibleRows.length > 0 && (
           <div className="mb-2 flex justify-end">
-            <button onClick={() => store.markDailyReviewSeen(review.newRows.map((r) => r.ticketKey))} className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+            <button onClick={() => store.markDailyReviewSeen(review.newRows.map((r) => r.ticketKey))} className="btn btn-sm btn-secondary">
               Mark all reviewed
             </button>
           </div>
@@ -160,25 +160,27 @@ function MyWorkInner() {
   return (
     <div className="space-y-6 pb-16">
       <SectionHeading
+        level="page"
         title="My Work"
         subtitle="Every ticket that is yours to act on — one status per ticket, the same on every page."
         action={
-          <label className="flex items-center gap-1.5 text-xs text-text3">
-            <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("myDay", e.target.checked)} className="h-3.5 w-3.5" />
-            My action items only
-          </label>
+          <>
+            <TrustLabel kind="calculated" />
+            <label className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-border px-2.5 py-1.5 text-xs text-text2 hover:border-border2">
+              <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("myDay", e.target.checked)} className="h-3.5 w-3.5 accent-accent" />
+              My action items only
+            </label>
+          </>
         }
       />
-      <TrustLabel kind="calculated" />
-
       {!hasIdentity && (
         <Panel className="border-accent/30 p-4 text-sm text-text2">
           Your identity is not set, so assigned work and ownership-based ranking can&apos;t be shown yet.{" "}
-          <a href="/data-settings" className="font-medium text-accent2 hover:underline">Set it in Data & Settings</a>.
+          <a href="/data-settings" className="link">Set it in Data & Settings</a>.
         </Panel>
       )}
 
-      <div role="tablist" aria-label="My Work views" className="flex flex-wrap gap-1">
+      <div role="tablist" aria-label="My Work views" className="seg">
         {MY_WORK_VIEWS.map((v) => (
           <button
             key={v.id}
@@ -186,15 +188,15 @@ function MyWorkInner() {
             aria-selected={view === v.id}
             data-my-work-tab={v.id}
             onClick={() => selectView(v.id)}
-            className={`rounded-md px-3 py-1.5 text-sm font-medium ${view === v.id ? "bg-surface2 text-text" : "text-text3 hover:text-text2"}`}
+            className={`seg-item ${view === v.id ? "seg-item-active" : ""}`}
           >
-            {v.label} <span className="text-xs text-text3">({work.counts[v.id]})</span>
+            {v.label} <span className={`count-pill tabular ${work.counts[v.id] > 0 && view !== v.id ? "text-text2" : ""}`}>{work.counts[v.id]}</span>
           </button>
         ))}
       </div>
 
       {triageOn && triageRows.length > 0 && (
-        <p className="text-xs text-text3" data-triage-help>
+        <p className="hidden text-xs text-text3 md:block" data-triage-help>
           Keyboard: <kbd>J</kbd>/<kbd>K</kbd> move · <kbd>C</kbd> done · <kbd>S</kbd> skip · <kbd>B</kbd> block{view === "new" ? <> · <kbd>R</kbd> reviewed</> : null} · <kbd>O</kbd> open in Jira
         </p>
       )}
@@ -251,7 +253,7 @@ function MyWorkInner() {
           ) : (
             <Panel className="flex flex-wrap gap-2 p-4 text-sm">
               {review.dueForRecheck.map((r) => (
-                <button key={r.ticketKey} onClick={() => selectView(r.kind === "blocked" ? "blocked" : "skipped")} className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+                <button key={r.ticketKey} onClick={() => selectView(r.kind === "blocked" ? "blocked" : "skipped")} className="btn btn-sm btn-secondary">
                   {r.ticketKey} → {r.kind === "blocked" ? "Blocked" : "Skipped / Deferred"}
                 </button>
               ))}

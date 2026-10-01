@@ -146,16 +146,14 @@ export default function CommandCenterPage() {
 
       <div className="flex items-center justify-between">
         <MorningBriefHeading />
-        <div role="tablist" aria-label="View mode" className="flex gap-1 rounded-md border border-border p-0.5">
+        <div role="tablist" aria-label="View mode" className="seg">
           {(["operations", "executive"] as ViewMode[]).map((m) => (
             <button
               key={m}
               role="tab"
               aria-selected={viewMode === m}
               onClick={() => setViewMode(m)}
-              className={`rounded px-3 py-1 text-xs font-medium capitalize ${
-                viewMode === m ? "bg-surface2 text-text" : "text-text3 hover:text-text2"
-              }`}
+              className={`seg-item capitalize ${viewMode === m ? "seg-item-active" : ""}`}
             >
               {m}
             </button>
@@ -194,7 +192,7 @@ export default function CommandCenterPage() {
           )}
 
           <section>
-            <SectionHeading title="Decisions" subtitle="Decision Radar — needs review or urgent review, never changed automatically." action={<Link href="/decisions" className="text-xs font-medium text-accent2 hover:underline">Decision Log →</Link>} />
+            <SectionHeading title="Decisions" subtitle="Decision Radar — needs review or urgent review, never changed automatically." action={<Link href="/decisions" className="link text-xs">Decision Log →</Link>} />
             {decisionsNeedingReview.length === 0 ? (
               <Panel className="p-6 text-sm text-text3">No decisions currently need review.</Panel>
             ) : (
@@ -214,7 +212,7 @@ export default function CommandCenterPage() {
 
           {stalledLoops.length > 0 && (
             <section>
-              <SectionHeading title="Stalled Loops" subtitle="Decision -> Action -> Outcome loops that need a nudge." action={<Link href="/loops" className="text-xs font-medium text-accent2 hover:underline">All loops →</Link>} />
+              <SectionHeading title="Stalled Loops" subtitle="Decision -> Action -> Outcome loops that need a nudge." action={<Link href="/loops" className="link text-xs">All loops →</Link>} />
               <div className="grid gap-2 md:grid-cols-2">
                 {stalledLoops.map((l) => (
                   <Panel key={l.id} className="p-4">
@@ -315,7 +313,7 @@ export default function CommandCenterPage() {
               title="What Changed?"
               subtitle="Since the last snapshot."
               action={
-                <Link href="/changes" className="text-xs font-medium text-accent2 hover:underline">
+                <Link href="/changes" className="link text-xs">
                   Full change log →
                 </Link>
               }
@@ -338,7 +336,7 @@ export default function CommandCenterPage() {
               title="What Might Go Wrong?"
               subtitle="Deterministically detected from combinations of data."
               action={
-                <Link href="/risks" className="text-xs font-medium text-accent2 hover:underline">
+                <Link href="/risks" className="link text-xs">
                   All risks →
                 </Link>
               }
@@ -385,7 +383,7 @@ export default function CommandCenterPage() {
           <div className="flex justify-end border-t border-border pt-6">
             <button
               onClick={() => setClosingDay(true)}
-              className="rounded-md border border-border px-4 py-2 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+              className="btn btn-secondary"
             >
               Close My Day
             </button>

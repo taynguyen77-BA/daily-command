@@ -183,7 +183,7 @@ export function ArtifactEditor({
                     <button
                       onClick={() => setOpenEvidenceFor(openEvidenceFor === s.heading ? null : s.heading)}
                       aria-expanded={openEvidenceFor === s.heading}
-                      className="text-xs font-medium text-accent2 hover:underline"
+                      className="link text-xs"
                     >
                       {openEvidenceFor === s.heading ? "Hide" : "Why is this statement here?"}
                     </button>
@@ -204,7 +204,7 @@ export function ArtifactEditor({
         <div className="mt-4 border-t border-border pt-4">
           <div className="mb-2 flex items-center justify-between">
             <p className="text-xs font-semibold uppercase tracking-wide text-text3">AI-drafted wording</p>
-            <button onClick={aiDraft ? regenerate : generateAiDraft} disabled={aiLoading} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text disabled:opacity-50">
+            <button onClick={aiDraft ? regenerate : generateAiDraft} disabled={aiLoading} className="btn btn-sm btn-secondary disabled:opacity-50">
               {aiLoading ? "Drafting…" : aiDraft ? "Regenerate" : "Generate AI wording"}
             </button>
           </div>
@@ -218,7 +218,7 @@ export function ArtifactEditor({
               <p className="text-text2">{aiDraft.text}</p>
               <div className="mt-1 flex items-center justify-between">
                 <ConfidenceTag confidence={aiDraft.confidence} />
-                <button onClick={insertAiDraft} className="text-xs font-medium text-accent2 hover:underline">
+                <button onClick={insertAiDraft} className="link text-xs">
                   Insert into draft text
                 </button>
               </div>
@@ -258,10 +258,10 @@ export function ArtifactEditor({
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          <button onClick={copy} className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent2">
+          <button onClick={copy} className="btn btn-primary">
             {copied ? "Copied ✓" : "Copy"}
           </button>
-          <button onClick={save} className="rounded-md border border-border px-4 py-2 text-sm font-medium text-text2 hover:border-accent hover:text-text">
+          <button onClick={save} className="btn btn-secondary">
             {saved ? "Saved ✓" : "Save to History"}
           </button>
           <button onClick={onClose} className="rounded-md border border-border px-4 py-2 text-sm text-text2 hover:text-text">

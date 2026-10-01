@@ -24,7 +24,7 @@ function GapCard({ gap }: { gap: Gap }) {
         </p>
         <p className="mt-1 text-xs text-text2">{gap.recommendedAction}</p>
       </div>
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="mt-2 text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="mt-2 link text-xs">
         {open ? "Hide evidence" : "Why am I seeing this?"}
       </button>
       {open && (
@@ -54,7 +54,7 @@ export function GapsPanel() {
         action={
           <button
             onClick={run}
-            className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+            className="btn btn-secondary"
           >
             Check For Gaps
           </button>

@@ -208,7 +208,7 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
               {result.tradeoffs}
             </p>
 
-            <button onClick={() => setShowEvidence((s) => !s)} aria-expanded={showEvidence} className="text-xs font-medium text-accent2 hover:underline">
+            <button onClick={() => setShowEvidence((s) => !s)} aria-expanded={showEvidence} className="link text-xs">
               {showEvidence ? "Hide evidence" : "Show evidence"}
             </button>
             {showEvidence && (
@@ -220,7 +220,7 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
             )}
             <div className="flex items-center justify-between">
               <ConfidenceTag confidence={result.confidence} />
-              <button onClick={() => setCreatingBrief(true)} className="text-xs font-medium text-accent2 hover:underline">
+              <button onClick={() => setCreatingBrief(true)} className="link text-xs">
                 Create Decision Brief
               </button>
             </div>
@@ -247,7 +247,7 @@ export function DecisionAssistant({ item, onClose }: { item: AttentionItem; onCl
               {entity.relatedWorkItemIds.length > 0 && <p className="text-xs text-text3">Related work items: {entity.relatedWorkItemIds.length}</p>}
             </Panel>
             <div className="flex gap-2">
-              <button onClick={confirm} className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent2">
+              <button onClick={confirm} className="btn btn-primary">
                 Confirm decision
               </button>
               <button onClick={() => setStep("options")} className="rounded-md border border-border px-4 py-2 text-sm text-text2 hover:text-text">

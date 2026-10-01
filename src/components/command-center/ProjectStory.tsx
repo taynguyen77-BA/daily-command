@@ -51,7 +51,7 @@ export function ProjectStory({ events }: { events: MemoryEvent[] }) {
         {cacheState && <AiProviderIndicator state={cacheState === "cached" ? "CACHED" : mode === "mock" ? "MOCK_FALLBACK" : "REAL_CLAUDE"} />}
       </div>
       {!result ? (
-        <button onClick={tellStory} disabled={loading} className="text-sm font-medium text-accent2 hover:underline disabled:opacity-50">
+        <button onClick={tellStory} disabled={loading} className="text-sm link disabled:opacity-50">
           {loading ? "Asking Claude…" : "Tell my project's story"}
         </button>
       ) : (

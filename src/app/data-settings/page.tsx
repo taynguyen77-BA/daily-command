@@ -111,7 +111,7 @@ function SlackNotificationsPanel() {
       <button
         onClick={handleSendTest}
         disabled={sending || !status?.configured}
-        className="mt-3 rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-50"
+        className="mt-3 btn btn-secondary disabled:opacity-50"
       >
         {sending ? "Sending…" : "Send test notification"}
       </button>
@@ -222,7 +222,7 @@ function CrossDeviceSyncPanel() {
           <button
             onClick={handlePair}
             disabled={pairing || !secretInput.trim()}
-            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
+            className="btn btn-sm btn-primary disabled:opacity-60"
           >
             {pairing ? "Pairing…" : "Pair this device"}
           </button>
@@ -277,10 +277,10 @@ function ArtifactHistoryRow({
         <p className="text-text3">{new Date(record.createdAt).toLocaleString()}</p>
       </div>
       <div className="flex gap-2">
-        <button onClick={reopen} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-text">
+        <button onClick={reopen} className="btn btn-sm btn-secondary">
           Reopen
         </button>
-        <button onClick={onDelete} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
+        <button onClick={onDelete} className="btn btn-sm btn-secondary">
           Delete
         </button>
       </div>
@@ -427,7 +427,7 @@ function JiraProjectScopePanel({
           <button
             onClick={save}
             disabled={mode === "FOCUSED" && selected.size === 0}
-            className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:cursor-not-allowed disabled:opacity-50"
+            className="btn btn-sm btn-primary disabled:cursor-not-allowed disabled:opacity-50"
           >
             Save Focus
           </button>
@@ -585,7 +585,7 @@ function JiraWorkRelevancePolicyPanel({
           )}
           <button
             onClick={() => store.dismissWorkRelevancePolicyMigrationNotice()}
-            className="mt-2 rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+            className="mt-2 btn btn-sm btn-secondary"
           >
             Dismiss
           </button>
@@ -853,7 +853,7 @@ export default function DataSettingsPage() {
   return (
     <div className="space-y-6 pb-16">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <SectionHeading title="Data & Settings" />
+        <SectionHeading level="page" title="Data & Settings" />
         {/* V2.11 §3B — nothing behind this toggle is ever deleted; it's one click away
             either way. Hides dev/pilot-oriented panels (Pilot Readiness, Real Jira Data
             Protection, AI Trust (dev)) that a BA/PO running live client projects wouldn't
@@ -1061,14 +1061,14 @@ export default function DataSettingsPage() {
         <div className="mt-4 flex flex-wrap gap-2">
           <button
             onClick={() => store.loadDemoData()}
-            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent2"
+            className="btn btn-primary"
           >
             Load Demo Data
           </button>
           {!confirmingReset ? (
             <button
               onClick={() => setConfirmingReset(true)}
-              className="rounded-md border border-border px-4 py-2 text-sm text-text2 hover:border-red hover:text-red"
+              className="btn btn-secondary"
             >
               Reset all data
             </button>
@@ -1158,7 +1158,7 @@ export default function DataSettingsPage() {
                         setPendingFirstSync(false);
                         runSync(pendingFullSync);
                       }}
-                      className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2"
+                      className="btn btn-sm btn-primary"
                     >
                       Yes, connect to Jira
                     </button>
@@ -1172,7 +1172,7 @@ export default function DataSettingsPage() {
                   <button
                     onClick={() => requestSync(false)}
                     disabled={syncing || syncingElsewhere}
-                    className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2 disabled:opacity-60"
+                    className="btn btn-sm btn-primary disabled:opacity-60"
                   >
                     {syncing ? `Syncing… (${syncElapsedSec}s)` : syncingElsewhere ? "Syncing… (started elsewhere)" : "Sync Jira"}
                   </button>
@@ -1246,7 +1246,7 @@ export default function DataSettingsPage() {
 
       <Panel className="p-5">
         <SectionHeading title="Jira Conformance" subtitle="Runs the same connector code (pagination, mapping, error classification) against fixtures — or, when Jira is configured, the real API — never a reimplementation." />
-        <button onClick={runConformance} disabled={conformanceLoading} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-60">
+        <button onClick={runConformance} disabled={conformanceLoading} className="btn btn-secondary disabled:opacity-60">
           {conformanceLoading ? "Running…" : "Run Conformance Check"}
         </button>
         {conformance && (
@@ -1479,7 +1479,7 @@ export default function DataSettingsPage() {
             </p>
             <button
               onClick={() => document.getElementById("jira-work-relevance-policy-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              className="mt-2 font-medium text-accent2 hover:underline"
+              className="mt-2 link"
             >
               Review affected statuses
             </button>
@@ -1491,7 +1491,7 @@ export default function DataSettingsPage() {
             <p className="mt-1 text-text2">Some statuses show behavior worth reviewing — real Action evidence doesn&apos;t line up with the current policy for at least one observed status.</p>
             <button
               onClick={() => document.getElementById("work-relevance-calibration-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              className="mt-2 font-medium text-accent2 hover:underline"
+              className="mt-2 link"
             >
               Review calibration
             </button>
@@ -1531,7 +1531,7 @@ export default function DataSettingsPage() {
                     <button
                       onClick={() => setExpandedRemediation(expandedRemediation === i ? null : i)}
                       aria-expanded={expandedRemediation === i}
-                      className="mt-2 font-medium text-accent2 hover:underline"
+                      className="mt-2 link"
                     >
                       {expandedRemediation === i ? "Hide" : `Review affected items (${r.affectedItemIds.length})`}
                     </button>
@@ -1612,7 +1612,7 @@ export default function DataSettingsPage() {
                   clearAICache();
                   setAiTraceTick((t) => t + 1);
                 }}
-                className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+                className="btn btn-sm btn-secondary"
               >
                 Clear AI cache
               </button>
@@ -1623,11 +1623,11 @@ export default function DataSettingsPage() {
                   clearAiTrace();
                   setAiTraceTick((t) => t + 1);
                 }}
-                className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+                className="btn btn-sm btn-secondary"
               >
                 Clear trace log
               </button>
-              <button onClick={() => setAiTraceTick((t) => t + 1)} className="rounded-md border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+              <button onClick={() => setAiTraceTick((t) => t + 1)} className="btn btn-sm btn-secondary">
                 Refresh
               </button>
             </div>

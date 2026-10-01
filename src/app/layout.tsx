@@ -14,7 +14,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body className="min-h-screen bg-bg antialiased">
         <Header />
         <Nav />
-        <main className="mx-auto max-w-6xl px-6 py-6">{children}</main>
+        <main className="mx-auto w-full max-w-shell px-4 py-6 sm:px-6 md:py-8">{children}</main>
       </body>
     </html>
   );

@@ -87,7 +87,7 @@ const STATUS_BADGE: Record<TaskExecutionState["kind"], { label: string; tone: st
 export function TicketStatusBadge({ kind }: { kind: TaskExecutionState["kind"] }) {
   const b = STATUS_BADGE[kind];
   return (
-    <span data-ticket-status={kind} className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${b.tone}`}>
+    <span data-ticket-status={kind} className={`whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 tracking-wider ${b.tone}`}>
       {b.label}
     </span>
   );
@@ -99,7 +99,7 @@ export function SignalChips({ signals }: { signals?: FocusSignal[] }) {
   return (
     <span className="flex flex-wrap gap-1" data-signal-chips={signals.length}>
       {signals.map((s) => (
-        <span key={`${s.kind}:${s.candidateId}`} data-signal={s.kind} className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-text2">
+        <span key={`${s.kind}:${s.candidateId}`} data-signal={s.kind} className="whitespace-nowrap rounded-md border border-border bg-surface2 px-1.5 py-0.5 text-[10px] font-medium leading-3 text-text2">
           {s.label}
           {(s.count ?? 1) > 1 ? ` ×${s.count}` : ""}
         </span>
@@ -118,7 +118,10 @@ const STATE_TONE: Record<TaskExecutionState["kind"], string> = {
   blocked: "text-red",
 };
 
-const BTN = "rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text";
+const BTN = "btn btn-sm btn-secondary";
+const BTN_DONE = "btn btn-sm btn-success";
+const BTN_GHOST = "btn btn-sm btn-ghost";
+const FIELD = "rounded-md border border-border2 bg-surface px-2 py-1 text-xs text-text2 focus:border-accent";
 
 /** Default labels, and the "ticket"-qualified ones used where the row sits next to other
  *  controls of a different kind (Action Plan's action-level buttons) — same actions either way. */
@@ -160,6 +163,7 @@ export function TaskReferenceRowView({
   hideActions,
   signals,
   newReason,
+  stacked = false,
 }: {
   ticketKey: string;
   url?: string;
@@ -188,6 +192,8 @@ export function TaskReferenceRowView({
   signals?: FocusSignal[];
   /** Why the ticket is New (Daily Review / My Work "New"). */
   newReason?: string;
+  /** Layout only: actions always sit under the ticket info (for rows inside narrow cards). */
+  stacked?: boolean;
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
@@ -205,7 +211,7 @@ export function TaskReferenceRowView({
       onChange={(e) => setRevisitOn(e.target.value)}
       aria-label="Re-check on (optional)"
       title="Re-check on (optional) — shows up in My Work that day; nothing changes until you act"
-      className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+      className={FIELD}
     />
   );
   const record = formatExecutionRecord(execution, now);
@@ -231,9 +237,9 @@ export function TaskReferenceRowView({
   };
 
   return (
-    <Tag data-task-row={ticketKey} data-task-state={k} className="flex flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-text3">
+    <Tag data-task-row={ticketKey} data-task-state={k} className={`flex flex-col gap-2 border-b border-border py-2.5 last:border-b-0 ${stacked ? "" : "sm:flex-row sm:items-center sm:justify-between sm:gap-4"}`}>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text3">
           <TicketStatusBadge kind={k} />
           <TicketLink ticketKey={ticketKey} url={url} />
           {statusLabel && <span title="Jira status (read-only)">Jira: {statusLabel}</span>}
@@ -241,9 +247,9 @@ export function TaskReferenceRowView({
           {reactivation && <ReactivatedBadge reactivation={reactivation} now={now} />}
           <SignalChips signals={signals} />
         </div>
-        {title && <p className="truncate text-sm text-text">{title}</p>}
+        {title && <p className="mt-0.5 truncate text-sm font-medium text-text">{title}</p>}
         {record && (
-          <p data-task-record className={`text-xs ${STATE_TONE[k]}`}>
+          <p data-task-record className={`mt-0.5 text-xs ${STATE_TONE[k]}`}>
             {record}
           </p>
         )}
@@ -253,12 +259,13 @@ export function TaskReferenceRowView({
       </div>
 
       {actions && k !== "done-in-jira" && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+        <div className={`flex flex-wrap items-center gap-1.5 ${stacked ? "" : "sm:max-w-[60%] sm:justify-end"}`}>
           {picker === null && (
             <>
               {url && !hidden.has("open") && (
-                <a href={url} target="_blank" rel="noopener noreferrer" className={BTN}>
+                <a href={url} target="_blank" rel="noopener noreferrer" className={BTN_GHOST}>
                   {L.open}
+                  <span aria-hidden="true">↗</span>
                 </a>
               )}
               {can.unblock && (
@@ -287,7 +294,7 @@ export function TaskReferenceRowView({
                 </button>
               )}
               {can.done && (
-                <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
+                <button onClick={actions.onComplete} title={btnTitle} className={BTN_DONE}>
                   {L.complete}
                 </button>
               )}
@@ -314,7 +321,7 @@ export function TaskReferenceRowView({
                 value={skipReason}
                 onChange={(e) => setSkipReason(e.target.value as SkipReason | "")}
                 aria-label="Skip reason (optional)"
-                className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+                className={FIELD}
               >
                 <option value="">No reason</option>
                 {SKIP_REASONS.map((r) => (
@@ -327,7 +334,7 @@ export function TaskReferenceRowView({
               <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); close(); }} className={BTN}>
                 {L.skip}
               </button>
-              <button onClick={close} className="px-1 text-xs text-text3 hover:text-text2">
+              <button onClick={close} className={BTN_GHOST}>
                 Cancel
               </button>
             </>
@@ -341,7 +348,7 @@ export function TaskReferenceRowView({
                 placeholder="Blocked on… (optional)"
                 aria-label="Block reason (optional)"
                 maxLength={200}
-                className="w-44 rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+                className={`w-44 ${FIELD}`}
               />
               <datalist id={`block-reasons-${ticketKey}`}>
                 {BLOCK_REASON_SUGGESTIONS.map((r) => (
@@ -356,13 +363,13 @@ export function TaskReferenceRowView({
                   onChange={(e) => setPingOn(e.target.value)}
                   aria-label="Ping on (optional)"
                   title="Ping on (optional) — a reminder to chase whoever this waits on (Daily Review + Slack)"
-                  className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+                  className={FIELD}
                 />
               )}
               <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined, pingOn || undefined); close(); }} className={BTN}>
                 {L.block}
               </button>
-              <button onClick={close} className="px-1 text-xs text-text3 hover:text-text2">
+              <button onClick={close} className={BTN_GHOST}>
                 Cancel
               </button>
             </>
@@ -375,12 +382,12 @@ export function TaskReferenceRowView({
                 onChange={(e) => setDeferUntil(e.target.value)}
                 aria-label="Defer until"
                 title="Comes back to Today on this date (default: tomorrow)"
-                className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+                className={FIELD}
               />
               <button onClick={() => { actions.onDefer!(deferUntil || addDays(todayLocalIso(), 1)); close(); }} className={BTN}>
                 {L.defer}
               </button>
-              <button onClick={close} className="px-1 text-xs text-text3 hover:text-text2">
+              <button onClick={close} className={BTN_GHOST}>
                 Cancel
               </button>
             </>
@@ -426,6 +433,7 @@ export function TaskReferenceRow({
   hideActions,
   signals,
   newReason,
+  stacked,
 }: {
   workItem?: Pick<WorkItem, "key" | "sourceUrl" | "title" | "status" | "jiraStatusName" | "firstSeenAt">;
   ticketKey?: string;
@@ -445,6 +453,8 @@ export function TaskReferenceRow({
   hideActions?: TaskRowAction[];
   signals?: FocusSignal[];
   newReason?: string;
+  /** Layout only — see TaskReferenceRowView. */
+  stacked?: boolean;
 }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const key = workItem?.key ?? ticketKey;
@@ -475,6 +485,7 @@ export function TaskReferenceRow({
       hideActions={hideActions}
       signals={signals}
       newReason={newReason}
+      stacked={stacked}
     />
   );
 }
@@ -488,8 +499,8 @@ export const TaskRow = TaskReferenceRow;
 export function RelatedTickets({ workItems, label = "Related tickets" }: { workItems?: WorkItem[]; label?: string }) {
   if (!workItems || workItems.length === 0) return null;
   return (
-    <div className="mt-2 rounded-md border border-border bg-surface2 px-3 py-1">
-      <p className="pt-1 text-[10px] font-semibold uppercase tracking-wide text-text3">{label}</p>
+    <div className="mt-3 rounded-lg border border-border bg-surface2/60 px-3 py-1">
+      <p className="eyebrow pt-2">{label}</p>
       <ul>
         {workItems.map((w) => (
           <TaskReferenceRow key={w.id} workItem={w} surface="related-ticket" />

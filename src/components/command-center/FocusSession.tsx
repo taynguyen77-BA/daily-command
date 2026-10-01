@@ -248,7 +248,7 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
               <button onClick={confirmBlock} className="rounded-md bg-red px-3 py-1.5 text-sm font-medium text-white hover:opacity-90">
                 Confirm blocked
               </button>
-              <button onClick={() => setShowBlockCapture(false)} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:text-text">
+              <button onClick={() => setShowBlockCapture(false)} className="btn btn-secondary">
                 Cancel
               </button>
             </div>
@@ -257,16 +257,16 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
 
         {(sessionState === "IN_PROGRESS" || sessionState === "READY") && !showBlockCapture && (
           <div className="mt-5 flex flex-wrap gap-2 border-t border-border pt-4">
-            <Link href={openSourceHref(candidate)} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text">
+            <Link href={openSourceHref(candidate)} className="btn btn-secondary">
               Open Source
             </Link>
-            <button onClick={complete} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2">
+            <button onClick={complete} className="btn btn-primary">
               Complete
             </button>
-            <button onClick={() => setShowBlockCapture(true)} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-red hover:text-red">
+            <button onClick={() => setShowBlockCapture(true)} className="btn btn-secondary">
               Blocked
             </button>
-            <button onClick={skip} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-yellow hover:text-yellow">
+            <button onClick={skip} className="btn btn-secondary">
               Skip
             </button>
           </div>

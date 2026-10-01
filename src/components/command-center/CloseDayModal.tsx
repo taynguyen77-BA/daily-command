@@ -319,11 +319,11 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
                 <span className="text-xs font-semibold uppercase tracking-wide text-text3">Daily Report</span>
               </div>
               {!dailyReport ? (
-                <button onClick={generateDailyReport} className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-white hover:bg-accent2">
+                <button onClick={generateDailyReport} className="btn btn-sm btn-primary">
                   Generate Daily Report
                 </button>
               ) : (
-                <button onClick={copyDailyReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+                <button onClick={copyDailyReportMarkdown} className="btn btn-sm btn-secondary">
                   {reportCopied ? "Copied ✓" : "Copy as Markdown"}
                 </button>
               )}
@@ -344,10 +344,10 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
                 <div className="mt-2 flex items-center justify-between gap-2 border-t border-border pt-2">
                   <span className="text-xs text-text3">Client-facing version — grouped by client/project, ready to send.</span>
                   <div className="flex gap-2">
-                    <button onClick={downloadClientReport} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+                    <button onClick={downloadClientReport} className="btn btn-sm btn-secondary">
                       Download .md
                     </button>
-                    <button onClick={copyClientReportMarkdown} className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text">
+                    <button onClick={copyClientReportMarkdown} className="btn btn-sm btn-secondary">
                       {clientReportCopied ? "Copied ✓" : "Copy Client Report"}
                     </button>
                   </div>
@@ -397,7 +397,7 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
           <button
             onClick={run}
             disabled={loading}
-            className="mt-5 w-full rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent2 disabled:opacity-60"
+            className="mt-5 w-full btn btn-primary disabled:opacity-60"
           >
             {loading ? "Generating…" : "Generate Tomorrow's Starting Point"}
           </button>

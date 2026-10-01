@@ -20,7 +20,7 @@ export default function ChangesPage() {
 
   return (
     <div className="space-y-4 pb-16">
-      <SectionHeading
+      <SectionHeading level="page"
         title="What Changed?"
         subtitle={
           previousSnapshot

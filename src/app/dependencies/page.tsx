@@ -19,7 +19,7 @@ export default function DependenciesPage() {
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading title="Dependency Radar" subtitle="Age, blocked work, release proximity, and linked risk — never an invented target date." />
+      <SectionHeading level="page" title="Dependency Radar" subtitle="Age, blocked work, release proximity, and linked risk — never an invented target date." />
 
       {items.length === 0 ? (
         <Panel className="p-6 text-sm text-text3">No unresolved dependencies right now.</Panel>

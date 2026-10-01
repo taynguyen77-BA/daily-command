@@ -141,7 +141,7 @@ export function TakeActionPanel({
               setCopied(true);
             }}
             disabled={!message}
-            className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text disabled:opacity-50"
+            className="btn btn-secondary disabled:opacity-50"
           >
             {copied ? "Copied ✓" : "Copy message"}
           </button>
@@ -155,7 +155,7 @@ export function TakeActionPanel({
               });
               setSavedActionId(id);
             }}
-            className="rounded-md border border-border px-3 py-1.5 text-sm text-text2 hover:border-accent hover:text-text"
+            className="btn btn-secondary"
           >
             {savedActionId ? "Added ✓" : "Add to today's plan"}
           </button>
@@ -170,7 +170,7 @@ export function TakeActionPanel({
               store.completeAction(id);
             }}
             disabled={handled}
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2 disabled:opacity-50"
+            className="btn btn-primary disabled:opacity-50"
           >
             {handled ? "Handled ✓" : "Mark as handled"}
           </button>

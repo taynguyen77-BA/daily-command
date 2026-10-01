@@ -126,7 +126,7 @@ export function PersonalFocusCard({
       <p className="mt-1 text-xs text-text2">{candidate.whyOnMyList}</p>
 
       <div className="mt-2 flex flex-wrap gap-3 text-xs">
-        <button onClick={() => setShowEvidence((s) => !s)} aria-expanded={showEvidence} className="font-medium text-accent2 hover:underline">
+        <button onClick={() => setShowEvidence((s) => !s)} aria-expanded={showEvidence} className="link">
           {showEvidence ? "Hide evidence" : `Evidence (${candidate.evidence.length})`}
         </button>
       </div>
@@ -141,12 +141,12 @@ export function PersonalFocusCard({
           no single ticket (drift, loops) has nothing to set a status on. */}
       {candidate.ticketKey && (
         <div className="mt-2 rounded-md border border-border bg-surface2 px-2">
-          <TaskRow as="div" ticketKey={candidate.ticketKey} url={candidate.ticketUrl} showTitle={false} signals={candidate.signals} surface="command-center" />
+          <TaskRow stacked as="div" ticketKey={candidate.ticketKey} url={candidate.ticketUrl} showTitle={false} signals={candidate.signals} surface="command-center" />
         </div>
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
-        <button onClick={() => onStartFocus(candidate)} className="rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent2">
+        <button onClick={() => onStartFocus(candidate)} className="btn btn-sm btn-primary">
           Start Focus
         </button>
       </div>

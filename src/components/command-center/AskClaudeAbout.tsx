@@ -62,7 +62,7 @@ export function AskClaudeAbout({ subject, entityId, facts, evidence }: { subject
 
   return (
     <div className="mt-2">
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link text-xs">
         {open ? "Hide" : "Ask Claude about this"}
       </button>
       {open && (

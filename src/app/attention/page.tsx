@@ -68,7 +68,7 @@ export default function AttentionPage() {
 
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading
+      <SectionHeading level="page"
         title="Attention Queue"
         subtitle="Every proactive signal, deduplicated and priority-ordered — see the main dashboard for the condensed view."
         action={<FilterPanel summary={activeFilterCount > 0 ? String(activeFilterCount) : undefined}>

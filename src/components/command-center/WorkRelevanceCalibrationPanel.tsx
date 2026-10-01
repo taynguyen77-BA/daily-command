@@ -265,7 +265,7 @@ export function WorkRelevanceCalibrationPanel({
                     Current policy: <span className="text-text2">ACTIONABLE</span> for {s.daysActionable} day(s) · {s.observedItemCount} item(s) observed
                   </p>
                   <p className="mt-1 text-text2">{s.explanation}</p>
-                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">
+                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block link">
                     Review Policy
                   </Link>
                 </div>
@@ -277,7 +277,7 @@ export function WorkRelevanceCalibrationPanel({
                     Current policy: <span className="text-text2">{s.currentRelevance}</span>
                   </p>
                   <p className="mt-1 text-text2">{s.explanation}</p>
-                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block font-medium text-accent2 hover:underline">
+                  <Link href="/data-settings#jira-work-relevance-policy-panel" className="mt-2 inline-block link">
                     Review Policy
                   </Link>
                 </div>
@@ -302,7 +302,7 @@ export function WorkRelevanceCalibrationPanel({
                     <p className="mt-1 text-text2">{s.explanation}</p>
                     <button
                       onClick={() => setExpandedCandidateEvalStatus(expanded ? null : s.statusName)}
-                      className="mt-2 inline-block font-medium text-accent2 hover:underline"
+                      className="mt-2 inline-block link"
                     >
                       {expanded ? "Hide items" : "View Items"}
                     </button>
@@ -339,7 +339,7 @@ export function WorkRelevanceCalibrationPanel({
                       href={data.workItems.find((w) => w.id === s.itemId)!.sourceUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="mt-2 inline-block font-medium text-accent2 hover:underline"
+                      className="mt-2 inline-block link"
                     >
                       Review Item
                     </a>

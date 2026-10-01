@@ -99,7 +99,8 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
           {candidate.item ? (
             <>
               {candidate.action && <p className="font-display text-sm text-text">{candidate.action.title}</p>}
-              <TaskReferenceRow workItem={candidate.item} as="div" ticketScoped surface="action-plan" />
+              <p className="eyebrow mt-2">Ticket</p>
+              <TaskReferenceRow stacked workItem={candidate.item} as="div" ticketScoped surface="action-plan" />
             </>
           ) : (
             <p className="font-display text-sm text-text">{candidate.title}</p>
@@ -120,20 +121,21 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
 
       {/* Action-level controls: they update this planned Action only. The ticket's own
           Daily Command state is the "… ticket" buttons above (TaskReferenceRow ticketScoped). */}
-      <div className="mt-3 flex flex-wrap gap-2 text-xs">
-        <button onClick={() => completeActionAndTicket()} title={COMPLETE_ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-green hover:text-green">
+      <p className="eyebrow mt-3">This planned action</p>
+      <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs">
+        <button onClick={() => completeActionAndTicket()} title={COMPLETE_ACTION_TITLE} className="btn btn-sm btn-secondary">
           Complete action
         </button>
-        <button onClick={() => store.deferAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">
+        <button onClick={() => store.deferAction(ensureActionId())} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
           Defer action
         </button>
-        <button onClick={() => store.snoozeAction(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-accent2">
+        <button onClick={() => store.snoozeAction(ensureActionId())} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
           Snooze action
         </button>
-        <button onClick={() => store.markActionBlocked(ensureActionId())} title={ACTION_TITLE} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
+        <button onClick={() => store.markActionBlocked(ensureActionId())} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
           Mark action blocked
         </button>
-        <button onClick={() => setShowNote((v) => !v)} className="rounded border border-border px-2 py-1 text-text2 hover:border-accent hover:text-text">
+        <button onClick={() => setShowNote((v) => !v)} className="btn btn-sm btn-secondary">
           {showNote ? "Hide note" : "Add note"}
         </button>
       </div>

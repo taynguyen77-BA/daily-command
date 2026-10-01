@@ -44,7 +44,7 @@ function TraceRow({
             {label}: <span className="text-text">{detail}</span>
           </span>
           {why && (
-            <button onClick={why.onToggle} aria-expanded={why.open} className="ml-2 text-[11px] font-medium text-accent2 hover:underline">
+            <button onClick={why.onToggle} aria-expanded={why.open} className="ml-2 text-[11px] link">
               {why.open ? "Hide why" : "Why?"}
             </button>
           )}
@@ -102,7 +102,7 @@ export function ExecutionPathTrace({
 
   return (
     <div className="mt-2">
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link text-xs">
         {open ? "Hide execution path" : `Execution path · ${summaryParts.join(" · ")}`}
       </button>
       {open && (

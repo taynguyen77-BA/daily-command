@@ -53,7 +53,7 @@ export function MorningBrief({
         {proactive && (
           <button
             onClick={() => setCreatingUpdate(true)}
-            className="rounded-md border border-border px-2 py-1 text-xs font-medium text-text2 hover:border-accent hover:text-text"
+            className="btn btn-sm btn-secondary"
           >
             Create Today&apos;s Update
           </button>

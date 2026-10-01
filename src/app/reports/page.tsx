@@ -27,7 +27,7 @@ const FORMATS: { format: ReportFormat; label: string }[] = [
   { format: "slack", label: "Copy Slack" },
   { format: "text", label: "Copy plain text" },
 ];
-const BTN = "rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text";
+const BTN = "btn btn-sm btn-secondary";
 
 function TicketList({ tickets, showAssignee = false, empty = "None.", onReplied }: { tickets: ReportTicket[]; showAssignee?: boolean; empty?: string; onReplied?: (t: ReportTicket) => void }) {
   if (tickets.length === 0) return <p className="text-sm text-text3">{empty}</p>;
@@ -150,7 +150,7 @@ export default function ReportsPage() {
   const w = weekly;
   return (
     <div className="space-y-6 pb-16">
-      <SectionHeading title="Reports" subtitle="Standup-ready daily and weekly reports — ticket lists with Jira links, ready to paste into Slack or an update." />
+      <SectionHeading level="page" title="Reports" subtitle="Standup-ready daily and weekly reports — ticket lists with Jira links, ready to paste into Slack or an update." />
 
       <div className="flex flex-wrap items-center gap-2">
         {(["daily", "weekly"] as const).map((t) => (

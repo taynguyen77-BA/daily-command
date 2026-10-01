@@ -35,7 +35,7 @@ const RISK_STYLES: Record<RiskLevel, string> = {
 
 export function SeverityBadge({ level }: { level: Severity }) {
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${SEVERITY_STYLES[level]}`}>
+    <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${SEVERITY_STYLES[level]}`}>
       {level}
     </span>
   );
@@ -43,7 +43,7 @@ export function SeverityBadge({ level }: { level: Severity }) {
 
 export function RiskBadge({ level }: { level: RiskLevel }) {
   return (
-    <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${RISK_STYLES[level]}`}>
+    <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${RISK_STYLES[level]}`}>
       {level}
     </span>
   );
@@ -60,7 +60,7 @@ const ATTENTION_SEVERITY_STYLES: Record<AttentionSeverity, string> = {
 };
 
 export function AttentionSeverityBadge({ severity }: { severity: AttentionSeverity }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${ATTENTION_SEVERITY_STYLES[severity]}`}>{severity}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${ATTENTION_SEVERITY_STYLES[severity]}`}>{severity}</span>;
 }
 
 const DRIFT_STYLES: Record<DriftLevel, string> = {
@@ -71,7 +71,7 @@ const DRIFT_STYLES: Record<DriftLevel, string> = {
 };
 
 export function DriftBadge({ level }: { level: DriftLevel }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${DRIFT_STYLES[level]}`}>{level}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${DRIFT_STYLES[level]}`}>{level}</span>;
 }
 
 const TRAJECTORY_STYLES: Record<TrajectoryLevel, string> = {
@@ -91,7 +91,7 @@ const TRAJECTORY_LABELS: Record<TrajectoryLevel, string> = {
 };
 
 export function TrajectoryBadge({ level }: { level: TrajectoryLevel }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${TRAJECTORY_STYLES[level]}`}>{TRAJECTORY_LABELS[level]}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${TRAJECTORY_STYLES[level]}`}>{TRAJECTORY_LABELS[level]}</span>;
 }
 
 const HEAT_STYLES: Record<DependencyHeat, string> = {
@@ -102,7 +102,7 @@ const HEAT_STYLES: Record<DependencyHeat, string> = {
 };
 
 export function HeatBadge({ heat }: { heat: DependencyHeat }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${HEAT_STYLES[heat]}`}>{heat}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${HEAT_STYLES[heat]}`}>{heat}</span>;
 }
 
 const CATEGORY_LABELS: Record<AttentionCategory, string> = {
@@ -120,7 +120,7 @@ const CATEGORY_LABELS: Record<AttentionCategory, string> = {
 };
 
 export function CategoryBadge({ category }: { category: AttentionCategory }) {
-  return <span className="inline-flex items-center rounded border border-border bg-surface2 px-2 py-0.5 text-xs font-medium text-text2">{CATEGORY_LABELS[category]}</span>;
+  return <span className="inline-flex items-center whitespace-nowrap rounded-md border border-border bg-surface2 px-2 py-0.5 text-[11px] font-medium leading-4 text-text2">{CATEGORY_LABELS[category]}</span>;
 }
 
 const LIFECYCLE_STYLES: Record<AttentionLifecycle, string> = {
@@ -134,7 +134,7 @@ const LIFECYCLE_STYLES: Record<AttentionLifecycle, string> = {
 };
 
 export function LifecycleBadge({ lifecycle }: { lifecycle: AttentionLifecycle }) {
-  return <span className={`inline-flex items-center rounded border px-1.5 py-0 text-[10px] font-medium tracking-wide ${LIFECYCLE_STYLES[lifecycle]}`}>{lifecycle}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 tracking-wider ${LIFECYCLE_STYLES[lifecycle]}`}>{lifecycle}</span>;
 }
 
 // ===== V1.5 — Decision & Action Intelligence badges =====
@@ -147,7 +147,7 @@ const DECISION_EFFECTIVENESS_STYLES: Record<DecisionEffectivenessClass, string> 
 };
 
 export function DecisionEffectivenessBadge({ classification }: { classification: DecisionEffectivenessClass }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${DECISION_EFFECTIVENESS_STYLES[classification]}`}>{classification.replace(/_/g, " ")}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${DECISION_EFFECTIVENESS_STYLES[classification]}`}>{classification.replace(/_/g, " ")}</span>;
 }
 
 const LOOP_HEALTH_STYLES: Record<LoopHealth, string> = {
@@ -159,7 +159,7 @@ const LOOP_HEALTH_STYLES: Record<LoopHealth, string> = {
 };
 
 export function LoopHealthBadge({ health }: { health: LoopHealth }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${LOOP_HEALTH_STYLES[health]}`}>{health.replace(/_/g, " ")}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${LOOP_HEALTH_STYLES[health]}`}>{health.replace(/_/g, " ")}</span>;
 }
 
 const ACTION_OUTCOME_STYLES: Record<ActionOutcomeStatus, string> = {
@@ -172,7 +172,7 @@ const ACTION_OUTCOME_STYLES: Record<ActionOutcomeStatus, string> = {
 };
 
 export function ActionOutcomeBadge({ status }: { status: ActionOutcomeStatus }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${ACTION_OUTCOME_STYLES[status]}`}>{status.replace(/_/g, " ")}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${ACTION_OUTCOME_STYLES[status]}`}>{status.replace(/_/g, " ")}</span>;
 }
 
 // V2.0 §9 — decision review reminders. NOT_DUE_YET renders nothing (a decision with a
@@ -192,7 +192,7 @@ const REVIEW_STATUS_LABELS: Partial<Record<DecisionReviewStatus, string>> = {
 
 export function DecisionReviewStatusBadge({ status }: { status: DecisionReviewStatus }) {
   if (status === "NOT_DUE_YET") return null;
-  return <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] uppercase tracking-wide ${REVIEW_STATUS_STYLES[status]}`}>{REVIEW_STATUS_LABELS[status]}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase leading-3 tracking-wider ${REVIEW_STATUS_STYLES[status]}`}>{REVIEW_STATUS_LABELS[status]}</span>;
 }
 
 // ===== V1.6 — Personal Delivery Copilot badges =====
@@ -216,7 +216,7 @@ const FOCUS_CATEGORY_LABELS: Record<FocusCategory, string> = {
 };
 
 export function FocusCategoryBadge({ category }: { category: FocusCategory }) {
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${FOCUS_CATEGORY_STYLES[category]}`}>{FOCUS_CATEGORY_LABELS[category]}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] font-semibold leading-4 tracking-wide ${FOCUS_CATEGORY_STYLES[category]}`}>{FOCUS_CATEGORY_LABELS[category]}</span>;
 }
 
 // ===== V2.14 §2 — "Is this mine to act on?" relation badge =====
@@ -242,7 +242,7 @@ const RELATION_STYLES: Partial<Record<PersonalRelation, string>> = {
 
 export function RelationBadge({ relation }: { relation: PersonalRelation | undefined }) {
   if (!relation || relation === "UNKNOWN") return null;
-  return <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs tracking-wide ${RELATION_STYLES[relation]}`}>{RELATION_LABELS[relation]}</span>;
+  return <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 text-[11px] leading-4 tracking-wide ${RELATION_STYLES[relation]}`}>{RELATION_LABELS[relation]}</span>;
 }
 
 // ===== V2.17 Task 3 — MetaPill: the shared primitive behind every quiet, secondary label
@@ -275,7 +275,7 @@ export function MetaPill({
   className?: string;
 }) {
   return (
-    <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[10px] ${uppercase ? "uppercase tracking-wide" : ""} ${META_PILL_STYLES[variant]} ${className}`}>
+    <span className={`inline-flex max-w-full items-center rounded-md border px-1.5 py-0.5 text-[10px] font-semibold leading-3 ${uppercase ? "uppercase tracking-wider" : ""} ${META_PILL_STYLES[variant]} ${className}`}>
       {children}
     </span>
   );
@@ -286,9 +286,9 @@ export function MetaPill({
  *  relation filter and the two pages stay visually consistent. */
 export function Filter<T extends string>({ label, value, options, onChange, labels }: { label: string; value: T; options: T[]; onChange: (v: T) => void; labels?: Partial<Record<T, string>> }) {
   return (
-    <label className="flex items-center gap-2 text-xs text-text3">
+    <label className="flex items-center justify-between gap-3 text-xs font-medium text-text3">
       {label}
-      <select value={value} onChange={(e) => onChange(e.target.value as T)} className="rounded-md border border-border bg-surface2 px-2 py-1 text-sm text-text">
+      <select value={value} onChange={(e) => onChange(e.target.value as T)} className="min-w-[9rem] rounded-md border border-border2 bg-surface2 px-2 py-1.5 text-sm text-text hover:border-accent/60">
         {options.map((o) => (
           <option key={o} value={o}>
             {labels?.[o] ?? o}
@@ -315,15 +315,18 @@ export function FilterPanel({ summary, children }: { summary?: string; children:
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className={`rounded-md border px-3 py-1.5 text-xs font-medium ${summary ? "border-accent/40 text-accent2" : "border-border text-text2 hover:border-accent hover:text-text"}`}
+        className={`btn btn-sm ${summary ? "border-accent/50 bg-accent/10 text-accent2" : "btn-secondary"}`}
       >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+          <path d="M1.5 2.5h9M3 6h6M4.75 9.5h2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        </svg>
         Filters{summary ? ` · ${summary}` : ""}
       </button>
       {open && (
         // right-0 (not left-0): both current call sites place this trigger at the right edge
         // of its row, so opening toward the left keeps the panel on-screen instead of
         // overflowing past the viewport's right edge.
-        <div className="absolute right-0 top-full z-20 mt-1 flex min-w-[260px] flex-col gap-3 rounded-md border border-border bg-surface p-3 shadow-lg">
+        <div className="absolute right-0 top-full z-20 mt-1.5 flex min-w-[280px] flex-col gap-3 rounded-lg border border-border2 bg-surface p-4 shadow-pop">
           {children}
         </div>
       )}
@@ -333,20 +336,27 @@ export function FilterPanel({ summary, children }: { summary?: string; children:
 
 export function Panel({ children, className = "", ...rest }: { children: ReactNode; className?: string } & HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={`rounded-lg border border-border bg-surface ${className}`} {...rest}>
+    <div className={`min-w-0 rounded-xl border border-border bg-surface shadow-card ${className}`} {...rest}>
       {children}
     </div>
   );
 }
 
-export function SectionHeading({ title, subtitle, action }: { title: string; subtitle?: string; action?: ReactNode }) {
+/** Section heading. `level="page"` is the one title at the top of a page (larger, h1-weight);
+ *  the default is a section within the page — so every page reads with the same hierarchy. */
+export function SectionHeading({ title, subtitle, action, level = "section" }: { title: string; subtitle?: string; action?: ReactNode; level?: "page" | "section" }) {
+  const isPage = level === "page";
   return (
-    <div className="mb-3 flex items-center justify-between">
-      <div>
-        <h2 className="font-display text-lg text-text">{title}</h2>
-        {subtitle && <p className="text-sm text-text3">{subtitle}</p>}
+    <div className={`flex flex-wrap items-end justify-between gap-x-4 gap-y-2 ${isPage ? "mb-5" : "mb-3"}`}>
+      <div className="min-w-0">
+        {isPage ? (
+          <h2 className="font-display text-2xl font-semibold tracking-tight text-text">{title}</h2>
+        ) : (
+          <h2 className="font-display text-lg font-semibold tracking-tight text-text">{title}</h2>
+        )}
+        {subtitle && <p className={`mt-0.5 max-w-3xl text-sm ${isPage ? "text-text2" : "text-text3"}`}>{subtitle}</p>}
       </div>
-      {action}
+      {action && <div className="flex shrink-0 items-center gap-2">{action}</div>}
     </div>
   );
 }
@@ -361,8 +371,8 @@ export function EmptyState({
   onLoadDemo: () => void;
 }) {
   return (
-    <Panel className="flex flex-col items-center gap-4 px-8 py-16 text-center">
-      <div className="text-4xl">◎</div>
+    <Panel className="flex flex-col items-center gap-4 px-6 py-16 text-center sm:px-8">
+      <div aria-hidden="true" className="grid h-14 w-14 place-items-center rounded-2xl bg-accent/10 text-2xl text-accent2 ring-1 ring-inset ring-accent/25">◎</div>
       <div>
         <h3 className="font-display text-lg text-text">{title}</h3>
         <p className="mt-1 max-w-md text-sm text-text3">{description}</p>
@@ -370,19 +380,19 @@ export function EmptyState({
       <div className="flex flex-wrap justify-center gap-2">
         <button
           onClick={onLoadDemo}
-          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent2"
+          className="btn btn-primary"
         >
           Load Demo Data
         </button>
         <a
           href="/data-settings"
-          className="rounded-md border border-border px-4 py-2 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+          className="btn btn-secondary"
         >
           Paste Data
         </a>
         <a
           href="/data-settings"
-          className="rounded-md border border-border px-4 py-2 text-sm font-medium text-text2 hover:border-accent hover:text-text"
+          className="btn btn-secondary"
         >
           Import JSON
         </a>
@@ -409,7 +419,7 @@ export function WhyDrawer({
   const [open, setOpen] = useState(false);
   return (
     <div className="mt-2">
-      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="text-xs font-medium text-accent2 hover:underline">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="link text-xs">
         {open ? "Hide" : "Why am I seeing this?"}
       </button>
       {open && (
@@ -512,7 +522,7 @@ export function TrustLabel({ kind }: { kind: "calculated" | "ai-assessment" | "a
     unknown: "Unknown",
   };
   return (
-    <span className={`inline-flex items-center rounded border px-1.5 py-0 text-[10px] normal-case tracking-normal ${styles[kind]}`}>
+    <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium normal-case leading-3 tracking-normal ${styles[kind]}`}>
       {labels[kind]}
     </span>
   );
@@ -547,7 +557,7 @@ export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FA
     VALIDATION_FAILED: "Response invalid",
   };
   return (
-    <span className={`inline-flex items-center rounded border px-1.5 py-0 text-[10px] normal-case tracking-normal ${styles[state]}`}>
+    <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium normal-case leading-3 tracking-normal ${styles[state]}`}>
       {labels[state]}
     </span>
   );

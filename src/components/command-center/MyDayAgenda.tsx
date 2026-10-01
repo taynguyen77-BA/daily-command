@@ -91,7 +91,7 @@ function PlanRow({
     return (
       <Panel className="p-3 text-sm text-text3">
         {item.sourceType}:{item.sourceId} — no longer active (resolved elsewhere).
-        <button onClick={onRemove} className="ml-2 text-xs font-medium text-accent2 hover:underline">
+        <button onClick={onRemove} className="ml-2 link text-xs">
           Remove
         </button>
       </Panel>
@@ -125,10 +125,10 @@ function PlanRow({
         </div>
         <div className="flex flex-col items-end gap-1 text-xs">
           <div className="flex gap-1" role="group" aria-label="Reorder">
-            <button onClick={() => onMove(-1)} className="rounded border border-border px-1.5 py-0.5 text-text3 hover:text-text" aria-label="Move up in today's order">
+            <button onClick={() => onMove(-1)} className="btn btn-sm btn-ghost" aria-label="Move up in today's order">
               ↑
             </button>
-            <button onClick={() => onMove(1)} className="rounded border border-border px-1.5 py-0.5 text-text3 hover:text-text" aria-label="Move down in today's order">
+            <button onClick={() => onMove(1)} className="btn btn-sm btn-ghost" aria-label="Move down in today's order">
               ↓
             </button>
           </div>
@@ -141,17 +141,17 @@ function PlanRow({
       </div>
       {status !== "completed" && status !== "skipped" && (
         <div className="mt-2 flex flex-wrap gap-2 border-t border-border pt-2 text-xs">
-          <button onClick={onStartFocus} className="rounded bg-accent px-2 py-1 font-medium text-white hover:bg-accent2">
+          <button onClick={onStartFocus} className="btn btn-sm btn-primary">
             Start Focus
           </button>
           {/* A ticket row defers through its TaskRow (Defer… with a date); this is the
               ticketless items' Defer — same word, same meaning (not today). */}
           {!item.ticketKey && (
-            <button onClick={onDefer} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">
+            <button onClick={onDefer} className="btn btn-sm btn-secondary">
               Defer
             </button>
           )}
-          <button onClick={onRemove} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
+          <button onClick={onRemove} className="btn btn-sm btn-secondary">
             Remove
           </button>
         </div>
@@ -270,7 +270,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
           </div>
           <p className="text-sm text-text2">{newCritical.length} new critical item(s) detected.</p>
           {!reviewingUpdate ? (
-            <button onClick={() => setReviewingUpdate(true)} className="mt-2 rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text">
+            <button onClick={() => setReviewingUpdate(true)} className="mt-2 btn btn-sm btn-secondary">
               Review Update
             </button>
           ) : (
@@ -290,7 +290,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
                         ticketKey: c.ticketKey,
                       })
                     }
-                    className="rounded border border-border px-2 py-0.5 text-text2 hover:border-accent hover:text-text"
+                    className="btn btn-sm btn-secondary"
                   >
                     Add to Today
                   </button>
@@ -314,7 +314,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
                 <span>
                   {s.candidate.title} — {s.reason}
                 </span>
-                <button onClick={() => store.carryForwardPersonalPlanItem(s.planItem, today)} className="rounded border border-border px-2 py-0.5 text-text2 hover:border-accent hover:text-text">
+                <button onClick={() => store.carryForwardPersonalPlanItem(s.planItem, today)} className="btn btn-sm btn-secondary">
                   Add to Today
                 </button>
               </li>
@@ -336,10 +336,10 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
                 <li key={r.planItemId} className="rounded-md border border-accent/30 bg-accent/5 p-2 text-xs text-text2">
                   <p>{r.reason}</p>
                   <div className="mt-1 flex gap-2">
-                    <button onClick={() => store.removePersonalPlanItem(r.planItemId)} className="rounded border border-border px-2 py-0.5 text-text2 hover:border-red hover:text-red">
+                    <button onClick={() => store.removePersonalPlanItem(r.planItemId)} className="btn btn-sm btn-secondary">
                       Remove
                     </button>
-                    <button onClick={() => store.unpinPersonalPlanItem(r.planItemId)} className="rounded border border-border px-2 py-0.5 text-text2 hover:border-accent hover:text-text">
+                    <button onClick={() => store.unpinPersonalPlanItem(r.planItemId)} className="btn btn-sm btn-secondary">
                       Keep Anyway
                     </button>
                   </div>
@@ -365,7 +365,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
               </ul>
               <button
                 onClick={() => removeReasons.forEach((r) => store.removePersonalPlanItem(r.planItemId))}
-                className="mt-2 rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+                className="mt-2 btn btn-sm btn-secondary"
               >
                 Clean Up ({removeReasons.length})
               </button>
@@ -389,7 +389,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
                 ))}
               </ol>
               <div className="mt-3 flex gap-2">
-                <button onClick={() => store.acceptSuggestedPlan(suggested, today)} className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent2">
+                <button onClick={() => store.acceptSuggestedPlan(suggested, today)} className="btn btn-primary">
                   Accept Plan
                 </button>
               </div>

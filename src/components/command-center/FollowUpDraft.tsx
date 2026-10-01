@@ -19,7 +19,7 @@ export function FollowUpDraft({ rows, label = "Draft follow-up" }: { rows: Needs
           setOpen((v) => !v);
           setCopied(false);
         }}
-        className="rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+        className="btn btn-sm btn-secondary"
       >
         {open ? "Hide follow-up" : label}
       </button>
@@ -31,7 +31,7 @@ export function FollowUpDraft({ rows, label = "Draft follow-up" }: { rows: Needs
               await navigator.clipboard.writeText(text);
               setCopied(true);
             }}
-            className="mt-2 rounded border border-border px-2 py-1 text-xs text-text2 hover:border-accent hover:text-text"
+            className="mt-2 btn btn-sm btn-secondary"
           >
             {copied ? "Copied ✓" : "Copy"}
           </button>
