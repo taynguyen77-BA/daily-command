@@ -19,8 +19,7 @@ import { ReleaseHealthPanel } from "@/components/command-center/ReleaseHealthPan
 import { FilterBar } from "@/components/command-center/FilterBar";
 import { CommandBar } from "@/components/command-center/CommandBar";
 import { ControlTower } from "@/components/command-center/ControlTower";
-import { YourDeliveryFocus } from "@/components/command-center/YourDeliveryFocus";
-import { MyAssignedWork } from "@/components/command-center/MyAssignedWork";
+import { MyWorkSummary } from "@/components/command-center/MyWorkSummary";
 import { RecentlyMentioned } from "@/components/command-center/RecentlyMentioned";
 import { WaitingFor } from "@/components/command-center/WaitingFor";
 import { AttentionQueuePanel } from "@/components/command-center/AttentionQueuePanel";
@@ -28,6 +27,7 @@ import { ClientAttentionMap } from "@/components/command-center/ClientAttentionM
 import { BeforeYouTrustThisData } from "@/components/command-center/BeforeYouTrustThisData";
 import { SetupHealthBanner } from "@/components/command-center/SetupHealthBanner";
 import { itemForScore } from "@/lib/command-center/selectors";
+import { ticketExclusionSets } from "@/lib/command-center/ticket-work-state";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
 import { computeFreshness } from "@/lib/command-center/freshness";
 import { computeDataHealth } from "@/lib/command-center/data-health";
@@ -112,7 +112,7 @@ export default function CommandCenterPage() {
                 // include a project outside the current Focus Project Scope), so its own
                 // completion-id set is resolved against that same unscoped population rather
                 // than reusing the hook's scoped one.
-                new Set(state.data.workItems.filter((w) => Object.prototype.hasOwnProperty.call(state.dailyCommandCompletions ?? {}, w.key)).map((w) => w.id))
+                ticketExclusionSets(state.ticketWorkStates, state.data.workItems, today).doneIds
               )
             )}
             label={state.jiraProjectScope.mode === "FOCUSED" ? "Global" : undefined}
@@ -136,13 +136,11 @@ export default function CommandCenterPage() {
         />
       )}
 
-      {/* V1.6 §43 — the personal layer sits on top of project intelligence, never hiding it. */}
-      {personalFocus && <YourDeliveryFocus personalFocus={personalFocus} compact />}
-
-      {/* V2.19 — WHAT AM I RESPONSIBLE FOR? / WHAT RECENTLY INVOLVED ME? Both distinct from
-          Your Delivery Focus above (curated) — see the hardening spec's own IA guidance. */}
+      {/* V1.6 §43 — the personal layer sits on top of project intelligence, never hiding it.
+          Your Delivery Focus and My Assigned Work now live in My Work; this is its compact
+          summary (counts + top items, same TaskRow as everywhere). */}
       <div className="grid gap-6 md:grid-cols-2">
-        <MyAssignedWork />
+        <MyWorkSummary />
         <RecentlyMentioned />
       </div>
 

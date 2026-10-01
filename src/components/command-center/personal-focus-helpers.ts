@@ -9,7 +9,9 @@ import type { PersonalFocusCandidate, PersonalPlanItem } from "@/lib/command-cen
  *  [START FOCUS] work directly from Top 3 / the 30-minute plan without first requiring the
  *  user to build and accept a full daily plan (§16 is the primary interaction). */
 export function ensurePlanItemId(store: CommandCenterStore, personalPlan: PersonalPlanItem[], candidate: PersonalFocusCandidate, today: string, rankHint: number): string {
-  const existing = personalPlan.find((p) => p.sourceType === candidate.sourceType && p.sourceId === candidate.sourceId && p.plannedDate === today && p.status !== "completed" && p.status !== "skipped");
+  const existing = personalPlan.find(
+    (p) => ((p.sourceType === candidate.sourceType && p.sourceId === candidate.sourceId) || (!!candidate.ticketKey && p.ticketKey === candidate.ticketKey)) && p.plannedDate === today && p.status !== "completed" && p.status !== "skipped"
+  );
   if (existing) return existing.id;
   return store.addPersonalPlanItem({
     sourceType: candidate.sourceType,
@@ -18,6 +20,7 @@ export function ensurePlanItemId(store: CommandCenterStore, personalPlan: Person
     plannedDate: today,
     priority: rankHint,
     snapshot: { category: candidate.category, projectId: candidate.projectId, ownershipExplicit: candidate.ownershipExplicit },
+    ticketKey: candidate.ticketKey,
   });
 }
 

@@ -37,10 +37,11 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Today",
     links: [
-      // V2.26 — the morning check over new / skipped / blocked / completed tickets.
-      { href: "/daily-review", label: "Daily Review" },
+      // One entry for every ticket that is mine — Today / New / In progress / Blocked /
+      // Skipped-Deferred / Done. Absorbs Daily Review (/daily-review → New) and My Day
+      // (/focus → Today); both old routes still work and redirect there.
+      { href: "/my-work", label: "My Work" },
       { href: "/", label: "Command Center" },
-      { href: "/focus", label: "My Day" },
     ],
   },
   {
@@ -73,21 +74,18 @@ export const NAV_GROUPS: NavGroup[] = [
 ];
 const LINKS: NavLink[] = NAV_GROUPS.flatMap((g) => g.links);
 
-/** C2 — Daily Review's badge: unreviewed New rows + re-checks due today. Recomputed only when
- *  the store state object changes. */
-function useDailyReviewBadge(): number {
+/** My Work's badge: unreviewed New + re-checks due today (store.computeMyWorkBadge — the same
+ *  partition the page shows). Recomputed only when the store state object changes. */
+function useMyWorkBadge(): number {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
-  return useMemo(() => {
-    if (!state.loaded) return 0;
-    const review = commandCenterStore.computeDailyReview();
-    return review.newRows.length + review.dueForRecheck.length;
-  }, [state]);
+  return useMemo(() => (state.loaded ? commandCenterStore.computeMyWorkBadge() : 0), [state]);
 }
 
 /** D1 — Morning Brief one-click: the first time the app is opened on a day (feature on), it
- *  syncs Jira (when connected) and lands on Daily Review, whose header then summarizes what
+ *  syncs Jira (when connected) and lands on My Work → New, whose header then summarizes what
  *  happened since yesterday 18:00. Runs once per day, only when entered at "/". */
 let morningBriefRedirected = false;
+const MORNING_BRIEF_LANDING = "/my-work?view=new";
 function useMorningBrief(pathname: string | null): boolean {
   const router = useRouter();
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
@@ -102,7 +100,7 @@ function useMorningBrief(pathname: string | null): boolean {
     morningBriefRedirected = true; // the landing-page redirect below must not override this
     commandCenterStore.recordMorningBriefRun(today);
     if (state.dataSource === "jira" && state.jiraSync.lastSyncStatus !== "never") void commandCenterStore.syncJira({ trigger: "auto" });
-    router.replace("/daily-review");
+    router.replace(MORNING_BRIEF_LANDING);
   }, [state, pathname, router]);
   return active;
 }
@@ -225,9 +223,9 @@ export function Nav() {
     () => commandCenterStore.getServerSnapshot().showAdvancedSettings
   );
   const links = LINKS.filter((link) => !link.advanced || showAdvanced);
-  const reviewBadge = useDailyReviewBadge();
+  const myWorkBadge = useMyWorkBadge();
   const morningBriefActive = useMorningBrief(pathname);
-  useLandingRedirect(morningBriefActive ? "/daily-review" : pathname);
+  useLandingRedirect(morningBriefActive ? "/my-work" : pathname);
   const activeLink = links.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? links[0];
 
   // V2.15 §3 point 1 — Nav is mounted exactly once, app-wide, by the root layout (persists
@@ -303,7 +301,7 @@ export function Nav() {
               <span className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-text3 md:px-1 md:pt-0">{group.label}</span>
               {groupLinks.map((link) => {
                 const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
-                const badge = link.href === "/daily-review" ? reviewBadge : 0;
+                const badge = link.href === "/my-work" ? myWorkBadge : 0;
                 return (
                   <Link
                     key={link.href}

@@ -5,13 +5,13 @@
 // construction (store.ts), so at most one of them can match; the order below only matters
 // for corrupted data, where completion wins (the most conservative "don't nag me" reading).
 
-import type { CommandCenterData, DailyCommandBlock, DailyCommandCompletion, DailyCommandSkip, DeliveryLoop, Dependency, WorkItem } from "./types";
+import type { CommandCenterData, DailyCommandBlock, DailyCommandCompletion, DailyCommandSkip, DeliveryLoop, Dependency, TicketWorkState, WorkItem } from "./types";
 import { formatRelativeDateTime } from "./relative-time";
 import { businessDaysBetween, toLocalIso } from "./date-utils";
 import { resolveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
-import { applyDailyCommandChange, type DailyCommandState } from "./execution-state-merge";
+import { applyTicketStatus } from "./ticket-work-state";
 
-export type TaskExecutionKind = "active" | "completed" | "skipped" | "blocked" | "done-in-jira";
+export type TaskExecutionKind = "active" | "in-progress" | "deferred" | "completed" | "skipped" | "blocked" | "done-in-jira";
 
 export interface TaskExecutionState {
   kind: TaskExecutionKind;
@@ -19,7 +19,8 @@ export interface TaskExecutionState {
   at?: string;
   by?: string;
   reason?: string;
-  /** A4 — skipped/blocked: the scheduled re-check day (local YYYY-MM-DD). */
+  /** A4 — skipped/blocked: the scheduled re-check day (local YYYY-MM-DD). Deferred: the day it
+   *  comes back. */
   revisitOn?: string;
   /** A4 — completed: "jira" when created because Jira closed a skipped/blocked ticket. */
   source?: "daily-command" | "jira";
@@ -55,8 +56,44 @@ export function resolveTaskExecutionState(ticketKey: string, maps: DailyCommandM
   return { kind: "active" };
 }
 
+/** The canonical resolver: a ticket's execution state from TicketWorkState (the single source of
+ *  truth). Same `finishedInJira` rule as resolveTaskExecutionState: it only applies when the
+ *  user has no record of their own (TODO), since that record is what the user can act on. */
+export function resolveTicketExecutionState(ticketKey: string, states: Record<string, TicketWorkState> | undefined, finishedInJira = false): TaskExecutionState {
+  const r = states?.[ticketKey];
+  const status = r?.status ?? "TODO";
+  const base = { ...(r ? { at: r.updatedAt } : {}), ...(r?.updatedBy ? { by: r.updatedBy } : {}), ...(r?.reason ? { reason: r.reason } : {}), ...(r?.until ? { revisitOn: r.until } : {}) };
+  switch (status) {
+    case "DONE": {
+      if (r?.source !== "jira") return { kind: "completed", ...(r ? { at: r.updatedAt } : {}), ...(r?.updatedBy ? { by: r.updatedBy } : {}) };
+      const last = r.history[r.history.length - 1];
+      const paused = last && (last.from === "BLOCKED" || last.from === "SKIPPED" || last.from === "DEFERRED") ? last.from : undefined;
+      const entered = paused ? [...r.history.slice(0, -1)].reverse().find((h) => h.to === paused) : undefined;
+      return {
+        kind: "completed",
+        at: r.updatedAt,
+        source: "jira",
+        ...(r.closedInJiraOn ? { closedInJiraOn: r.closedInJiraOn } : {}),
+        ...(paused ? { previousState: { kind: paused === "BLOCKED" ? "blocked" : "skipped", at: entered?.at ?? r.updatedAt, ...(entered?.reason ? { reason: entered.reason } : {}) } } : {}),
+      };
+    }
+    case "TODO":
+      return finishedInJira ? { kind: "done-in-jira" } : { kind: "active" };
+    case "IN_PROGRESS":
+      return { kind: "in-progress", ...base };
+    case "BLOCKED":
+      return { kind: "blocked", ...base };
+    case "SKIPPED":
+      return { kind: "skipped", ...base };
+    case "DEFERRED":
+      return { kind: "deferred", ...base };
+  }
+}
+
 const KIND_LABEL: Record<TaskExecutionKind, string> = {
   active: "Active",
+  "in-progress": "In progress",
+  deferred: "Deferred",
   completed: "Completed",
   skipped: "Skipped",
   blocked: "Blocked",
@@ -101,6 +138,13 @@ export function formatExecutionRecord(state: TaskExecutionState, now: Date = new
     const prevReason = prev.reason?.trim();
     return `${closed} — was ${KIND_LABEL[prev.kind]}${prevReason ? `: ${prevReason}` : ""}`;
   }
+  if (state.kind === "in-progress") return when ? `In progress since ${when}` : "In progress";
+  if (state.kind === "deferred") {
+    const reason = state.reason?.trim();
+    const parts = [`Deferred${state.revisitOn ? ` until ${shortDate(state.revisitOn)}` : ""}${reason ? ` — ${reason}` : ""}`];
+    if (when) parts.push(`since ${when}`);
+    return parts.join(" · ");
+  }
   if (state.kind === "skipped" || state.kind === "blocked") {
     const reason = state.reason?.trim();
     const age = formatPausedAge(state.at, now);
@@ -120,38 +164,30 @@ export function isWorkItemFinishedInJira(item: Pick<WorkItem, "status" | "source
   return !!index && resolveWorkRelevance(item, index) === "COMPLETED";
 }
 
-/** A4 — a skipped/blocked ticket that Jira has since closed moves to Completed history on its
- *  own: the skip/block is removed (tombstoned) and a completion is recorded with source
- *  "jira", the day it was detected, and the skip/block it replaced (so nothing the user
- *  recorded is lost). Pure; run by store.ts after every successful Jira sync. */
+/** A4 — a skipped/blocked/deferred ticket that Jira has since closed moves to Done on its own:
+ *  a DONE transition with source "jira" and the day it was detected; the skip/block it
+ *  replaced stays in the ticket's history (so "Closed in Jira on <date> — was Blocked: <reason>"
+ *  still renders). Never the reverse: a Jira reopen does not un-complete it. Pure; run by
+ *  store.ts after every successful Jira sync, through the same applyTicketStatus every manual
+ *  change uses. */
 export function closePausedTicketsFinishedInJira(
-  state: DailyCommandState,
+  states: Record<string, TicketWorkState>,
   workItems: Pick<WorkItem, "key" | "status" | "sourceType" | "projectId" | "jiraStatusName">[],
   index: WorkRelevanceIndex | undefined,
   nowIso: string,
   todayIso: string
-): { state: DailyCommandState; closedKeys: string[] } {
+): { states: Record<string, TicketWorkState>; closedKeys: string[] } {
   const byKey = new Map(workItems.map((w) => [w.key, w]));
-  let next = state;
+  let next = states;
   const closedKeys: string[] = [];
-  const paused: { key: string; kind: "skipped" | "blocked"; at: string; reason?: string }[] = [
-    ...Object.values(state.dailyCommandSkips).map((s) => ({ key: s.ticketKey, kind: "skipped" as const, at: s.skippedAt, reason: s.reason })),
-    ...Object.values(state.dailyCommandBlocks).map((b) => ({ key: b.ticketKey, kind: "blocked" as const, at: b.blockedAt, reason: b.reason })),
-  ];
-  for (const p of paused) {
-    const item = byKey.get(p.key);
+  for (const r of Object.values(states)) {
+    if (r.status !== "SKIPPED" && r.status !== "BLOCKED" && r.status !== "DEFERRED") continue;
+    const item = byKey.get(r.ticketKey);
     if (!item || !isWorkItemFinishedInJira(item, index)) continue;
-    const completion: DailyCommandCompletion = {
-      ticketKey: p.key,
-      completedAt: nowIso,
-      source: "jira",
-      closedInJiraOn: todayIso,
-      previousState: { kind: p.kind, at: p.at, ...(p.reason ? { reason: p.reason } : {}) },
-    };
-    next = applyDailyCommandChange(next, p.key, { kind: "completion", record: completion }, nowIso);
-    closedKeys.push(p.key);
+    next = applyTicketStatus(next, r.ticketKey, "DONE", { surface: "jira-sync", source: "jira", closedInJiraOn: todayIso }, nowIso).states;
+    closedKeys.push(r.ticketKey);
   }
-  return { state: next, closedKeys };
+  return { states: next, closedKeys };
 }
 
 /** V2.26 — resolve explicit work-item foreign keys (Risk.sourceWorkItemIds,

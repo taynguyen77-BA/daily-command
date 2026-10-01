@@ -22,7 +22,7 @@ import { buildDailySnapshot, buildSnapshotMetrics, compareSnapshots, dailyCanoni
 import { detectDecisionConflictCandidates } from "../src/lib/command-center/decision-conflicts";
 import { detectRecurringPatterns } from "../src/lib/command-center/pattern-detection";
 import { buildWeeklyReviewFacts } from "../src/lib/command-center/weekly-review";
-import { parseStoredState, commandCenterStore, getTodayIso, capMentionEvents, type StoreState } from "../src/lib/command-center/store";
+import { parseStoredState, commandCenterStore, getTodayIso, capMentionEvents, ticketStateFromLegacy, type StoreState } from "../src/lib/command-center/store";
 import type { Decision, DailySnapshot, SnapshotMetrics } from "../src/lib/command-center/types";
 
 // V1.3 — Live Project Intelligence
@@ -266,6 +266,14 @@ import { computeStaleAssignedTickets } from "../src/lib/command-center/personal-
 // V2.25 Task 4 — Setup Health checklist
 import { computeSetupHealthRows } from "../src/components/command-center/SetupHealthBanner";
 import type { SlackNotifyStatus } from "../src/lib/command-center/notify-client";
+// TicketWorkState — one canonical per-ticket status
+import { applyTicketStatus, getTicketView, mergeTicketWorkStates, migrateLegacyIntoTicketStates, ticketBucket, ticketExclusionSets, ticketStateMaps, TICKET_WORK_STATUSES, type TicketBucket } from "../src/lib/command-center/ticket-work-state";
+import { resolveTicketExecutionState } from "../src/lib/command-center/task-execution";
+import { buildMyWork, myWorkViewOf, type MyWorkView } from "../src/lib/command-center/my-work";
+import { dedupeCandidatesByTicket } from "../src/lib/command-center/personal-focus";
+import { effectivePlanStatus } from "../src/components/command-center/MyDayAgenda";
+import { selectDailyCommandMaps } from "../src/lib/command-center/store";
+import type { TicketStatusSurface, TicketWorkState, TicketWorkStatus } from "../src/lib/command-center/types";
 
 let failures = 0;
 let skipped = 0;
@@ -5814,7 +5822,27 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
 // computeDataHealth) or a small, pure composition of them (detectExplicitProjectMention,
 // buildProjectOverrideView, computeProjectAttentionMap).
 
+// A hand-built StoreState never went through parseStoredState, so the canonical
+// ticketWorkStates is migrated from whatever legacy Daily Command maps the test supplied —
+// exactly what loading a persisted pre-TicketWorkState blob does.
 function makeStoreState(overrides: Partial<StoreState> = {}): StoreState {
+  const base = makeRawStoreState(overrides);
+  return {
+    ...base,
+    ...ticketStateFromLegacy(
+      base.ticketWorkStates ?? {},
+      {
+        dailyCommandCompletions: base.dailyCommandCompletions ?? {},
+        dailyCommandSkips: base.dailyCommandSkips ?? {},
+        dailyCommandBlocks: base.dailyCommandBlocks ?? {},
+        dailyCommandTombstones: base.dailyCommandTombstones ?? { completions: {}, skips: {}, blocks: {} },
+      },
+      base.personalPlan ?? [],
+      undefined
+    ),
+  };
+}
+function makeRawStoreState(overrides: Partial<StoreState> = {}): StoreState {
   return {
     schemaVersion: DATA_SCHEMA_VERSION,
     data: emptyData(),
@@ -6638,11 +6666,11 @@ function globalPolicy(entries: Record<string, WorkRelevance>): Record<string, Wo
   // Relevance classification: someone is waiting on a reply, independent of the ticket's
   // delivery state. All three tickets (COMPLETED/OBSERVE/ACTIONABLE) now classify identically,
   // from scoring alone — the gate no longer factors in at all for this category.
-  const mentionCompletedCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnCompleted.id);
+  const mentionCompletedCandidate = mdcFocus.allCandidates!.find((c) => c.sourceId === mentionOnCompleted.id);
   ok("V2.17 My Day gate bypass", mentionCompletedCandidate !== undefined && mentionCompletedCandidate.category === "DO_TODAY", "a MENTION item on an already-COMPLETED ticket still produces a real candidate — the V2.13 'option 3b' gate no longer applies to MENTION");
-  const mentionObserveCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnObserve.id);
+  const mentionObserveCandidate = mdcFocus.allCandidates!.find((c) => c.sourceId === mentionOnObserve.id);
   ok("V2.17 My Day gate bypass", mentionObserveCandidate !== undefined && mentionObserveCandidate.category === "DO_TODAY", "a MENTION item on an OBSERVE-status ticket is likewise unaffected by the gate — not even demoted to WATCH, since the gate never runs for MENTION at all");
-  const mentionActionableCandidate = mdcFocus.candidates.find((c) => c.sourceId === mentionOnActionable.id);
+  const mentionActionableCandidate = mdcFocus.allCandidates!.find((c) => c.sourceId === mentionOnActionable.id);
   ok("V2.17 My Day gate bypass", mentionActionableCandidate !== undefined && mentionActionableCandidate.category === "DO_TODAY", "a MENTION item on an ACTIONABLE-status ticket is unaffected too — all three reach the identical natural DO_TODAY category from scoring alone, proving ticket status no longer factors in for this category");
 
   // No index at all preserves pre-V2.13 behavior — never a silent change for an unmigrated caller.
@@ -9207,12 +9235,15 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 {
   const repoRoot = path.resolve(process.cwd());
   const pageSrc2 = fs.readFileSync(path.join(repoRoot, "src/app/page.tsx"), "utf8");
-  ok("V2.19 UI wiring", /<MyAssignedWork \/>/.test(pageSrc2), "My Assigned Work is rendered on the main Command Center page");
+  // My Assigned Work was absorbed into My Work (every assigned ticket is in one of its views);
+  // Command Center carries My Work's compact summary instead.
+  ok("V2.19 UI wiring", /<MyWorkSummary \/>/.test(pageSrc2), "My Work's summary (which absorbs My Assigned Work) is rendered on the main Command Center page");
   ok("V2.19 UI wiring", /<RecentlyMentioned \/>/.test(pageSrc2), "Recently Mentioned is rendered on the main Command Center page");
 
-  const myAssignedSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/MyAssignedWork.tsx"), "utf8");
-  ok("V2.19 UI wiring", /No active Jira work is currently assigned to you/.test(myAssignedSrc), "My Assigned Work has the documented empty state, not a silent 'nothing happened' implication");
-  ok("V2.19 UI wiring", /getActiveAssignedWorkItems/.test(myAssignedSrc) && /getCompletedAssignedWorkItems/.test(myAssignedSrc), "the component reuses the shared selector, not a second inline ownership/completion check");
+  const myWorkLibSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/my-work.ts"), "utf8");
+  const myWorkPageSrc = fs.readFileSync(path.join(repoRoot, "src/app/my-work/page.tsx"), "utf8");
+  ok("V2.19 UI wiring", /Nothing here\./.test(myWorkPageSrc) && /Your identity is not set/.test(myWorkPageSrc), "My Work has documented empty / no-identity states, not a silent 'nothing happened' implication");
+  ok("V2.19 UI wiring", /getAssignedWorkItems/.test(myWorkLibSrc) && /isWorkItemDoneOrExcluded/.test(myWorkLibSrc) && /getTicketView/.test(myWorkLibSrc), "My Work reuses the shared assigned-work selector and the one ticket selector, not a second inline ownership/completion check");
 
   const recentMentionedSrc = fs.readFileSync(path.join(repoRoot, "src/components/command-center/RecentlyMentioned.tsx"), "utf8");
   ok("V2.19 UI wiring", /No Jira mentions in the last 24 hours/.test(recentMentionedSrc), "Recently Mentioned has the documented empty state");
@@ -9355,9 +9386,14 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   // a ticketKey is never simultaneously Completed and Skipped, in either direction.
   commandCenterStore.completeTicketInDailyCommand("JPMC-2302");
   ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "sanity check — JPMC-2302 is completed");
+  // TicketWorkState transition table: DONE only goes back to TODO (explicit Reopen), so skipping
+  // a completed ticket is refused — it stays Completed and is never also Skipped.
   commandCenterStore.skipTicketInDailyCommand("JPMC-2302", "Not my action");
-  ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2302"], "skipping a completed ticket records the skip...");
-  ok("V2.23 mutual exclusion", !commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "...and clears the prior completion — never simultaneously Completed and Skipped (§11)");
+  ok("V2.23 mutual exclusion", !commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2302"], "skipping a completed ticket is refused (DONE → SKIPPED is not in the transition table)...");
+  ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "...so it stays Completed — never simultaneously Completed and Skipped (§11)");
+  commandCenterStore.reopenTicketInDailyCommand("JPMC-2302");
+  commandCenterStore.skipTicketInDailyCommand("JPMC-2302", "Not my action");
+  ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandSkips["JPMC-2302"] && !commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "after an explicit Reopen it can be skipped, and the completion is gone");
 
   commandCenterStore.completeTicketInDailyCommand("JPMC-2302"); // the one defined SKIPPED -> COMPLETED transition (§11)
   ok("V2.23 mutual exclusion", !!commandCenterStore.getSnapshot().dailyCommandCompletions["JPMC-2302"], "completing a skipped ticket is the defined SKIPPED -> COMPLETED transition...");
@@ -9582,22 +9618,22 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
 // stranded as dead code only this test file exercises. -----
 {
   const repoRoot230 = path.resolve(process.cwd());
-  const myAssignedSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/MyAssignedWork.tsx"), "utf8");
-  ok("V2.23 UI wiring", /getSkippedAssignedWorkItems/.test(myAssignedSrc230), "My Assigned Work reuses the shared skipped-bucket selector, not a second inline check");
+  const myWorkSrc230 = fs.readFileSync(path.join(repoRoot230, "src/lib/command-center/my-work.ts"), "utf8");
+  ok("V2.23 UI wiring", /ticketBucket|view\.bucket === "SKIPPED_DEFERRED"/.test(myWorkSrc230), "My Work's Skipped/Deferred view comes from the shared ticket bucket, not a second inline check");
   // V2.26 — the Skip/Reactivate wiring moved into the shared TaskReferenceRow, which My
   // Assigned Work now renders for every row.
   const taskRowSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/TaskReferenceRow.tsx"), "utf8");
-  ok("V2.23 UI wiring", /<TaskReferenceRow\b/.test(myAssignedSrc230) && /skipTicketInDailyCommand/.test(taskRowSrc230) && /reactivateSkippedTicket/.test(taskRowSrc230), "My Assigned Work wires Skip and Reactivate to the real store actions (via the shared TaskReferenceRow)");
+  ok("V2.23 UI wiring", /<TaskRow\b/.test(fs.readFileSync(path.join(repoRoot230, "src/app/my-work/page.tsx"), "utf8")) && /skipTicketInDailyCommand/.test(taskRowSrc230) && /reactivateSkippedTicket/.test(taskRowSrc230), "My Work wires Skip and Reactivate to the real store actions (via the shared TaskRow)");
 
   const priorityCardSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/PriorityCard.tsx"), "utf8");
-  ok("V2.23 UI wiring", /onSkip/.test(priorityCardSrc230) && /onReactivate/.test(priorityCardSrc230), "PriorityCard exposes Skip/Reactivate controls");
+  ok("V2.23 UI wiring", /<TaskRow\b/.test(priorityCardSrc230), "PriorityCard exposes Skip/Reactivate (and Block/Done) through the shared TaskRow");
 
   const prioritiesPageSrc230 = fs.readFileSync(path.join(repoRoot230, "src/app/priorities/page.tsx"), "utf8");
   ok("V2.23 UI wiring", /"SKIPPED"/.test(prioritiesPageSrc230), "Priorities has an explicit Skipped filter tab — the §6 discoverability entry point");
-  ok("V2.23 UI wiring", /skipTicketInDailyCommand/.test(prioritiesPageSrc230) && /reactivateSkippedTicket/.test(prioritiesPageSrc230), "Priorities wires Skip/Reactivate to the real store actions");
+  ok("V2.23 UI wiring", /surface="priorities"/.test(prioritiesPageSrc230), "Priorities wires Skip/Reactivate to the real store actions (TaskRow, recorded as the priorities surface)");
 
   const personalFocusCardSrc230 = fs.readFileSync(path.join(repoRoot230, "src/components/command-center/PersonalFocusCard.tsx"), "utf8");
-  ok("V2.23 UI wiring", /onSkip/.test(personalFocusCardSrc230), "My Day / Your Delivery Focus's card exposes a Skip control");
+  ok("V2.23 UI wiring", /<TaskRow\b/.test(personalFocusCardSrc230), "My Day / Your Delivery Focus's card exposes a Skip control (through the shared TaskRow)");
 
   const pageSrc230 = fs.readFileSync(path.join(repoRoot230, "src/app/page.tsx"), "utf8");
   ok("V2.23 UI wiring", /dailyCommandPausedWorkItemIds/.test(pageSrc230), "the main dashboard's Top Priorities preview also excludes skipped items (V2.26: via the skipped ∪ blocked 'paused' set), not just the full Priorities page");
@@ -10308,13 +10344,13 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   const ticket = v226JiraItem("PAGE-42", { title: "Checkout totals wrong" });
   const href = 'href="https://jira.example.com/browse/PAGE-42"';
   const html = (el: React.ReactElement) => renderToStaticMarkup(el);
-  const hasRow = (markup: string) => markup.includes(href) && markup.includes('data-task-row="PAGE-42"') && markup.includes("Mark completed") && markup.includes("Skip…") && markup.includes("Block…");
+  const hasRow = (markup: string) => markup.includes(href) && markup.includes('data-task-row="PAGE-42"') && markup.includes(">Done<") && markup.includes("Skip…") && markup.includes("Block…");
 
   const planHtml = html(React.createElement(PlanCandidateRow, { candidate: { id: "plan-x", title: "PAGE-42 — Checkout totals wrong", estimateMinutes: 15, priorityScore: 70, reason: "Overdue", item: ticket } }));
-  ok(group, planHtml.includes(href) && planHtml.includes('data-task-row="PAGE-42"') && ["Complete ticket", "Skip ticket…", "Block ticket…"].every((l) => planHtml.includes(`>${l}<`)), "Action Plan: a ticket-backed candidate renders TaskReferenceRow with the ticket's Jira URL and 'Complete ticket / Skip ticket… / Block ticket…'");
+  ok(group, planHtml.includes(href) && planHtml.includes('data-task-row="PAGE-42"') && ["Mark ticket done", "Skip ticket…", "Block ticket…", "Defer ticket…", "Start ticket"].every((l) => planHtml.includes(`>${l}<`)), "Action Plan: a ticket-backed candidate renders TaskReferenceRow with the ticket's Jira URL and 'Mark ticket done / Skip ticket… / Block ticket… / Defer ticket… / Start ticket'");
   ok(group, ["Complete action", "Defer action", "Snooze action", "Mark action blocked"].every((l) => planHtml.includes(`>${l}<`)), "Action Plan: the action-level cluster is labeled '… action', so the two clusters are never confusable");
   ok(group, !/>Mark completed<|>Complete<|>Mark blocked<|>Block…</.test(planHtml), "Action Plan: no unqualified 'Complete'/'Mark completed'/'Mark blocked'/'Block…' label remains on the card");
-  ok(group, hasRow(html(React.createElement(TaskReferenceRowView, { ticketKey: "PAGE-42", url: "https://jira.example.com/browse/PAGE-42", execution: { kind: "active" }, actions: { onComplete() {}, onSkip() {}, onBlock() {}, onReopen() {}, onReactivateSkip() {}, onUnblock() {} } }))), "other pages keep the plain labels (Mark completed / Skip… / Block…) — ticketScoped is opt-in");
+  ok(group, hasRow(html(React.createElement(TaskReferenceRowView, { ticketKey: "PAGE-42", url: "https://jira.example.com/browse/PAGE-42", execution: { kind: "active" }, actions: { onComplete() {}, onSkip() {}, onBlock() {}, onReopen() {}, onReactivateSkip() {}, onUnblock() {} } }))), "other pages keep the plain labels (Done / Skip… / Block…) — ticketScoped is opt-in");
   const actionOnly = html(React.createElement(PlanCandidateRow, { candidate: { id: "a-1", title: "Call the vendor", estimateMinutes: 15, priorityScore: 55, reason: "Follow-up" } }));
   ok(group, actionOnly.includes("Call the vendor") && !actionOnly.includes("data-task-row"), "Action Plan: a candidate with no ticket keeps its plain title — no invented ticket row");
 
@@ -10452,9 +10488,11 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   const sameInstant = buildDailyReview({ ...noVisit, workItems: stNow.data.workItems, identity: tay, dailyCommandCompletions: {}, dailyCommandSkips: {}, dailyCommandBlocks: {}, memoryEvents: [], mentionEvents: [], syncLog: stNow.syncLog, lastVisitAt: firstSeenOfDr1, now: new Date() } as never);
   ok(group, !sameInstant.newSinceLastVisit.some((w) => w.key === "DR-1"), "boundary: a ticket first seen at exactly the last-visit instant is NOT new");
 
-  const reviewPageSrc = fs.readFileSync(path.join(process.cwd(), "src/app/daily-review/page.tsx"), "utf8");
+  // Daily Review moved into My Work (New view + its Blocked/Skipped/Done views); /daily-review
+  // redirects there.
+  const reviewPageSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/use-my-work.ts"), "utf8") + fs.readFileSync(path.join(process.cwd(), "src/app/my-work/page.tsx"), "utf8");
   const navSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/Nav.tsx"), "utf8");
-  ok(group, /href: "\/daily-review"/.test(navSrc) && /buildDailyReview/.test(reviewPageSrc) && (reviewPageSrc.match(/<TaskReferenceRow\b/g) ?? []).length >= 4, "the /daily-review page is in the nav, uses buildDailyReview, and renders every block through TaskReferenceRow");
+  ok(group, /href: "\/my-work"/.test(navSrc) && /buildDailyReview/.test(reviewPageSrc) && (reviewPageSrc.match(/<TaskRow\b/g) ?? []).length >= 2 && /redirect\(DAILY_REVIEW_REDIRECT\)/.test(fs.readFileSync(path.join(process.cwd(), "src/app/daily-review/page.tsx"), "utf8")), "Daily Review lives in My Work (in the nav), uses buildDailyReview, renders every row through TaskRow, and /daily-review redirects there");
   // A3 — superseded: the page no longer records a visit at all (a refresh emptied "New");
   // see the "A3 Daily Review New" group for the explicit-acknowledgment replacement.
   ok(group, !/store\.markDailyReviewVisited\(\)/.test(reviewPageSrc) && /baselineAt: state\.dailyReviewBaselineAt/.test(reviewPageSrc), "the page passes the pinned baseline and never records a visit on mount");
@@ -10740,8 +10778,8 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   ok(group, pageReview(store).newRows[0].reasons[0].kind === "new-ticket" && newReasonLabel(pageReview(store).newRows[0].reasons) === "New ticket", "…labeled 'New ticket'");
 
   // Refresh: rebuilding (same state) and a full reload (fresh store on the same storage).
-  const reviewSrc = fs.readFileSync(path.join(process.cwd(), "src/app/daily-review/page.tsx"), "utf8");
-  ok(group, !/markDailyReviewVisited/.test(reviewSrc) && !/useEffect/.test(reviewSrc), "the page records nothing on mount (no visit-on-mount)");
+  const reviewSrc = fs.readFileSync(path.join(process.cwd(), "src/app/my-work/page.tsx"), "utf8");
+  ok(group, !/markDailyReviewVisited/.test(reviewSrc) && !/markDailyReviewSeen\([^)]*\)\s*;?\s*\n\s*\/\/ eslint/.test(reviewSrc), "the page records nothing on mount (no visit-on-mount)");
   ok(group, newKeys(store) === "N-4", "refreshing the page (rebuilding the review) keeps the unreviewed New row");
   const reloaded = new CommandCenterStore({ jiraSyncLockManager: null, ...deps });
   ok(group, newKeys(reloaded) === "N-4", "a full reload (fresh store hydrated from storage) still shows it");
@@ -10862,9 +10900,9 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   const dueRow = renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: "L-2", execution: resolveTaskExecutionState("L-2", store.getSnapshot()) }));
   ok(group, dueRow.includes("re-check due"), "a due row says so in its label");
   const trSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/TaskReferenceRow.tsx"), "utf8");
-  const drSrc = fs.readFileSync(path.join(process.cwd(), "src/app/daily-review/page.tsx"), "utf8");
-  ok(group, /type="date"/.test(trSrc) && /skipTicketInDailyCommand\(ticketKey, reason, revisitOn\)/.test(trSrc) && /blockTicketInDailyCommand\(ticketKey, reason, revisitOn(, pingOn)?\)/.test(trSrc), "the Skip/Block pickers offer an optional re-check date, wired through to the store");
-  ok(group, /Due for re-check today/.test(drSrc) && /review\.dueForRecheck\.map/.test(drSrc), "Daily Review renders the 'Due for re-check today' block");
+  const drSrc = fs.readFileSync(path.join(process.cwd(), "src/app/my-work/page.tsx"), "utf8");
+  ok(group, /type="date"/.test(trSrc) && /skipTicketInDailyCommand\(ticketKey, reason, revisitOn(, surface)?\)/.test(trSrc) && /blockTicketInDailyCommand\(ticketKey, reason, revisitOn(, pingOn)?(, surface)?\)/.test(trSrc), "the Skip/Block pickers offer an optional re-check date, wired through to the store");
+  ok(group, /Due for re-check today/.test(drSrc) && /review\.dueForRecheck\.map/.test(drSrc) && /recheckDue/.test(drSrc), "My Work's New view lists what is due for a re-check today (pointing at the Blocked / Skipped view each ticket lives in, where due rows sort first)");
 
   // --- Age on every Skipped/Blocked row ---
   const monday = new Date(2026, 8, 28, 10, 0);
@@ -10898,13 +10936,13 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   ok(group, "L-4" in store.getSnapshot().dailyCommandBlocks, "a ticket moved to an EXCLUDED status is not treated as closed — the block stays");
   // Pure function, directly.
   const pure = closePausedTicketsFinishedInJira(
-    { dailyCommandCompletions: {}, dailyCommandSkips: { P: { ticketKey: "P", skippedAt: "2026-09-01T00:00:00.000Z" } }, dailyCommandBlocks: {}, dailyCommandTombstones: emptyTombstones() },
+    { P: { ticketKey: "P", status: "SKIPPED", updatedAt: "2026-09-01T00:00:00.000Z", history: [] } },
     [{ key: "P", status: "In Progress", sourceType: "jira", projectId: "jira-project-X", jiraStatusName: "In Progress" }],
     undefined,
     "2026-09-02T00:00:00.000Z",
     "2026-09-02"
   );
-  ok(group, pure.closedKeys.length === 0 && "P" in pure.state.dailyCommandSkips, "an open ticket is never moved");
+  ok(group, pure.closedKeys.length === 0 && pure.states.P.status === "SKIPPED", "an open ticket is never moved");
 }
 
 
@@ -11165,7 +11203,7 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   (globalThis as unknown as { React: typeof React }).React = React;
   const routes: [string, string][] = [
     ["/", "../src/app/page.tsx"],
-    ...["daily-review", "focus", "priorities", "action-plan", "attention", "risks", "dependencies", "changes", "loops", "decisions", "meeting", "reports", "weekly-review", "memory", "data-settings"].map((r): [string, string] => [`/${r}`, `../src/app/${r}/page.tsx`]),
+    ...["my-work", "priorities", "action-plan", "attention", "risks", "dependencies", "changes", "loops", "decisions", "meeting", "reports", "weekly-review", "memory", "data-settings"].map((r): [string, string] => [`/${r}`, `../src/app/${r}/page.tsx`]),
   ];
   const pages = await Promise.all(routes.map(async ([route, mod]) => [route, (await import(mod)).default as React.ComponentType] as const));
   const failures: string[] = [];
@@ -11230,6 +11268,17 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
     ok(group, rowsChecked > 0, `[${dataset}] ticket rows were actually rendered and checked (${rowsChecked})`);
   }
   ok(group, failures.length === 0, `every page renders cleanly with demo data and with Jira data${failures.length ? `:\n   - ${failures.join("\n   - ")}` : ""}`);
+  // /daily-review and /focus keep working: each is a server redirect to its My Work view.
+  for (const [route, target] of [["daily-review", "/my-work?view=new"], ["focus", "/my-work?view=today"]] as const) {
+    const Redirect = (await import(`../src/app/${route}/page.tsx`)).default as () => never;
+    let digest = "";
+    try {
+      Redirect();
+    } catch (err) {
+      digest = String((err as { digest?: string }).digest ?? "");
+    }
+    ok(group, digest.startsWith("NEXT_REDIRECT;") && digest.includes(`;${target};`), `/${route} redirects to ${target} (got: ${digest})`);
+  }
 
   // Jira dataset is loaded now — exercise every row action, each surviving a reload.
   const reload = () => new CommandCenterStore().getSnapshot();
@@ -11286,16 +11335,16 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
 
   // C2 — grouped navigation, nothing removed.
   const flat = NAV_GROUPS.flatMap((g) => g.links.map((l) => l.href));
-  const expectedRoutes = ["/", "/focus", "/daily-review", "/meeting", "/attention", "/loops", "/priorities", "/changes", "/risks", "/dependencies", "/action-plan", "/decisions", "/weekly-review", "/reports", "/data-settings"];
+  const expectedRoutes = ["/", "/my-work", "/meeting", "/attention", "/loops", "/priorities", "/changes", "/risks", "/dependencies", "/action-plan", "/decisions", "/weekly-review", "/reports", "/data-settings"];
   ok(group, expectedRoutes.every((r) => flat.includes(r)) && flat.length === expectedRoutes.length, "every previous nav destination is still there, exactly once");
-  ok(group, JSON.stringify(NAV_GROUPS.map((g) => g.label)) === '["Today","Work queues","Project insight","Reports","Settings"]' && JSON.stringify(NAV_GROUPS[0].links.map((l) => l.href)) === '["/daily-review","/","/focus"]' && JSON.stringify(NAV_GROUPS[1].links.map((l) => l.href)) === '["/priorities","/action-plan","/attention"]' && JSON.stringify(NAV_GROUPS[3].links.map((l) => l.href)) === '["/reports","/weekly-review"]', "groups follow the morning workflow: Today (Daily Review → Command Center → My Day), Work queues, Project insight, Reports, Settings");
+  ok(group, JSON.stringify(NAV_GROUPS.map((g) => g.label)) === '["Today","Work queues","Project insight","Reports","Settings"]' && JSON.stringify(NAV_GROUPS[0].links.map((l) => l.href)) === '["/my-work","/"]' && JSON.stringify(NAV_GROUPS[1].links.map((l) => l.href)) === '["/priorities","/action-plan","/attention"]' && JSON.stringify(NAV_GROUPS[3].links.map((l) => l.href)) === '["/reports","/weekly-review"]', "groups follow the morning workflow: Today (My Work → Command Center), Work queues, Project insight, Reports, Settings");
   const navStore = new CommandCenterStore({ jiraSyncLockManager: null, stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
   navStore.getSnapshot();
   navStore.setDefaultLandingPage("/daily-review");
   navStore.setDefaultLandingPage("/not-a-page");
   ok(group, navStore.getSnapshot().defaultLandingPage === "/daily-review" && LANDING_PAGES.includes("/reports") && parseStoredState(JSON.stringify({ defaultLandingPage: "/evil" })).defaultLandingPage === undefined, "the landing page is configurable, limited to real routes");
   const navSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/Nav.tsx"), "utf8");
-  ok(group, /review\.newRows\.length \+ review\.dueForRecheck\.length/.test(navSrc) && /data-nav-badge/.test(navSrc) && /router\.replace\(landing\)/.test(navSrc), "Daily Review shows a badge (unreviewed New + due re-checks); the app opens on the configured page");
+  ok(group, /computeMyWorkBadge\(\)/.test(navSrc) && /data-nav-badge/.test(navSrc) && /router\.replace\(landing\)/.test(navSrc), "My Work shows a badge (unreviewed New + due re-checks); the app opens on the configured page");
   const { store: badgeStore, setJira: badgeJira } = v226ConfiguredStore({ stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
   badgeJira([v226Actionable("BG-1")]);
   await badgeStore.syncJira();
@@ -11367,8 +11416,8 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   ok(group, brief.counts.find((c) => c.id === "new")!.href === "#review-new" && brief.counts.find((c) => c.id === "recheck")!.href === "#review-due" && brief.counts.find((c) => c.id === "team-closed")!.href === "/reports", "each count is a jump link");
   ok(group, shouldRunMorningBrief(true, "2026-09-28", "2026-09-29") && !shouldRunMorningBrief(true, "2026-09-29", "2026-09-29") && !shouldRunMorningBrief(false, undefined, "2026-09-29"), "the one-click flow runs once per day, only when on");
   const navSrc = src("src/components/command-center/Nav.tsx");
-  const reviewSrc = src("src/app/daily-review/page.tsx");
-  ok(group, /shouldRunMorningBrief\(state\.features\.morningBrief/.test(navSrc) && /syncJira\(\{ trigger: "auto" \}\)/.test(navSrc) && /router\.replace\("\/daily-review"\)/.test(navSrc) && /data-morning-brief/.test(reviewSrc) && /id="review-new"/.test(reviewSrc) && /id="review-due"/.test(reviewSrc), "opening the app syncs and lands on Daily Review, whose header carries the brief");
+  const reviewSrc = src("src/app/my-work/page.tsx");
+  ok(group, /shouldRunMorningBrief\(state\.features\.morningBrief/.test(navSrc) && /syncJira\(\{ trigger: "auto" \}\)/.test(navSrc) && /MORNING_BRIEF_LANDING = "\/my-work\?view=new"/.test(navSrc) && /router\.replace\(MORNING_BRIEF_LANDING\)/.test(navSrc) && /data-morning-brief/.test(reviewSrc) && /id="review-new"/.test(reviewSrc) && /id="review-due"/.test(reviewSrc), "opening the app syncs and lands on My Work → New, whose header carries the brief");
 
   // ---- D2 Keyboard triage ----
   const rows = [{ ticketKey: "A", url: "https://j/A", reviewable: true, actionable: true }, { ticketKey: "B", reviewable: false, actionable: true }];
@@ -11451,7 +11500,7 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
     store.setFeatureToggle("followUpReminders", false);
     ok(group, (await runFollowUpRemindersOnce(store, deps as never)) === 0, "nothing is sent with the toggle off");
     ok(group, renderSlackText({ issueKey: "FU-1", summary: "Card vault", kind: "FOLLOW_UP", detail: "blocked: Waiting on Anna", url: "https://j/FU-1" }) === "⏰ Follow-up due: FU-1 — Card vault — blocked: Waiting on Anna (https://j/FU-1)" && slackSignalSchema.safeParse({ issueKey: "a", summary: "b", kind: "FOLLOW_UP", detail: "c" }).success, "the notify route renders FOLLOW_UP reminders");
-    ok(group, /id="review-followups"/.test(reviewSrc) && /dueFollowUps\(state\.dailyCommandBlocks/.test(reviewSrc) && /aria-label="Ping on \(optional\)"/.test(src("src/components/command-center/TaskReferenceRow.tsx")), "due follow-ups show in Daily Review; the Block picker offers 'Ping on'");
+    ok(group, /id="review-followups"/.test(reviewSrc) && /dueFollowUps\(dailyCommandMaps\.dailyCommandBlocks/.test(reviewSrc) && /aria-label="Ping on \(optional\)"/.test(src("src/components/command-center/TaskReferenceRow.tsx")), "due follow-ups show in Daily Review; the Block picker offers 'Ping on'");
   }
 
   // ---- D6 Staleness wording + my activity ----
@@ -11476,6 +11525,263 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   const reportsPageSrc = src("src/app/reports/page.tsx");
   ok(group, /window\.confirm\("Send this report to the Slack channel/.test(reportsPageSrc) && /sendReportToSlack\(slackReportText\(render\("slack"\)\)\)/.test(reportsPageSrc) && /state\.features\.reportExport && <ShareButtons/.test(reportsPageSrc), "Send to Slack needs an explicit click + confirmation, behind the toggle");
   ok(group, /report: z\.object\(\{ text: z\.string\(\)\.min\(1\)\.max\(40000\) \}\)/.test(src("src/app/api/command-center/notify/route.ts")), "reports go through the existing notify route (which holds the webhook)");
+}
+
+// ===== TicketWorkState — one canonical per-ticket status (AUDIT_TASK_STATE.md) =====
+{
+  const group = "TicketWorkState transitions";
+  const at = "2026-09-01T10:00:00.000Z";
+  // Every pair of the transition table.
+  for (const from of TICKET_WORK_STATUSES) {
+    for (const to of TICKET_WORK_STATUSES) {
+      const start: Record<string, TicketWorkState> = from === "TODO" ? {} : { K: { ticketKey: "K", status: from, updatedAt: "2026-08-01T00:00:00.000Z", history: [] } };
+      const r = applyTicketStatus(start, "K", to, { surface: "other", reason: "why" }, at);
+      const expected = from === "DONE" ? (to === "TODO" ? "changed" : to === "DONE" ? "noop" : "rejected") : from === "TODO" && to === "TODO" ? "noop" : "changed";
+      const got = r.rejected ? "rejected" : r.changed ? "changed" : "noop";
+      const last = r.changed ? r.states.K.history[r.states.K.history.length - 1] : undefined;
+      ok(group, got === expected && (got !== "changed" || (r.states.K.status === to && last?.from === from && last?.to === to && last?.at === r.states.K.updatedAt)) && (got === "changed" || r.states === start), `${from} → ${to}: ${expected}${got !== expected ? ` (got ${got})` : ""}`);
+    }
+  }
+  let capped: Record<string, TicketWorkState> = {};
+  for (let i = 0; i < 60; i++) capped = applyTicketStatus(capped, "H", i % 2 ? "BLOCKED" : "SKIPPED", { surface: "other" }, new Date(Date.UTC(2026, 8, 1, 0, i)).toISOString()).states;
+  ok(group, capped.H.history.length === 50 && capped.H.history[49].to === "BLOCKED", "history is capped at the last 50 transitions");
+  const same = applyTicketStatus({ X: { ticketKey: "X", status: "BLOCKED", updatedAt: at, history: [] } }, "X", "BLOCKED", { surface: "other" }, at);
+  ok(group, same.states.X.updatedAt > at, "the LWW clock always moves forward, even for two writes in the same millisecond");
+  ok(group, getTicketView("NONE", { ticketWorkStates: {}, today: "2026-09-01" }).status === "TODO" && getTicketView("NONE", { ticketWorkStates: {}, today: "2026-09-01" }).since === undefined, "no record = implicit TODO");
+  ok(group, ticketBucket("DEFERRED", "2026-09-05", "2026-09-04") === "SKIPPED_DEFERRED" && ticketBucket("DEFERRED", "2026-09-05", "2026-09-05") === "TODAY", "a deferred ticket comes back to Today on its date");
+}
+
+{
+  const group = "TicketWorkState cross-surface";
+  const { store, setJira } = v226ConfiguredStore({ stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
+  const today = getTodayIso();
+  const future = addDays(today, 3);
+  type Step = "start" | "block" | "unblock" | "skip" | "defer" | "done" | "reopen";
+  const SURFACES = ["command-center", "focus-session", "my-day", "daily-review", "priorities", "action-plan", "attention"] as const;
+  const keyOf = (surface: string) => `CS-${surface.toUpperCase().replace(/[^A-Z]/g, "")}`;
+  const keys = SURFACES.map(keyOf);
+  const items = keys.map((k) => v226Actionable(k));
+  const mentionAt = new Date(Date.now() - 60_000).toISOString();
+  setJira(items, keys.map((k) => ({ issueKey: k, commentId: `c-${k}`, commentAuthor: "Anna", excerpt: "can you look?", mentionedAt: mentionAt })));
+  await store.syncJira();
+  // What the hook does on every render: persist the computed attention lifecycle.
+  const firstView = buildProjectOverrideView(store.getSnapshot(), today, "V226");
+  store.commitAttentionState(firstView.proactive!.nextAttentionState, firstView.proactive!.attentionQueue);
+  // One My Day plan item per ticket (Focus Session / My Day act on it).
+  const planId = new Map(keys.map((k) => [k, store.addPersonalPlanItem({ sourceType: "attention", sourceId: `MENTION:${slug(k)}:${slug(`c-${k}`)}`, estimatedMinutes: 15, plannedDate: today, priority: 0 })]));
+  ok(group, keys.every((k) => store.getSnapshot().personalPlan.find((p) => p.id === planId.get(k))?.ticketKey === k), "plan items created from a ticket's attention item are linked to the ticket (ticketKey)");
+  ok(group, keys.every((k) => (firstView.personalFocus?.candidates.filter((c) => c.ticketKey === k).length ?? 0) === 1), "sanity: every ticket is ONE row in Your Delivery Focus before any change");
+
+  const EXPECT: Record<Step, TicketBucket> = { start: "IN_PROGRESS", block: "BLOCKED", unblock: "TODAY", skip: "SKIPPED_DEFERRED", defer: "SKIPPED_DEFERRED", done: "DONE", reopen: "TODAY" };
+  const ORDER: Step[] = ["start", "block", "unblock", "skip", "defer", "done", "reopen"];
+  const ticketActions = (key: string, surface: TicketStatusSurface) => {
+    const a = storeActionsFor(key, surface, store);
+    return { start: a.onStart!, block: () => a.onBlock("Waiting for a reply"), unblock: a.onUnblock, skip: () => a.onSkip("Not my action"), defer: () => a.onDefer!(future), done: a.onComplete, reopen: a.onReopen };
+  };
+  const handlerFor = (surface: (typeof SURFACES)[number], key: string): Record<Step, () => void> => {
+    const pid = planId.get(key)!;
+    switch (surface) {
+      case "focus-session": {
+        // The session's own buttons; what it doesn't offer comes from the My Day row it was opened from.
+        const myDay = ticketActions(key, "my-day");
+        return { ...myDay, start: () => store.startFocusItem(pid, today), block: () => store.blockFocusItem(pid, today, "Waiting on someone else"), skip: () => store.skipFocusItem(pid, today), done: () => store.completeFocusItem(pid, today), defer: () => store.deferPersonalPlanItem(pid, future) };
+      }
+      case "my-day":
+        return { ...ticketActions(key, "my-day"), defer: () => store.deferPersonalPlanItem(pid, future) };
+      case "action-plan": {
+        const t = ticketActions(key, "action-plan");
+        // PlanCandidateRow's "Complete action" on a ticket-backed candidate.
+        return { ...t, done: () => { const id = store.addAction({ title: `Plan ${key}`, why: "x", relatedWorkItemId: `jira-${key}`, estimateMinutes: 15 }); store.completeAction(id); store.setTicketStatus(key, "DONE", { surface: "action-plan" }); } };
+      }
+      case "daily-review":
+        return ticketActions(key, "my-work");
+      default:
+        return ticketActions(key, surface);
+    }
+  };
+  const bucketOfView: Record<MyWorkView, TicketBucket> = { today: "TODAY", new: "TODAY", "in-progress": "IN_PROGRESS", blocked: "BLOCKED", skipped: "SKIPPED_DEFERRED", done: "DONE" };
+  const kindToBucket: Record<string, TicketBucket> = { active: "TODAY", "in-progress": "IN_PROGRESS", blocked: "BLOCKED", skipped: "SKIPPED_DEFERRED", deferred: "SKIPPED_DEFERRED", completed: "DONE", "done-in-jira": "DONE" };
+  const planToBucket: Record<string, TicketBucket> = { planned: "TODAY", "in-progress": "IN_PROGRESS", blocked: "BLOCKED", skipped: "SKIPPED_DEFERRED", deferred: "SKIPPED_DEFERRED", completed: "DONE" };
+  const active = (b: TicketBucket) => b === "TODAY" || b === "IN_PROGRESS";
+
+  /** Every surface's verdict for `key`, as a bucket (or active/paused where that's all it can say). */
+  function observe(key: string): Record<string, string> {
+    const st = store.getSnapshot();
+    const item = st.data.workItems.find((w) => w.key === key)!;
+    const view = buildProjectOverrideView(st, today, "V226");
+    const sets = ticketExclusionSets(st.ticketWorkStates, st.data.workItems, today);
+    const maps = selectDailyCommandMaps(st, today);
+    const work = store.computeMyWork();
+    const review = store.computeDailyReview();
+    const plan = st.personalPlan.find((p) => p.id === planId.get(key))!;
+    const views = (["today", "new", "in-progress", "blocked", "skipped", "done"] as MyWorkView[]).filter((v) => work.views[v].some((r) => r.ticketKey === key));
+    const reviewBucket = review.completedRecently.some((r) => r.ticketKey === key) ? "DONE" : [...review.blocked, ...review.dueForRecheck.filter((r) => r.kind === "blocked")].some((r) => r.ticketKey === key) ? "BLOCKED" : [...review.skipped, ...review.dueForRecheck.filter((r) => r.kind === "skipped")].some((r) => r.ticketKey === key) ? "SKIPPED_DEFERRED" : "active";
+    const legacy = key in maps.dailyCommandCompletions ? "DONE" : key in maps.dailyCommandBlocks ? "BLOCKED" : key in maps.dailyCommandSkips ? "SKIPPED_DEFERRED" : "active";
+    const exclusion = sets.doneIds.has(item.id) ? "DONE" : sets.blockedIds.has(item.id) ? "BLOCKED" : sets.skippedIds.has(item.id) ? "SKIPPED_DEFERRED" : sets.inProgressIds.has(item.id) ? "IN_PROGRESS" : "TODAY";
+    const priorities = sets.blockedIds.has(item.id) ? "BLOCKED" : sets.skippedIds.has(item.id) ? "SKIPPED_DEFERRED" : "active-or-done";
+    return {
+      selector: getTicketView(key, { ticketWorkStates: st.ticketWorkStates, today }).bucket,
+      taskRow: kindToBucket[resolveTicketExecutionState(key, st.ticketWorkStates).kind],
+      exclusionSets: exclusion,
+      legacyMaps: legacy,
+      myWork: views.length === 1 ? bucketOfView[views[0]] : `in ${views.length} views`,
+      myDayRow: planToBucket[effectivePlanStatus(plan, st.ticketWorkStates, today)],
+      focusSessionPlanItem: planToBucket[plan.status],
+      dailyReview: reviewBucket,
+      priorities,
+      yourDeliveryFocus: view.personalFocus!.candidates.some((c) => c.ticketKey === key) ? "active" : "not-listed",
+      actionPlan: buildPlan(view.filteredData, today, 480, view.workRelevanceIndex, view.dailyCommandCompletedWorkItemIds, view.dailyCommandPausedWorkItemIds).some((p) => p.item?.key === key) ? "active" : "not-listed",
+      attentionResolved: Object.entries(st.attentionState).filter(([id]) => id.startsWith(`MENTION:${slug(key)}:`)).every(([, s]) => s.lifecycle === "RESOLVED") ? "resolved" : "open",
+    };
+  }
+  function agrees(obs: Record<string, string>, expected: TicketBucket): string[] {
+    const wrong: string[] = [];
+    for (const [surface, got] of Object.entries(obs)) {
+      if (surface === "legacyMaps" || surface === "dailyReview") {
+        if (got !== (active(expected) ? "active" : expected)) wrong.push(`${surface}=${got}`);
+      } else if (surface === "priorities") {
+        if (got !== (expected === "BLOCKED" || expected === "SKIPPED_DEFERRED" ? expected : "active-or-done")) wrong.push(`${surface}=${got}`);
+      } else if (surface === "yourDeliveryFocus" || surface === "actionPlan") {
+        if (got !== (active(expected) ? "active" : "not-listed")) wrong.push(`${surface}=${got}`);
+      } else if (surface === "attentionResolved") {
+        if (expected === "DONE" && got !== "resolved") wrong.push(`${surface}=${got}`);
+      } else if (got !== expected) wrong.push(`${surface}=${got}`);
+    }
+    return wrong;
+  }
+
+  for (const surface of SURFACES) {
+    const key = keyOf(surface);
+    const handler = handlerFor(surface, key);
+    for (const step of ORDER) {
+      handler[step]();
+      const wrong = agrees(observe(key), EXPECT[step]);
+      ok(group, wrong.length === 0, `${step} from ${surface}: every surface shows ${EXPECT[step]} and the ticket is in exactly one My Work view${wrong.length ? ` — disagreeing: ${wrong.join(", ")}` : ""}`);
+    }
+    const history = store.getSnapshot().ticketWorkStates[key].history;
+    ok(group, history.length === ORDER.length && history.every((h, i) => i === 0 || h.from === history[i - 1].to), `${surface}: one history entry per change, each starting where the last one ended`);
+  }
+  // The Focus Session block keeps its reason on the ticket, and never creates a Follow-up Action on its own.
+  const fsKey = keyOf("focus-session");
+  const actionsBefore = store.getSnapshot().data.actions.length;
+  store.startFocusItem(planId.get(fsKey)!, today);
+  store.blockFocusItem(planId.get(fsKey)!, today, "Missing information");
+  ok(group, store.getSnapshot().ticketWorkStates[fsKey].reason === "Missing information" && store.getSnapshot().data.actions.length === actionsBefore, "Focus Session Blocked records its reason on the ticket and adds no Follow-up Action unless asked");
+  // DONE from one surface completes the linked open Action too.
+  const apKey = keyOf("priorities");
+  const linkedAction = store.addAction({ title: "Linked", why: "x", relatedWorkItemId: `jira-${apKey}`, estimateMinutes: 15 });
+  storeActionsFor(apKey, "priorities", store).onComplete();
+  ok(group, store.getSnapshot().data.actions.find((a) => a.id === linkedAction)?.status === "completed", "DONE completes the ticket's linked open actions in the same change");
+}
+
+{
+  const group = "TicketWorkState migration";
+  const plan = (id: string, status: PersonalPlanItem["status"], ticketKey: string | undefined, sourceId = `ASSIGNMENT:x-${id}`): PersonalPlanItem =>
+    ({ id, sourceType: "attention", sourceId, priority: 0, position: 0, plannedDate: "2026-09-10", status, estimatedMinutes: 15, addedAt: "2026-09-10T08:00:00.000Z", ...(status === "completed" ? { completedAt: "2026-09-10" } : {}), ...(ticketKey ? { ticketKey } : {}) }) as PersonalPlanItem;
+  const blob = {
+    loaded: true,
+    data: { ...emptyData(), workItems: [v226JiraItem("M-6"), v226JiraItem("M-7")] },
+    dailyCommandCompletions: { "M-1": { ticketKey: "M-1", completedAt: "2026-09-10T09:00:00.000Z", completedBy: "Tay" } },
+    dailyCommandSkips: { "M-2": { ticketKey: "M-2", skippedAt: "2026-09-10T09:01:00.000Z", reason: "Not my action", revisitOn: "2026-12-01" } },
+    dailyCommandBlocks: { "M-3": { ticketKey: "M-3", blockedAt: "2026-09-10T09:02:00.000Z", reason: "Waiting on Anna", pingOn: "2026-09-12" } },
+    dailyCommandTombstones: { completions: { "M-8": { ticketKey: "M-8", deletedAt: "2026-09-11T00:00:00.000Z" } }, skips: {}, blocks: {} },
+    personalPlan: [
+      plan("p1", "deferred", "M-4"),
+      plan("p2", "in-progress", "M-5"),
+      // No ticketKey yet: backfilled from its STALE attention id → work item M-6.
+      plan("p3", "blocked", undefined, `STALE:${slug("jira-M-6")}`),
+      // Older than the ticket's own record: the record wins.
+      plan("p4", "completed", "M-3"),
+      plan("p5", "planned", "M-7"),
+    ],
+  };
+  const parsed = parseStoredState(JSON.stringify(blob));
+  const status = (k: string) => getTicketView(k, { ticketWorkStates: parsed.ticketWorkStates, today: "2026-09-10" }).status;
+  ok(group, status("M-1") === "DONE" && status("M-2") === "SKIPPED" && status("M-3") === "BLOCKED", "completions → DONE, skips → SKIPPED, blocks → BLOCKED");
+  ok(group, parsed.ticketWorkStates["M-2"].reason === "Not my action" && parsed.ticketWorkStates["M-2"].until === "2026-12-01" && parsed.ticketWorkStates["M-3"].reason === "Waiting on Anna" && parsed.ticketWorkStates["M-3"].pingOn === "2026-09-12" && parsed.ticketWorkStates["M-1"].updatedBy === "Tay", "reasons, re-check / ping dates and who recorded it are carried over");
+  ok(group, status("M-4") === "DEFERRED" && status("M-5") === "IN_PROGRESS" && status("M-6") === "BLOCKED" && status("M-7") === "TODO", "ticket-linked plan items migrate: deferred → DEFERRED, in-progress → IN_PROGRESS, a backfilled blocked item → BLOCKED, planned stays TODO");
+  ok(group, parsed.personalPlan.find((p) => p.id === "p3")?.ticketKey === "M-6", "a plan item made before ticketKey existed is backfilled on load");
+  ok(group, status("M-3") === "BLOCKED", "a plan item older than the ticket's own record never overrides it");
+  ok(group, status("M-8") === "TODO" && !!parsed.dailyCommandTombstones.completions["M-8"], "a legacy tombstone with no live record stays TODO, and the tombstone is kept for older devices");
+  const legacyBefore = { c: blob.dailyCommandCompletions, s: blob.dailyCommandSkips, b: blob.dailyCommandBlocks };
+  const legacyAfter = ticketStateMaps(parsed.ticketWorkStates);
+  ok(group, ["M-1"].every((k) => k in legacyAfter.dailyCommandCompletions) && legacyAfter.dailyCommandSkips["M-2"]?.reason === "Not my action" && legacyAfter.dailyCommandBlocks["M-3"]?.reason === "Waiting on Anna" && legacyAfter.dailyCommandCompletions["M-1"].completedAt === legacyBefore.c["M-1"].completedAt && legacyAfter.dailyCommandSkips["M-2"].skippedAt === legacyBefore.s["M-2"].skippedAt && legacyAfter.dailyCommandBlocks["M-3"].blockedAt === legacyBefore.b["M-3"].blockedAt, "the deprecated maps, derived back from the new state, keep every original record and timestamp (identical visible statuses)");
+  ok(group, resolveTaskExecutionState("M-2", parsed).kind === resolveTicketExecutionState("M-2", parsed.ticketWorkStates).kind && resolveTaskExecutionState("M-3", parsed).kind === "blocked", "a reader still on the legacy maps sees the same status as the canonical one");
+  const reparsed = parseStoredState(JSON.stringify(parsed));
+  ok(group, JSON.stringify(reparsed.ticketWorkStates) === JSON.stringify(parsed.ticketWorkStates), "migration is idempotent: loading the migrated state again changes nothing");
+  ok(group, Object.keys(parseStoredState(JSON.stringify({ loaded: true })).ticketWorkStates).length === 0 && parseStoredState("{not json").ticketWorkStates !== undefined, "a blob with no execution state (or a corrupt one) loads with an empty ticket state");
+  // An older device (legacy maps only) syncing in.
+  const local = { ...extractSyncedAppState({ ...makeStoreState(), ticketWorkStates: { "S-1": { ticketKey: "S-1", status: "DONE", updatedAt: "2026-09-10T09:00:00.000Z", history: [] } } }, "2026-09-10T09:00:00.000Z") };
+  const olderServer = { ...local, ticketWorkStates: undefined, dailyCommandCompletions: {}, dailyCommandBlocks: { "S-2": { ticketKey: "S-2", blockedAt: "2026-09-11T00:00:00.000Z" } }, dailyCommandTombstones: { completions: { "S-1": { ticketKey: "S-1", deletedAt: "2026-09-11T00:00:00.000Z" } }, skips: {}, blocks: {} } };
+  const merged = mergeSyncedAppState(local, olderServer as never);
+  ok(group, merged.ticketWorkStates?.["S-2"]?.status === "BLOCKED" && merged.ticketWorkStates?.["S-1"]?.status === "TODO", "an older device's newer block is taken, and its newer Reopen (tombstone) is honoured");
+  const a = { K: { ticketKey: "K", status: "BLOCKED" as TicketWorkStatus, updatedAt: "2026-09-10T00:00:00.000Z", history: [] } };
+  const b = { K: { ticketKey: "K", status: "DONE" as TicketWorkStatus, updatedAt: "2026-09-11T00:00:00.000Z", history: [] } };
+  ok(group, JSON.stringify(mergeTicketWorkStates(a, b)) === JSON.stringify(mergeTicketWorkStates(b, a)) && mergeTicketWorkStates(a, b).K.status === "DONE", "the per-ticket merge is symmetric, newest wins");
+  ok(group, migrateLegacyIntoTicketStates(parsed.ticketWorkStates, { dailyCommandCompletions: legacyAfter.dailyCommandCompletions, dailyCommandSkips: legacyAfter.dailyCommandSkips, dailyCommandBlocks: legacyAfter.dailyCommandBlocks }) === parsed.ticketWorkStates, "the derived maps never re-apply themselves (same object back)");
+}
+
+{
+  const group = "TicketWorkState dedup";
+  const w = jiraItem({ id: "wi-dd-1", key: "DD-1", jiraStatusName: "In Progress", owner: "Alice" });
+  const risk = { id: "r-dd", projectId: w.projectId, title: "DD-1 risk", level: "HIGH", reason: "x", evidence: [], potentialImpact: "x", mitigation: "x", status: "open", confidence: 0.8, detectedAt: TODAY, sourceWorkItemIds: [w.id], auto: true } as Risk;
+  const data: CommandCenterData = { ...emptyData(), workItems: [w], risks: [risk] };
+  const items = [
+    makeAttentionItem({ id: "MENTION:dd-1:c1", category: "MENTION", severity: "HIGH", sourceRef: { type: "workItem", id: w.id }, ownershipExplicit: true }),
+    makeAttentionItem({ id: `ASSIGNMENT:${slug(w.id)}`, category: "ASSIGNMENT", severity: "MEDIUM", sourceRef: { type: "workItem", id: w.id } }),
+    makeAttentionItem({ id: "RISK:dd-1-risk", category: "RISK", severity: "HIGH", sourceRef: { type: "risk", id: risk.title } }),
+  ];
+  const focus = computePersonalFocus(data, fakeProactive(items) as never, "Alice", TODAY, undefined, undefined, [risk]);
+  const rows = focus.candidates.filter((c) => c.ticketKey === "DD-1");
+  ok(group, (focus.allCandidates ?? []).filter((c) => c.ticketKey === "DD-1").length === 3, "sanity: three signals on one ticket");
+  ok(group, rows.length === 1 && rows[0].signals?.length === 3 && new Set(rows[0].signals!.map((s) => s.kind)).size === 3 && ["MENTION", "ASSIGNMENT", "RISK"].every((k) => rows[0].signals!.some((s) => s.kind === k)), "Your Delivery Focus: one row with three chips (Mention, Assigned, Risk)");
+  ok(group, rows[0].score === Math.max(...(focus.allCandidates ?? []).filter((c) => c.ticketKey === "DD-1").map((c) => c.score)) && rows[0].signals![0].score >= rows[0].signals![2].score, "ranked by its highest-priority signal, chips highest first");
+  const html = renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: "DD-1", execution: { kind: "active" }, signals: rows[0].signals }));
+  ok(group, (html.match(/data-signal="/g) ?? []).length === 3 && html.includes('data-signal-chips="3"'), "the row renders the three chips");
+  ok(group, dedupeCandidatesByTicket([...focus.allCandidates!]).length === focus.candidates.length, "dedupe is stable (re-running it changes nothing)");
+  // STALE is Attention-only by design (never a focus candidate), but My Work's row for the
+  // ticket lists it with the others: MENTION + STALE + RISK → one row, three chips.
+  const stale = makeAttentionItem({ id: `STALE:${slug(w.id)}`, category: "STALE", severity: "MEDIUM", sourceRef: { type: "workItem", id: w.id }, ticketKey: "DD-1" });
+  const attn = [{ ...items[0], ticketKey: "DD-1" }, stale, { ...items[2], ticketKey: "DD-1" }];
+  const mw = buildMyWork({ workItems: [w], identity: { displayName: "Alice" }, ticketWorkStates: {}, today: TODAY, attentionItems: attn });
+  const mwRows = (Object.values(mw.views) as { ticketKey: string; view: { signals: { kind: string }[] } }[][]).flat().filter((r) => r.ticketKey === "DD-1");
+  ok(group, mwRows.length === 1 && ["MENTION", "STALE", "RISK"].every((k) => mwRows[0].view.signals.some((s) => s.kind === k)) && mwRows[0].view.signals.length === 3, "My Work: one ticket with Mention + Stale + Risk signals is one row with three chips");
+}
+
+{
+  const group = "TicketWorkState persistence & report";
+  const storage = createMemoryStateStorage();
+  const deps = { stateStorage: storage, stateChannel: null, stateFocusTargets: [] };
+  const { store, setJira } = v226ConfiguredStore(deps);
+  const items = ["PR-1", "PR-2", "PR-3", "PR-4", "PR-5"].map((k) => v226Actionable(k));
+  setJira(items);
+  await store.syncJira();
+  const today = getTodayIso();
+  store.startTicket("PR-1", "my-work");
+  store.blockTicketInDailyCommand("PR-2", "Waiting on Anna", undefined, undefined, "my-work");
+  store.skipTicketInDailyCommand("PR-3", "Not my action", undefined, "my-work");
+  store.deferTicket("PR-4", addDays(today, 2), undefined, "my-work");
+  const planId = store.addPersonalPlanItem({ sourceType: "attention", sourceId: `ASSIGNMENT:${slug("jira-PR-5")}`, estimatedMinutes: 15, plannedDate: today, priority: 0 });
+  store.startFocusItem(planId, today);
+  store.completeFocusItem(planId, today);
+  await v226Tick();
+  const statuses = (s: StoreState) => ["PR-1", "PR-2", "PR-3", "PR-4", "PR-5"].map((k) => s.ticketWorkStates[k]?.status).join(",");
+  const expected = "IN_PROGRESS,BLOCKED,SKIPPED,DEFERRED,DONE";
+  ok(group, statuses(store.getSnapshot()) === expected, `statuses are recorded (${statuses(store.getSnapshot())})`);
+  const reloaded = new CommandCenterStore({ jiraSyncLockManager: null, ...deps });
+  ok(group, statuses(reloaded.getSnapshot()) === expected, "they survive a reload (fresh store on the same storage)");
+  await v226Tick();
+  await store.syncJira();
+  ok(group, statuses(store.getSnapshot()) === expected, "they survive a Jira sync with no changes");
+  const work = store.computeMyWork();
+  ok(group, ["PR-1", "PR-2", "PR-3", "PR-4", "PR-5"].map((k) => myWorkViewOf(work, k)).join(",") === "in-progress,blocked,skipped,skipped,done", "and land in the matching My Work views");
+  // A DONE set from the Focus Session is in that day's Daily Report — once, under the ticket.
+  const report = store.generateDailyReport(today, true);
+  const view = buildDailyReportView(report, today, { accountId: "acc-tay", displayName: "Tay" }, store.buildLiveStandup());
+  const pr5 = view.doneMine.filter((t) => t.key === "PR-5");
+  ok(group, pr5.length === 1 && view.doneMine.every((t) => !!t.key), "a ticket completed from Focus Session appears in that day's Daily Report, exactly once and under its ticket key");
+  ok(group, view.inProgress.some((t) => t.key === "PR-1"), "a started ticket is listed In progress in the standup");
+  ok(group, store.getSnapshot().memoryEvents.some((e) => e.kind === "TICKET_STARTED" && e.ticketKey === "PR-1") && store.getSnapshot().memoryEvents.some((e) => e.kind === "TICKET_DEFERRED" && e.ticketKey === "PR-4"), "Start and Defer record TICKET_STARTED / TICKET_DEFERRED for reports");
 }
 
 if (skipped > 0) console.log(`\n⏭️  ${skipped} check group(s) skipped for missing runtime capabilities (see SKIPPED lines above).`);

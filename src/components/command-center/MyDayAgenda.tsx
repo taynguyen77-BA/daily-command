@@ -5,8 +5,10 @@
 // (§12): every row here is a reference joined back to its live source at render time.
 
 import { useMemo, useState } from "react";
-import { reconcilePersonalPlan, detectNewCriticalArrivals, buildCarryForward, buildSuggestedDailyPlan } from "@/lib/command-center/personal-plan";
-import type { FocusCategory, PersonalFocusCandidate, PersonalFocusResult, PersonalPlanItem, PlanItemOrigin } from "@/lib/command-center/types";
+import { reconcilePersonalPlan, detectNewCriticalArrivals, buildCarryForward, buildSuggestedDailyPlan, candidateFor } from "@/lib/command-center/personal-plan";
+import type { FocusCategory, PersonalFocusCandidate, PersonalFocusResult, PersonalPlanItem, PersonalPlanItemStatus, PlanItemOrigin, TicketWorkState } from "@/lib/command-center/types";
+import { TICKET_STATUS_LABEL, ticketBucket, ticketStatusForPlanStatus, type TicketBucket } from "@/lib/command-center/ticket-work-state";
+import { TaskRow } from "./TaskReferenceRow";
 import { useCommandCenter } from "./use-command-center";
 import { FocusSession } from "./FocusSession";
 import { isMyActionItem } from "@/lib/command-center/personal-relation";
@@ -38,8 +40,26 @@ function whyStillOnPlan(item: PersonalPlanItem, hasReviewFlag: boolean): string 
   return "Still unresolved.";
 }
 
+const BUCKET_TO_PLAN_STATUS: Record<TicketBucket, PersonalPlanItemStatus> = {
+  TODAY: "planned",
+  IN_PROGRESS: "in-progress",
+  BLOCKED: "blocked",
+  SKIPPED_DEFERRED: "skipped",
+  DONE: "completed",
+};
+
+/** A plan item about a ticket shows the TICKET's status (TicketWorkState — the same one every
+ *  other list shows); a ticketless item (decision loop, free action) keeps its own status. */
+export function effectivePlanStatus(item: PersonalPlanItem, states: Record<string, TicketWorkState>, today: string): PersonalPlanItemStatus {
+  if (!item.ticketKey) return item.status;
+  const r = states[item.ticketKey];
+  if (!r) return item.status === "completed" || item.status === "skipped" || item.status === "deferred" || item.status === "blocked" || item.status === "in-progress" ? "planned" : item.status;
+  return BUCKET_TO_PLAN_STATUS[ticketBucket(r.status, r.until, today)];
+}
+
 function PlanRow({
   item,
+  status,
   candidate,
   hasReviewFlag,
   onStartFocus,
@@ -53,6 +73,8 @@ function PlanRow({
   draggable,
 }: {
   item: PersonalPlanItem;
+  /** effectivePlanStatus — the ticket's status for a ticket row. */
+  status: PersonalPlanItemStatus;
   candidate: PersonalFocusCandidate | undefined;
   hasReviewFlag?: boolean;
   onStartFocus: () => void;
@@ -85,7 +107,7 @@ function PlanRow({
             <FocusCategoryBadge category={candidate.category} />
             {item.pinned && <MetaPill variant="accent">Pinned</MetaPill>}
             {candidate.projectName && <span className="text-xs text-text3">{candidate.projectName}</span>}
-            <MetaPill>{item.status}</MetaPill>
+            {!item.ticketKey && <MetaPill>{TICKET_STATUS_LABEL[ticketStatusForPlanStatus(status)]}</MetaPill>}
             {item.origin && <span className="text-[10px] text-text3">{ORIGIN_LABELS[item.origin]}</span>}
           </div>
           <p className="font-display text-sm text-text">{candidate.title}</p>
@@ -94,9 +116,12 @@ function PlanRow({
             Source: {item.sourceType} · {candidate.estimatedMinutes}m
           </p>
           <p className="mt-0.5 text-xs text-text3">Why on plan: {whyStillOnPlan(item, !!hasReviewFlag)}</p>
-          {item.status === "blocked" && item.blockedReason && (
+          {!item.ticketKey && status === "blocked" && item.blockedReason && (
             <p className="mt-0.5 text-xs text-red">Blocked: {item.blockedReason}{item.blockedNote ? ` — ${item.blockedNote}` : ""}</p>
           )}
+          {/* The ticket — status, since, reason, Jira overlay and the full ticket action set
+              (Start / Done / Block / Skip / Defer / …) through the shared TaskRow. */}
+          {item.ticketKey && <TaskRow as="div" ticketKey={item.ticketKey} url={candidate.ticketUrl} showTitle={false} signals={candidate.signals} surface="my-day" />}
         </div>
         <div className="flex flex-col items-end gap-1 text-xs">
           <div className="flex gap-1" role="group" aria-label="Reorder">
@@ -114,14 +139,18 @@ function PlanRow({
           )}
         </div>
       </div>
-      {item.status !== "completed" && item.status !== "skipped" && (
+      {status !== "completed" && status !== "skipped" && (
         <div className="mt-2 flex flex-wrap gap-2 border-t border-border pt-2 text-xs">
           <button onClick={onStartFocus} className="rounded bg-accent px-2 py-1 font-medium text-white hover:bg-accent2">
             Start Focus
           </button>
-          <button onClick={onDefer} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">
-            Defer
-          </button>
+          {/* A ticket row defers through its TaskRow (Defer… with a date); this is the
+              ticketless items' Defer — same word, same meaning (not today). */}
+          {!item.ticketKey && (
+            <button onClick={onDefer} className="rounded border border-border px-2 py-1 text-text2 hover:border-yellow hover:text-yellow">
+              Defer
+            </button>
+          )}
           <button onClick={onRemove} className="rounded border border-border px-2 py-1 text-text2 hover:border-red hover:text-red">
             Remove
           </button>
@@ -143,8 +172,12 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
   const myActionItemsOnly = state.myActionItemsOnly.myDay;
 
   const todayItems = useMemo(() => state.personalPlan.filter((p) => p.plannedDate === today).sort((a, b) => a.position - b.position), [state.personalPlan, today]);
-  const activeToday = todayItems.filter((p) => p.status === "planned" || p.status === "in-progress" || p.status === "blocked");
-  const doneToday = todayItems.filter((p) => p.status === "completed");
+  const statusOf = (p: PersonalPlanItem) => effectivePlanStatus(p, state.ticketWorkStates, today);
+  const activeToday = todayItems.filter((p) => {
+    const st = statusOf(p);
+    return st === "planned" || st === "in-progress" || st === "blocked";
+  });
+  const doneToday = todayItems.filter((p) => statusOf(p) === "completed");
 
   const reconciliation = useMemo(() => reconcilePersonalPlan(todayItems, personalFocus.candidates, filteredData, today), [todayItems, personalFocus.candidates, filteredData, today]);
   const removeReasons = reconciliation.filter((r) => r.action === "REMOVE");
@@ -154,8 +187,10 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
   const newCritical = useMemo(() => detectNewCriticalArrivals(personalFocus.candidates, state.personalPlan), [personalFocus.candidates, state.personalPlan]);
   const carryForward = useMemo(() => buildCarryForward(state.personalPlan, personalFocus.candidates, today), [state.personalPlan, personalFocus.candidates, today]);
 
+  // Candidates are one row per ticket (signals merged), so a plan item joins through its
+  // source, a merged signal, or its ticket — personal-plan.ts candidateFor.
   function candidateForItem(item: PersonalPlanItem): PersonalFocusCandidate | undefined {
-    return personalFocus.candidates.find((c) => c.sourceType === item.sourceType && c.sourceId === item.sourceId);
+    return candidateFor(item, personalFocus.candidates);
   }
 
   function startFocus(item: PersonalPlanItem, candidate: PersonalFocusCandidate) {
@@ -252,6 +287,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
                         plannedDate: today,
                         priority: 0,
                         snapshot: { category: c.category, projectId: c.projectId, ownershipExplicit: c.ownershipExplicit },
+                        ticketKey: c.ticketKey,
                       })
                     }
                     className="rounded border border-border px-2 py-0.5 text-text2 hover:border-accent hover:text-text"
@@ -371,7 +407,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
       {SECTIONS.map(({ category, title }) => {
         const items = activeToday.filter((item) => {
           const candidate = candidateForItem(item);
-          const effectiveCategory = item.status === "blocked" ? "BLOCKED" : candidate?.category;
+          const effectiveCategory = statusOf(item) === "blocked" ? "BLOCKED" : candidate?.category;
           if (effectiveCategory !== category) return false;
           // V2.14 §4 — hides the row, never touches candidateForItem/reconciliation above.
           if (myActionItemsOnly && !isMyActionItem(candidate?.relation)) return false;
@@ -390,6 +426,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
                     {reviewFlag && <p className="mb-1 text-xs text-orange">Review: {reviewFlag.reason}</p>}
                     <PlanRow
                       item={item}
+                      status={statusOf(item)}
                       candidate={candidate}
                       hasReviewFlag={!!reviewFlag}
                       onStartFocus={() => candidate && startFocus(item, candidate)}
@@ -416,7 +453,7 @@ export function MyDayAgenda({ personalFocus }: { personalFocus: PersonalFocusRes
           <div className="space-y-2">
             {doneToday.map((item) => {
               const candidate = candidateForItem(item);
-              return <PlanRow key={item.id} item={item} candidate={candidate} onStartFocus={() => {}} onMove={() => {}} onRemove={() => store.removePersonalPlanItem(item.id)} onDefer={() => {}} />;
+              return <PlanRow key={item.id} item={item} status={statusOf(item)} candidate={candidate} onStartFocus={() => {}} onMove={() => {}} onRemove={() => store.removePersonalPlanItem(item.id)} onDefer={() => {}} />;
             })}
           </div>
         </section>

@@ -1,25 +1,32 @@
 "use client";
 
-// V2.26 — the ONE shared row for "a reference to a specific ticket, with its personal execution
-// controls". Wraps TicketLink (Jira link) + FirstSeenBadge (sync provenance) + the recorded
-// "<reason>, <when>" history label + the Complete / Skip(+reason) / Block(+reason) cluster,
-// wired straight to store.ts's completeTicketInDailyCommand / skipTicketInDailyCommand /
-// blockTicketInDailyCommand (and their reverses). Every page that references a concrete work
-// item renders this instead of re-implementing its own link/buttons.
+// TaskRow — the ONE row for "a reference to a specific ticket, with its personal status and
+// controls", used by every surface that shows a ticket: My Work (all views), Command Center,
+// My Day, Your Delivery Focus cards, Daily Review, Priorities, Action Plan, Attention cards and
+// the related-ticket blocks on Risk / Decision / Loop / Dependency / Change cards.
+//
+// Status is read through the canonical TicketWorkState (task-execution.ts
+// resolveTicketExecutionState over store.ticketWorkStates) and every button calls
+// store.setTicketStatus through its named wrappers — so a change made here is the same change
+// on every other surface. Same action set everywhere:
+//   Open in Jira · Start · Done · Block (+reason) · Skip (+reason) · Defer (+date)
+//   + Reopen / Unblock / Reactivate / Stop when they apply.
+// A surface may hide actions ONLY through the documented props (`readOnly`, `hideActions`) —
+// see AUDIT_TASK_STATE.md §2.6 — never by omission.
 //
 // Split like the rest of this codebase's testable UI: TaskReferenceRowView is pure (explicit
 // state + callbacks, renderable with react-dom/server in the offline test suite), and
-// TaskReferenceRow is the thin connected wrapper that reads the Daily Command maps from the
-// store and calls its methods.
+// TaskReferenceRow / TaskRow is the thin connected wrapper.
 
 import React, { useState, useSyncExternalStore } from "react";
-import { commandCenterStore } from "@/lib/command-center/store";
-import { formatExecutionRecord, resolveTaskExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
+import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
+import { formatExecutionRecord, resolveTicketExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
 import { formatRelativeDateTime } from "@/lib/command-center/relative-time";
-import { BLOCK_REASON_SUGGESTIONS, type SkipReason, type TaskReactivation, type WorkItem } from "@/lib/command-center/types";
+import { BLOCK_REASON_SUGGESTIONS, type FocusSignal, type SkipReason, type TaskReactivation, type TicketStatusSurface, type WorkItem } from "@/lib/command-center/types";
 import { FirstSeenBadge, TicketLink } from "./TicketLink";
 import { FollowUpDraft } from "./FollowUpDraft";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
+import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
 
 export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
 
@@ -31,7 +38,16 @@ export interface TaskRowActions {
   onReopen: () => void;
   onReactivateSkip: () => void;
   onUnblock: () => void;
+  /** → IN_PROGRESS. Optional so hand-built action sets from before Start existed stay valid. */
+  onStart?: () => void;
+  /** IN_PROGRESS → TODO. */
+  onStop?: () => void;
+  /** → DEFERRED until `until` (local YYYY-MM-DD). */
+  onDefer?: (until: string, reason?: string) => void;
 }
+
+/** The actions a surface may hide — only via the `hideActions` prop. */
+export type TaskRowAction = "open" | "start" | "done" | "block" | "skip" | "defer";
 
 const REACTIVATION_COPY: Record<TaskReactivation["reason"], string> = {
   "new-mention-after-completion": "new comment after you marked this done",
@@ -57,8 +73,45 @@ export function ReactivatedBadge({ reactivation, now }: { reactivation: TaskReac
   );
 }
 
+/** The one status badge every surface shows for a ticket. */
+const STATUS_BADGE: Record<TaskExecutionState["kind"], { label: string; tone: string }> = {
+  active: { label: "To do", tone: "bg-surface2 text-text3" },
+  "in-progress": { label: "In progress", tone: "bg-accent/15 text-accent2" },
+  deferred: { label: "Deferred", tone: "bg-yellow/15 text-yellow" },
+  completed: { label: "Done", tone: "bg-green/15 text-green" },
+  "done-in-jira": { label: "Done in Jira", tone: "bg-green/15 text-green" },
+  skipped: { label: "Skipped", tone: "bg-surface2 text-text3" },
+  blocked: { label: "Blocked", tone: "bg-red/15 text-red" },
+};
+
+export function TicketStatusBadge({ kind }: { kind: TaskExecutionState["kind"] }) {
+  const b = STATUS_BADGE[kind];
+  return (
+    <span data-ticket-status={kind} className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${b.tone}`}>
+      {b.label}
+    </span>
+  );
+}
+
+/** Signal chips (Mention, Stale, Risk…) for a ticket row that merges several signals. */
+export function SignalChips({ signals }: { signals?: FocusSignal[] }) {
+  if (!signals || signals.length === 0) return null;
+  return (
+    <span className="flex flex-wrap gap-1" data-signal-chips={signals.length}>
+      {signals.map((s) => (
+        <span key={`${s.kind}:${s.candidateId}`} data-signal={s.kind} className="rounded bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-text2">
+          {s.label}
+          {(s.count ?? 1) > 1 ? ` ×${s.count}` : ""}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 const STATE_TONE: Record<TaskExecutionState["kind"], string> = {
   active: "",
+  "in-progress": "text-accent2",
+  deferred: "text-yellow",
   completed: "text-green",
   "done-in-jira": "text-green",
   skipped: "text-text3",
@@ -70,10 +123,24 @@ const BTN = "rounded border border-border px-2 py-1 text-xs text-text2 hover:bor
 /** Default labels, and the "ticket"-qualified ones used where the row sits next to other
  *  controls of a different kind (Action Plan's action-level buttons) — same actions either way. */
 const LABELS = {
-  plain: { complete: "Mark completed", skipOpen: "Skip…", skip: "Skip", blockOpen: "Block…", block: "Block", reopen: "Reopen", reactivate: "Reactivate", unblock: "Unblock" },
-  ticket: { complete: "Complete ticket", skipOpen: "Skip ticket…", skip: "Skip ticket", blockOpen: "Block ticket…", block: "Block ticket", reopen: "Reopen ticket", reactivate: "Reactivate ticket", unblock: "Unblock ticket" },
+  plain: { open: "Open in Jira", start: "Start", stop: "Stop", complete: "Done", skipOpen: "Skip…", skip: "Skip", blockOpen: "Block…", block: "Block", deferOpen: "Defer…", defer: "Defer", reopen: "Reopen", reactivate: "Reactivate", unblock: "Unblock" },
+  ticket: {
+    open: "Open in Jira",
+    start: "Start ticket",
+    stop: "Stop ticket",
+    complete: "Mark ticket done",
+    skipOpen: "Skip ticket…",
+    skip: "Skip ticket",
+    blockOpen: "Block ticket…",
+    block: "Block ticket",
+    deferOpen: "Defer ticket…",
+    defer: "Defer ticket",
+    reopen: "Reopen ticket",
+    reactivate: "Reactivate ticket",
+    unblock: "Unblock ticket",
+  },
 };
-const TICKET_TITLE = "Records this for the ticket in Daily Command — Jira itself is never changed.";
+const TICKET_TITLE = "Records this for the ticket — every list shows the same status. Jira itself is never changed.";
 
 export function TaskReferenceRowView({
   ticketKey,
@@ -90,10 +157,14 @@ export function TaskReferenceRowView({
   as = "li",
   followUpRows,
   showPingOn = false,
+  hideActions,
+  signals,
+  newReason,
 }: {
   ticketKey: string;
   url?: string;
   title?: string;
+  /** Jira's own status — a read-only overlay shown next to the personal status, never merged. */
   statusLabel?: string;
   firstSeenAt?: string;
   execution: TaskExecutionState;
@@ -103,7 +174,7 @@ export function TaskReferenceRowView({
   now?: Date;
   /** Extra context line under the record (e.g. Daily Review's completion source). */
   caption?: string;
-  /** Qualify every button with "ticket" (e.g. "Complete ticket") — for cards that also carry
+  /** Qualify every button with "ticket" (e.g. "Mark ticket done") — for cards that also carry
    *  non-ticket controls. */
   ticketScoped?: boolean;
   as?: "li" | "div";
@@ -111,62 +182,133 @@ export function TaskReferenceRowView({
   followUpRows?: NeedsFromOthersRow[];
   /** D5 — offer "Ping on <date>" in the Block picker (Follow-up reminders feature). */
   showPingOn?: boolean;
+  /** The ONLY way a surface hides actions (documented in AUDIT_TASK_STATE.md §2.6). */
+  hideActions?: TaskRowAction[];
+  /** Signal chips when the row merges several signals (Your Delivery Focus / My Work). */
+  signals?: FocusSignal[];
+  /** Why the ticket is New (Daily Review / My Work "New"). */
+  newReason?: string;
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
-  const [picker, setPicker] = useState<"skip" | "block" | null>(null);
+  const hidden = new Set(hideActions ?? []);
+  const [picker, setPicker] = useState<"skip" | "block" | "defer" | null>(null);
   const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   const [blockReason, setBlockReason] = useState("");
   const [revisitOn, setRevisitOn] = useState("");
   const [pingOn, setPingOn] = useState("");
+  const [deferUntil, setDeferUntil] = useState("");
   const revisitInput = (
     <input
       type="date"
       value={revisitOn}
       onChange={(e) => setRevisitOn(e.target.value)}
       aria-label="Re-check on (optional)"
-      title="Re-check on (optional) — shows up in Daily Review that day; nothing changes until you act"
+      title="Re-check on (optional) — shows up in My Work that day; nothing changes until you act"
       className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
     />
   );
   const record = formatExecutionRecord(execution, now);
   const Tag = as;
+  const k = execution.kind;
+  const can = {
+    start: !!actions?.onStart && !hidden.has("start") && (k === "active" || k === "blocked" || k === "skipped" || k === "deferred"),
+    stop: !!actions?.onStop && k === "in-progress",
+    done: !hidden.has("done") && k !== "completed" && k !== "done-in-jira",
+    block: !hidden.has("block") && k !== "completed" && k !== "done-in-jira" && k !== "blocked",
+    skip: !hidden.has("skip") && k !== "completed" && k !== "done-in-jira" && k !== "skipped",
+    defer: !!actions?.onDefer && !hidden.has("defer") && k !== "completed" && k !== "done-in-jira",
+    reopen: k === "completed",
+    reactivate: k === "skipped" || k === "deferred",
+    unblock: k === "blocked",
+  };
+  const close = () => {
+    setPicker(null);
+    setRevisitOn("");
+    setPingOn("");
+    setBlockReason("");
+    setDeferUntil("");
+  };
 
   return (
-    <Tag data-task-row={ticketKey} data-task-state={execution.kind} className="flex flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
+    <Tag data-task-row={ticketKey} data-task-state={k} className="flex flex-wrap items-center justify-between gap-2 border-b border-border py-2 last:border-b-0">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2 text-xs text-text3">
+          <TicketStatusBadge kind={k} />
           <TicketLink ticketKey={ticketKey} url={url} />
-          {statusLabel && <span>{statusLabel}</span>}
+          {statusLabel && <span title="Jira status (read-only)">Jira: {statusLabel}</span>}
           <FirstSeenBadge firstSeenAt={firstSeenAt} now={now} />
           {reactivation && <ReactivatedBadge reactivation={reactivation} now={now} />}
+          <SignalChips signals={signals} />
         </div>
         {title && <p className="truncate text-sm text-text">{title}</p>}
         {record && (
-          <p data-task-record className={`text-xs ${STATE_TONE[execution.kind]}`}>
+          <p data-task-record className={`text-xs ${STATE_TONE[k]}`}>
             {record}
           </p>
         )}
+        {newReason && <p className="text-xs text-accent2">New: {newReason}</p>}
         {caption && <p className="text-xs text-text3">{caption}</p>}
-        {execution.kind === "blocked" && followUpRows && <FollowUpDraft rows={followUpRows} />}
+        {k === "blocked" && followUpRows && <FollowUpDraft rows={followUpRows} />}
       </div>
 
-      {actions && execution.kind !== "done-in-jira" && (
+      {actions && k !== "done-in-jira" && (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5">
-          {execution.kind === "active" && picker === null && (
+          {picker === null && (
             <>
-              <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
-                {L.complete}
-              </button>
-              <button onClick={() => setPicker("skip")} title={btnTitle} className={BTN}>
-                {L.skipOpen}
-              </button>
-              <button onClick={() => setPicker("block")} title={btnTitle} className={BTN}>
-                {L.blockOpen}
-              </button>
+              {url && !hidden.has("open") && (
+                <a href={url} target="_blank" rel="noopener noreferrer" className={BTN}>
+                  {L.open}
+                </a>
+              )}
+              {can.unblock && (
+                <button onClick={actions.onUnblock} title={btnTitle} className={BTN}>
+                  {L.unblock}
+                </button>
+              )}
+              {can.reactivate && (
+                <button onClick={actions.onReactivateSkip} title={btnTitle} className={BTN}>
+                  {L.reactivate}
+                </button>
+              )}
+              {can.reopen && (
+                <button onClick={actions.onReopen} title={btnTitle} className={BTN}>
+                  {L.reopen}
+                </button>
+              )}
+              {can.start && (
+                <button onClick={actions.onStart} title={btnTitle} className={BTN}>
+                  {L.start}
+                </button>
+              )}
+              {can.stop && (
+                <button onClick={actions.onStop} title={btnTitle} className={BTN}>
+                  {L.stop}
+                </button>
+              )}
+              {can.done && (
+                <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
+                  {L.complete}
+                </button>
+              )}
+              {can.block && (
+                <button onClick={() => setPicker("block")} title={btnTitle} className={BTN}>
+                  {L.blockOpen}
+                </button>
+              )}
+              {can.skip && (
+                <button onClick={() => setPicker("skip")} title={btnTitle} className={BTN}>
+                  {L.skipOpen}
+                </button>
+              )}
+              {can.defer && (
+                <button onClick={() => setPicker("defer")} title={btnTitle} className={BTN}>
+                  {L.deferOpen}
+                </button>
+              )}
             </>
           )}
-          {execution.kind === "active" && picker === "skip" && (
+          {picker === "skip" && (
             <>
               <select
                 value={skipReason}
@@ -182,15 +324,15 @@ export function TaskReferenceRowView({
                 ))}
               </select>
               {revisitInput}
-              <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); setPicker(null); setRevisitOn(""); }} className={BTN}>
+              <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); close(); }} className={BTN}>
                 {L.skip}
               </button>
-              <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
+              <button onClick={close} className="px-1 text-xs text-text3 hover:text-text2">
                 Cancel
               </button>
             </>
           )}
-          {execution.kind === "active" && picker === "block" && (
+          {picker === "block" && (
             <>
               <input
                 value={blockReason}
@@ -217,36 +359,29 @@ export function TaskReferenceRowView({
                   className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
                 />
               )}
-              <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined, pingOn || undefined); setPicker(null); setBlockReason(""); setRevisitOn(""); setPingOn(""); }} className={BTN}>
+              <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined, pingOn || undefined); close(); }} className={BTN}>
                 {L.block}
               </button>
-              <button onClick={() => setPicker(null)} className="px-1 text-xs text-text3 hover:text-text2">
+              <button onClick={close} className="px-1 text-xs text-text3 hover:text-text2">
                 Cancel
               </button>
             </>
           )}
-          {execution.kind === "completed" && (
-            <button onClick={actions.onReopen} title={btnTitle} className={BTN}>
-              {L.reopen}
-            </button>
-          )}
-          {execution.kind === "skipped" && (
+          {picker === "defer" && actions.onDefer && (
             <>
-              <button onClick={actions.onReactivateSkip} title={btnTitle} className={BTN}>
-                {L.reactivate}
+              <input
+                type="date"
+                value={deferUntil}
+                onChange={(e) => setDeferUntil(e.target.value)}
+                aria-label="Defer until"
+                title="Comes back to Today on this date (default: tomorrow)"
+                className="rounded border border-border bg-surface px-1.5 py-1 text-xs text-text2"
+              />
+              <button onClick={() => { actions.onDefer!(deferUntil || addDays(todayLocalIso(), 1)); close(); }} className={BTN}>
+                {L.defer}
               </button>
-              <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
-                {L.complete}
-              </button>
-            </>
-          )}
-          {execution.kind === "blocked" && (
-            <>
-              <button onClick={actions.onUnblock} title={btnTitle} className={BTN}>
-                {L.unblock}
-              </button>
-              <button onClick={actions.onComplete} title={btnTitle} className={BTN}>
-                {L.complete}
+              <button onClick={close} className="px-1 text-xs text-text3 hover:text-text2">
+                Cancel
               </button>
             </>
           )}
@@ -256,20 +391,24 @@ export function TaskReferenceRowView({
   );
 }
 
-/** The store's actions for one ticket key — the three Daily Command setters and their reverses. */
-export function storeActionsFor(ticketKey: string): TaskRowActions {
+/** The store's actions for one ticket key — every one a named wrapper over setTicketStatus.
+ *  `surface` is recorded in the ticket's history; `store` is injectable for tests. */
+export function storeActionsFor(ticketKey: string, surface: TicketStatusSurface = "command-center", store: CommandCenterStore = commandCenterStore): TaskRowActions {
   return {
-    onComplete: () => commandCenterStore.completeTicketInDailyCommand(ticketKey),
-    onSkip: (reason, revisitOn) => commandCenterStore.skipTicketInDailyCommand(ticketKey, reason, revisitOn),
-    onBlock: (reason, revisitOn, pingOn) => commandCenterStore.blockTicketInDailyCommand(ticketKey, reason, revisitOn, pingOn),
-    onReopen: () => commandCenterStore.reopenTicketInDailyCommand(ticketKey),
-    onReactivateSkip: () => commandCenterStore.reactivateSkippedTicket(ticketKey),
-    onUnblock: () => commandCenterStore.unblockTicketInDailyCommand(ticketKey),
+    onComplete: () => store.completeTicketInDailyCommand(ticketKey, surface),
+    onSkip: (reason, revisitOn) => store.skipTicketInDailyCommand(ticketKey, reason, revisitOn, surface),
+    onBlock: (reason, revisitOn, pingOn) => store.blockTicketInDailyCommand(ticketKey, reason, revisitOn, pingOn, surface),
+    onReopen: () => store.reopenTicketInDailyCommand(ticketKey, surface),
+    onReactivateSkip: () => store.reactivateSkippedTicket(ticketKey, surface),
+    onUnblock: () => store.unblockTicketInDailyCommand(ticketKey, surface),
+    onStart: () => store.startTicket(ticketKey, surface),
+    onStop: () => store.stopTicket(ticketKey, surface),
+    onDefer: (until, reason) => store.deferTicket(ticketKey, until, reason, surface),
   };
 }
 
-/** Connected row. Pass a WorkItem when one is at hand (link, title, status, provenance all come
- *  from it); otherwise a bare ticketKey/url. `finishedInJira` is the caller's own
+/** Connected row. Pass a WorkItem when one is at hand (link, title, Jira status, provenance all
+ *  come from it); otherwise a bare ticketKey/url. `finishedInJira` is the caller's own
  *  isWorkItemDoneOrExcluded verdict, when it has one. */
 export function TaskReferenceRow({
   workItem,
@@ -283,6 +422,10 @@ export function TaskReferenceRow({
   caption,
   ticketScoped,
   as,
+  surface = "command-center",
+  hideActions,
+  signals,
+  newReason,
 }: {
   workItem?: Pick<WorkItem, "key" | "sourceUrl" | "title" | "status" | "jiraStatusName" | "firstSeenAt">;
   ticketKey?: string;
@@ -290,40 +433,54 @@ export function TaskReferenceRow({
   title?: string;
   finishedInJira?: boolean;
   reactivation?: TaskReactivation;
+  /** Documented hiding prop: no buttons at all (reference only). */
   readOnly?: boolean;
   showTitle?: boolean;
   caption?: string;
   ticketScoped?: boolean;
   as?: "li" | "div";
+  /** Recorded in the ticket's history for every change made from this row. */
+  surface?: TicketStatusSurface;
+  /** Documented hiding prop: hides just these actions. */
+  hideActions?: TaskRowAction[];
+  signals?: FocusSignal[];
+  newReason?: string;
 }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const key = workItem?.key ?? ticketKey;
   if (!key) return null;
-  const execution = resolveTaskExecutionState(key, state, finishedInJira);
+  const w = state.data.workItems.find((x) => x.key === key);
+  const execution = resolveTicketExecutionState(key, state.ticketWorkStates, finishedInJira);
   let followUpRows: NeedsFromOthersRow[] | undefined;
   if (execution.kind === "blocked" && !readOnly) {
-    const w = state.data.workItems.find((x) => x.key === key);
     const deps = w ? state.data.dependencies.filter((d) => d.workItemId === w.id && d.status === "unresolved") : [];
     followUpRows = needsFromOthersForBlockedTicket({ key, title: w?.title ?? workItem?.title ?? title, dueDate: w?.dueDate }, execution.reason, deps);
   }
+  const jira = workItem ?? w;
   return (
     <TaskReferenceRowView
       ticketKey={key}
-      url={workItem?.sourceUrl ?? url}
-      title={showTitle ? (workItem?.title ?? title) : undefined}
-      statusLabel={workItem ? (workItem.jiraStatusName ?? workItem.status) : undefined}
-      firstSeenAt={workItem?.firstSeenAt}
+      url={workItem?.sourceUrl ?? url ?? w?.sourceUrl}
+      title={showTitle ? (workItem?.title ?? title ?? w?.title) : undefined}
+      statusLabel={jira ? (jira.jiraStatusName ?? jira.status) : undefined}
+      firstSeenAt={jira?.firstSeenAt}
       execution={execution}
       followUpRows={followUpRows}
       showPingOn={state.features.followUpReminders}
       reactivation={reactivation}
-      actions={readOnly ? undefined : storeActionsFor(key)}
+      actions={readOnly ? undefined : storeActionsFor(key, surface)}
       caption={caption}
       ticketScoped={ticketScoped}
       as={as}
+      hideActions={hideActions}
+      signals={signals}
+      newReason={newReason}
     />
   );
 }
+
+/** Alias: the single TaskRow every surface renders. */
+export const TaskRow = TaskReferenceRow;
 
 /** V2.26 — the "tickets this card is about" block for cards whose entity links to concrete
  *  work items (risks, decisions, changes, dependencies, loops). Renders nothing when there
@@ -335,7 +492,7 @@ export function RelatedTickets({ workItems, label = "Related tickets" }: { workI
       <p className="pt-1 text-[10px] font-semibold uppercase tracking-wide text-text3">{label}</p>
       <ul>
         {workItems.map((w) => (
-          <TaskReferenceRow key={w.id} workItem={w} />
+          <TaskReferenceRow key={w.id} workItem={w} surface="related-ticket" />
         ))}
       </ul>
     </div>

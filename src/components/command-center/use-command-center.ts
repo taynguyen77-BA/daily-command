@@ -1,13 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
-import { commandCenterStore, getTodayIso, previousSnapshotOf, type StoreState } from "@/lib/command-center/store";
+import { commandCenterStore, getTodayIso, previousSnapshotOf, selectDailyCommandMaps, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
 import { applyFilters } from "@/lib/command-center/filters";
 import { applyProjectScope, scopeMentionEvents } from "@/lib/command-center/jira/project-scope";
 import { buildWorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { computeProactiveIntelligence } from "@/lib/command-center/proactive";
 import { computePersonalFocus } from "@/lib/command-center/personal-focus";
+import { ticketExclusionSets } from "@/lib/command-center/ticket-work-state";
 import { buildSlackNotifyPayloads, computeNewPersonalSignals } from "@/lib/command-center/notify";
 import { getServerSideNotifyActiveCached } from "@/lib/command-center/notify-client";
 import { pairedAuthHeader } from "@/lib/command-center/device-pairing";
@@ -100,45 +101,23 @@ export function useCommandCenter() {
     [state.jiraWorkRelevancePolicy]
   );
 
-  // V2.19 — Daily Command Completion, resolved to WorkItem ids (for the engines below, which
-  // key on internal ids) once per render. state.dailyCommandCompletions itself stays keyed by
-  // ticket KEY (see its own comment) — this is purely a lookup-shape conversion, never a second
-  // source of truth.
-  const dailyCommandCompletedWorkItemIds = useMemo(() => {
-    const keys = new Set(Object.keys(state.dailyCommandCompletions ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dailyCommandCompletions, scopedData.workItems]);
-
-  // V2.23 — Daily Command Skip, resolved to WorkItem ids exactly the same way
-  // dailyCommandCompletedWorkItemIds is above: state.dailyCommandSkips stays keyed by ticket
-  // KEY (see DailyCommandSkip's own comment), this is purely a lookup-shape conversion.
-  const dailyCommandSkippedWorkItemIds = useMemo(() => {
-    const keys = new Set(Object.keys(state.dailyCommandSkips ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dailyCommandSkips, scopedData.workItems]);
-
-  // V2.26 — Daily Command Block, resolved to WorkItem ids the same way.
-  const dailyCommandBlockedWorkItemIds = useMemo(() => {
-    const keys = new Set(Object.keys(state.dailyCommandBlocks ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.dailyCommandBlocks, scopedData.workItems]);
-
-  // V2.26 — "personal execution paused" = skipped ∪ blocked. This is what the engines'
-  // existing skip parameter (proactive/personal-focus/action-plan) now receives: a blocked
-  // ticket leaves every active personal-execution surface through the exact same suppression
-  // path a skipped one already uses — no second exclusion mechanism, and nothing folded into
-  // Work Relevance's Done/Excluded gate. Skip and block stay distinct everywhere they're
-  // DISPLAYED (dailyCommandSkippedWorkItemIds / dailyCommandBlockedWorkItemIds below).
-  const dailyCommandPausedWorkItemIds = useMemo(
-    () => (dailyCommandBlockedWorkItemIds.size === 0 ? dailyCommandSkippedWorkItemIds : new Set([...Array.from(dailyCommandSkippedWorkItemIds), ...Array.from(dailyCommandBlockedWorkItemIds)])),
-    [dailyCommandSkippedWorkItemIds, dailyCommandBlockedWorkItemIds]
+  // The engines' exclusion sets, derived from the canonical TicketWorkState ONLY
+  // (ticket-work-state.ts ticketExclusionSets) and resolved key → WorkItem id over the scoped
+  // population once per render. DONE → completed; BLOCKED ∪ SKIPPED ∪ DEFERRED-until-future →
+  // paused (out of every active personal list). The names are the pre-TicketWorkState ones so
+  // every engine and page keeps its signature; there is no second source behind them.
+  const ticketSets = useMemo(
+    () => ticketExclusionSets(state.ticketWorkStates, scopedData.workItems, today),
+    [state.ticketWorkStates, scopedData.workItems, today]
   );
+  const dailyCommandCompletedWorkItemIds = ticketSets.doneIds;
+  const dailyCommandSkippedWorkItemIds = ticketSets.skippedIds;
+  const dailyCommandBlockedWorkItemIds = ticketSets.blockedIds;
+  const dailyCommandPausedWorkItemIds = ticketSets.pausedIds;
+  const ticketInProgressWorkItemIds = ticketSets.inProgressIds;
+  // The today-aware Daily Command maps (a projection of ticketWorkStates — see
+  // store.ts selectDailyCommandMaps) for the engines that still take map-shaped input.
+  const dailyCommandMaps = useMemo(() => selectDailyCommandMaps(state, today), [state.ticketWorkStates, today]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // V2.21 §3 — computed AFTER workRelevanceIndex/dailyCommandCompletedWorkItemIds (moved
   // below them, was above before V2.21) and now threaded through: `derived` is the shared
@@ -248,6 +227,8 @@ export function useCommandCenter() {
     dailyCommandSkippedWorkItemIds,
     dailyCommandBlockedWorkItemIds,
     dailyCommandPausedWorkItemIds,
+    ticketInProgressWorkItemIds,
+    dailyCommandMaps,
     store: commandCenterStore,
   };
 }
@@ -281,28 +262,13 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const previousSnapshot = previousSnapshotOf(state);
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
   const workRelevanceIndex = buildWorkRelevanceIndex(state.jiraWorkRelevancePolicy);
-  const dailyCommandCompletedWorkItemIds = (() => {
-    const keys = new Set(Object.keys(state.dailyCommandCompletions ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
-  })();
-  // V2.23 — same resolution as dailyCommandCompletedWorkItemIds just above, and the same
-  // §4 bug class it fixed for completion: an override pipeline that forgets to resolve/thread
-  // this would let a skipped ticket reappear as active work the moment a query/Meeting Mode
-  // session is scoped to its project.
-  const dailyCommandSkippedWorkItemIds = (() => {
-    const keys = new Set(Object.keys(state.dailyCommandSkips ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
-  })();
-  // V2.26 — same resolution for blocks, and the same skipped ∪ blocked "paused" set the main
-  // hook threads into the engines (see its own comment).
-  const dailyCommandBlockedWorkItemIds = (() => {
-    const keys = new Set(Object.keys(state.dailyCommandBlocks ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(scopedData.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
-  })();
-  const dailyCommandPausedWorkItemIds = new Set([...Array.from(dailyCommandSkippedWorkItemIds), ...Array.from(dailyCommandBlockedWorkItemIds)]);
+  // Same TicketWorkState-only exclusion sets the main hook uses, over THIS call's own scoped
+  // population (an override can legitimately see different WorkItems than the global scope).
+  const ticketSets = ticketExclusionSets(state.ticketWorkStates, scopedData.workItems, today);
+  const dailyCommandCompletedWorkItemIds = ticketSets.doneIds;
+  const dailyCommandSkippedWorkItemIds = ticketSets.skippedIds;
+  const dailyCommandBlockedWorkItemIds = ticketSets.blockedIds;
+  const dailyCommandPausedWorkItemIds = ticketSets.pausedIds;
   const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const proactive = state.loaded
     ? computeProactiveIntelligence(

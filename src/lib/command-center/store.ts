@@ -14,7 +14,7 @@ import { buildDemoData } from "./demo-data";
 import { slug } from "./attention-queue";
 import { detectChanges, toSnapshot } from "./change-detection";
 import { getAIProvider } from "./ai";
-import { todayLocalIso, toLocalIso } from "./date-utils";
+import { addDays, todayLocalIso, toLocalIso } from "./date-utils";
 import { buildDailySnapshot } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
 import type { DataSourceProvider, DataSourceSyncResult } from "./datasource/types";
@@ -24,6 +24,7 @@ import { browserStateChannel, createLocalStorageStateStorage, readRevFromRaw, re
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope, scopeMentionEvents } from "./jira/project-scope";
 import { buildStandupState, type StandupState } from "./reports";
 import { buildDailyReview, type DailyReview } from "./daily-review";
+import { buildMyWork, type MyWork } from "./my-work";
 import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "./jira/work-relevance-history";
 import { computeActionEffectiveness } from "./action-effectiveness";
@@ -42,7 +43,25 @@ import { deriveMemoryEvents } from "./memory-events";
 import { detectRisks } from "./risk-detection";
 import { dedupeRisks } from "./selectors";
 import { USAGE_KEYS } from "./usage";
-import { applyDailyCommandChange, emptyTombstones, mergeDailyCommandState, mergeReviewAcks, type DailyCommandRecord } from "./execution-state-merge";
+import { emptyTombstones, mergeReviewAcks } from "./execution-state-merge";
+import {
+  applyTicketStatus,
+  asTicketWorkStates,
+  backfillPlanTicketKeys,
+  deriveLegacyDailyCommandState,
+  isNoopTransition,
+  canTransition,
+  mergeTicketWorkStates,
+  migrateLegacyIntoTicketStates,
+  planStatusForTicket,
+  ticketEventKind,
+  ticketKeyForPlanItem,
+  ticketStateMaps,
+  ticketStatusOf,
+  ticketExclusionSets,
+  type DailyCommandMapsView,
+  type SetTicketStatusOptions,
+} from "./ticket-work-state";
 import type {
   Action,
   ActionOutcomeStatus,
@@ -87,6 +106,9 @@ import type {
   PlanItemOrigin,
   SkipReason,
   SyncLogEntry,
+  TicketStatusSurface,
+  TicketWorkState,
+  TicketWorkStatus,
   WorkItem,
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
@@ -103,7 +125,7 @@ const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for tre
 const MAX_MEMORY_EVENTS = 200;
 const MAX_BLOCK_REASON_LENGTH = 200;
 /** C2 — routes a user may pick as the landing page (every primary nav destination). */
-export const LANDING_PAGES = ["/", "/daily-review", "/focus", "/priorities", "/action-plan", "/attention", "/risks", "/dependencies", "/changes", "/loops", "/decisions", "/meeting", "/reports", "/weekly-review"];
+export const LANDING_PAGES = ["/", "/my-work", "/daily-review", "/focus", "/priorities", "/action-plan", "/attention", "/risks", "/dependencies", "/changes", "/loops", "/decisions", "/meeting", "/reports", "/weekly-review"];
 const MAX_KNOWN_TICKETS = 20000;
 /** Bounded like every other history-shaped field: past the cap, the oldest-first-seen keys go
  *  first (unknown-provenance "" sorts oldest). */
@@ -112,7 +134,6 @@ function capKnownTickets(known: Record<string, string>): Record<string, string> 
   if (entries.length <= MAX_KNOWN_TICKETS) return known;
   return Object.fromEntries(entries.sort((a, b) => a[1].localeCompare(b[1])).slice(-MAX_KNOWN_TICKETS));
 }
-const isIsoDate = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
 const MAX_SYNC_LOG = 30; // most recent successful Jira syncs kept for provenance (oldest evicted first)
 const MAX_PERSONAL_PLAN_ITEMS = 400; // bounded personal-plan history, same philosophy as above
 // V2.2 §16 — Artifact History, NOT a second memory architecture: same bounded-array/
@@ -223,6 +244,13 @@ export interface StoreState {
   // Bounded like snapshotHistory (oldest evicted first), same discipline as every other
   // history-shaped field in this file.
   dailyReports: Record<string, DailyReportSnapshot>;
+  /** THE canonical per-ticket work state (single source of truth — see ticket-work-state.ts
+   *  and AUDIT_TASK_STATE.md). Keyed by Jira issue KEY; a missing key means TODO. Written only
+   *  through setTicketStatus (and Jira closing a paused ticket). */
+  ticketWorkStates: Record<string, TicketWorkState>;
+  /** @deprecated Derived from ticketWorkStates on every write (ticketStateMaps) and kept for one
+   *  version so code / older devices that still read them see the same truth. Never write.
+   *  Engines read the today-aware projection via selectDailyCommandMaps(state, today). */
   // V2.19 — Daily Command Completion. Keyed by Jira issue KEY (see DailyCommandCompletion's
   // own comment for why), local-only (deliberately not added to app-state.ts's SyncedAppState
   // in this pass — see completeTicketInDailyCommand/reopenTicketInDailyCommand below). A
@@ -328,6 +356,7 @@ function initialState(): StoreState {
     myActionItemsOnly: initialMyActionItemsOnly(),
     lastAppStateSyncIso: undefined,
     dailyReports: {},
+    ticketWorkStates: {},
     dailyCommandCompletions: {},
     dailyCommandSkips: {},
     dailyCommandBlocks: {},
@@ -746,11 +775,40 @@ function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
   return { attention: obj.attention === true, myDay: obj.myDay === true, priorities: obj.priorities === true };
 }
 
+type TicketStateSlice = Pick<StoreState, "ticketWorkStates" | "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones">;
+
+/** Migration + projection in one: folds legacy Daily Command records (and ticket-linked plan
+ *  items) into ticketWorkStates, then re-derives the deprecated maps from the result. Run on
+ *  parse, cross-tab rebase and cross-device sync — idempotent (see
+ *  migrateLegacyIntoTicketStates). `nowIso` prunes old tombstones (local writes only). */
+export function ticketStateFromLegacy(
+  states: Record<string, TicketWorkState>,
+  legacy: Pick<StoreState, "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones">,
+  plan: PersonalPlanItem[],
+  nowIso: string | undefined
+): TicketStateSlice {
+  const ticketWorkStates = migrateLegacyIntoTicketStates(states, legacy, plan);
+  return { ticketWorkStates, ...deriveLegacyDailyCommandState(ticketWorkStates, nowIso, legacy.dailyCommandTombstones) };
+}
+
+/** The today-aware Daily Command maps every engine that still takes map-shaped input reads —
+ *  a projection of ticketWorkStates (a DEFERRED ticket whose date has come is back to active). */
+export function selectDailyCommandMaps(state: Pick<StoreState, "ticketWorkStates">, today: string = getTodayIso()): DailyCommandMapsView {
+  return ticketStateMaps(state.ticketWorkStates, today);
+}
+
 export function parseStoredState(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
     const snapshotHistory = parsed.snapshotHistory ?? (parsed.previousSnapshot ? [parsed.previousSnapshot] : []);
     const { policy: jiraWorkRelevancePolicy, migration } = parseWorkRelevancePolicyMap(parsed.jiraWorkRelevancePolicy);
+    const parsedData = asPlainObject(parsed.data, emptyData());
+    // Ticket links for plan items made before PersonalPlanItem.ticketKey existed.
+    const personalPlan = backfillPlanTicketKeys(Array.isArray(parsed.personalPlan) ? (parsed.personalPlan as PersonalPlanItem[]) : [], {
+      workItems: Array.isArray(parsedData.workItems) ? parsedData.workItems : [],
+      actions: Array.isArray(parsedData.actions) ? parsedData.actions : [],
+      dependencies: Array.isArray(parsedData.dependencies) ? parsedData.dependencies : [],
+    });
     const dataSourceValue: StoreState["dataSource"] = ["demo", "local-import", "jira"].includes(parsed.dataSource as string)
       ? (parsed.dataSource as StoreState["dataSource"])
       : parsed.isDemo
@@ -760,7 +818,7 @@ export function parseStoredState(raw: string): StoreState {
       : "demo";
     return {
       schemaVersion: DATA_SCHEMA_VERSION,
-      data: asPlainObject(parsed.data, emptyData()),
+      data: parsedData,
       snapshotHistory: Array.isArray(snapshotHistory) ? snapshotHistory : [],
       loaded: parsed.loaded ?? false,
       isDemo: parsed.isDemo ?? false,
@@ -778,7 +836,7 @@ export function parseStoredState(raw: string): StoreState {
         parsed.personalIdentity && typeof parsed.personalIdentity === "object" && typeof (parsed.personalIdentity as Partial<PersonalIdentity>).displayName === "string"
           ? (parsed.personalIdentity as PersonalIdentity)
           : undefined,
-      personalPlan: Array.isArray(parsed.personalPlan) ? parsed.personalPlan : [],
+      personalPlan,
       artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts.filter(isArtifactRecordShape) : [],
       usageCounters: asUsageCounters(parsed.usageCounters),
       mentionEvents: normalizeMentionEvents(parsed.mentionEvents),
@@ -787,10 +845,17 @@ export function parseStoredState(raw: string): StoreState {
       myActionItemsOnly: asMyActionItemsOnly(parsed.myActionItemsOnly),
       lastAppStateSyncIso: typeof parsed.lastAppStateSyncIso === "string" ? parsed.lastAppStateSyncIso : undefined,
       dailyReports: asDailyReports(parsed.dailyReports),
-      dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
-      dailyCommandSkips: asDailyCommandSkips(parsed.dailyCommandSkips),
-      dailyCommandBlocks: asDailyCommandBlocks(parsed.dailyCommandBlocks),
-      dailyCommandTombstones: asDailyCommandTombstones(parsed.dailyCommandTombstones),
+      ...ticketStateFromLegacy(
+        asTicketWorkStates(parsed.ticketWorkStates),
+        {
+          dailyCommandCompletions: asDailyCommandCompletions(parsed.dailyCommandCompletions),
+          dailyCommandSkips: asDailyCommandSkips(parsed.dailyCommandSkips),
+          dailyCommandBlocks: asDailyCommandBlocks(parsed.dailyCommandBlocks),
+          dailyCommandTombstones: asDailyCommandTombstones(parsed.dailyCommandTombstones),
+        },
+        personalPlan,
+        undefined
+      ),
       pilotFeedback: asPilotFeedback(parsed.pilotFeedback),
       staleAssignedTicketThresholds: asStaleAssignedTicketThresholds(parsed.staleAssignedTicketThresholds),
       syncLog: asSyncLog(parsed.syncLog),
@@ -941,7 +1006,7 @@ export class CommandCenterStore {
     const rebased = rebaseState(prev, next, stored);
     return {
       ...rebased,
-      ...mergeDailyCommandState(rebased, stored),
+      ...ticketStateFromLegacy(mergeTicketWorkStates(rebased.ticketWorkStates, stored.ticketWorkStates), stored, rebased.personalPlan, undefined),
       dailyReviewAcks: mergeReviewAcks(rebased.dailyReviewAcks, stored.dailyReviewAcks),
     };
   }
@@ -1222,35 +1287,29 @@ export class CommandCenterStore {
     this.setAttentionLifecycle(id, { lifecycle: "RESOLVED", resolvedManually: true });
   }
 
-  /** V2.19 — Daily Command Completion: "I'm done with this ticket here", independent of the
-   *  Jira issue's own status and of any specific Action/Mention. Never touches Jira, never
-   *  mutates data.workItems or any existing Action — see types.ts's DailyCommandCompletion for
-   *  the full reasoning and personal-focus.ts/assigned-work.ts/recent-mentions.ts for where
-   *  this suppresses the ticket. `completedBy` defaults to the configured identity's display
-   *  name, when set, matching every other "who did this" field in this codebase. */
-  /** A1 — the one write path for the three Daily Command maps: mutual exclusion, `updatedAt`
-   *  stamping and tombstoning of every removal all happen in applyDailyCommandChange
-   *  (execution-state-merge.ts), so a removal here is never resurrected by a cross-device
-   *  merge. `next` null = remove the ticket from every map. */
-  private setDailyCommand(ticketKey: string, next: DailyCommandRecord | null, nowIso: string = new Date().toISOString()) {
-    this.set({ ...this.state, ...applyDailyCommandChange(this.state, ticketKey, next, nowIso) });
-  }
-
-  /** B1 — every ticket-level Daily Command action is also a MemoryEvent, so it reaches the
-   *  Daily/Weekly reports (which read only memoryEvents). Ticket title / project / client /
-   *  assignee are captured NOW, same point-in-time discipline as reportContextForWorkItem;
-   *  a ticket not in the local data still gets an event with just its key. */
-  private recordTicketEvent(kind: "TICKET_COMPLETED" | "TICKET_REOPENED" | "TICKET_SKIPPED" | "TICKET_BLOCKED" | "TICKET_UNBLOCKED" | "TICKET_REACTIVATED", ticketKey: string, reason?: string) {
+  /** Point-in-time memory event for a ticket transition — reports read only memoryEvents.
+   *  Ticket title / project / client / assignee are captured NOW, same discipline as
+   *  reportContextForWorkItem; a ticket not in the local data still gets an event with its key. */
+  private ticketEvent(kind: MemoryEvent["kind"], ticketKey: string, reason?: string): MemoryEvent {
     const w = this.state.data.workItems.find((x) => x.key === ticketKey);
     const project = w ? this.state.data.projects.find((p) => p.id === w.projectId) : undefined;
     const client = w ? this.state.data.clients.find((c) => c.id === (w.clientId ?? project?.clientId)) : undefined;
-    const verb = { TICKET_COMPLETED: "Completed", TICKET_REOPENED: "Reopened", TICKET_SKIPPED: "Skipped", TICKET_BLOCKED: "Blocked", TICKET_UNBLOCKED: "Unblocked", TICKET_REACTIVATED: "Reactivated" }[kind];
-    const entry: MemoryEvent = {
+    const verb: Partial<Record<MemoryEvent["kind"], string>> = {
+      TICKET_COMPLETED: "Completed",
+      TICKET_REOPENED: "Reopened",
+      TICKET_SKIPPED: "Skipped",
+      TICKET_BLOCKED: "Blocked",
+      TICKET_UNBLOCKED: "Unblocked",
+      TICKET_REACTIVATED: "Reactivated",
+      TICKET_STARTED: "Started",
+      TICKET_DEFERRED: "Deferred",
+    };
+    return {
       id: `memory-event-${kind}-${ticketKey}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       date: getTodayIso(),
       kind,
-      title: `${verb}: ${w ? `${ticketKey} — ${w.title}` : ticketKey}`,
-      impact: "Recorded in Daily Command — Jira itself was not changed.",
+      title: `${verb[kind] ?? kind}: ${w ? `${ticketKey} — ${w.title}` : ticketKey}`,
+      impact: "Recorded in the Command Center — Jira itself was not changed.",
       evidence: [],
       ticketKey,
       ...(w ? { projectId: w.projectId, ticketTitle: w.title } : {}),
@@ -1262,92 +1321,173 @@ export class CommandCenterStore {
       ...(reason?.trim() ? { reason: reason.trim() } : {}),
       ...(w?.sprint ? { sprint: w.sprint } : {}),
     };
-    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, entry].slice(-MAX_MEMORY_EVENTS) });
-    // Keep an already-generated report for today current (events + standup), so the action
-    // is in it even if memoryEvents later rolls past its cap before the next sync.
-    if (this.state.dailyReports[entry.date]) this.generateDailyReport(entry.date, true);
   }
 
   private actorName(): string | undefined {
     return this.state.personalIdentity?.displayName ?? this.state.ownerName;
   }
 
-  /** V2.19 — Daily Command Completion: "I'm done with this ticket here", independent of the
-   *  Jira issue's own status and of any specific Action/Mention. Never touches Jira, never
-   *  mutates data.workItems or any existing Action — see types.ts's DailyCommandCompletion for
-   *  the full reasoning and personal-focus.ts/assigned-work.ts/recent-mentions.ts for where
-   *  this suppresses the ticket. `completedBy` defaults to the configured identity's display
-   *  name, when set, matching every other "who did this" field in this codebase.
-   *  V2.23/V2.26 — mutual exclusion: also clears any skip/block on the same ticket (the
-   *  SKIPPED -> COMPLETED and BLOCKED -> COMPLETED transitions). */
-  completeTicketInDailyCommand(ticketKey: string) {
-    const now = new Date().toISOString();
-    this.setDailyCommand(ticketKey, { kind: "completion", record: { ticketKey, completedAt: now, completedBy: this.actorName() } }, now);
-    this.recordTicketEvent("TICKET_COMPLETED", ticketKey);
-  }
+  /** The records linked to a ticket, brought in line with its new status (STEP 1 table):
+   *  DONE → open plan items completed, open actions completed, open attention items resolved;
+   *  BLOCKED / SKIPPED / DEFERRED / IN_PROGRESS → open plan items mirror it (BLOCKED keeps the
+   *  reason; no Follow-up Action is ever created here); TODO → plan items dated today or later
+   *  go back to planned. A plan item from a past day that is already finished is history and is
+   *  never rewritten. */
+  private linkedRecordsFor(ticketKey: string, record: TicketWorkState, today: string): Pick<StoreState, "personalPlan" | "data" | "attentionState"> {
+    const data = this.state.data;
+    const status = record.status;
+    const workItemIds = new Set(data.workItems.filter((w) => w.key === ticketKey).map((w) => w.id));
+    const isOpenPlan = (p: PersonalPlanItem) => p.plannedDate >= today || p.status === "planned" || p.status === "in-progress" || p.status === "blocked";
+    let planChanged = false;
+    const personalPlan = this.state.personalPlan.map((p) => {
+      if (ticketKeyForPlanItem(p, data) !== ticketKey) return p;
+      const linked: PersonalPlanItem = p.ticketKey ? p : { ...p, ticketKey };
+      let next = linked;
+      if (status === "TODO") {
+        if (p.plannedDate >= today && p.status !== "planned") {
+          next = { ...linked, status: "planned" };
+          delete next.completedAt;
+          delete next.blockedReason;
+          delete next.blockedNote;
+          delete next.deferredUntil;
+        }
+      } else if (isOpenPlan(p)) {
+        next = {
+          ...linked,
+          status: planStatusForTicket(status),
+          ...(status === "DONE" ? { completedAt: today } : {}),
+          ...(status === "BLOCKED" ? { blockedReason: record.reason } : {}),
+          ...(status === "DEFERRED" ? { deferredUntil: record.until } : {}),
+        };
+      }
+      if (next !== p) planChanged = true;
+      return next;
+    });
 
-  /** The only way back once a ticket is Daily-Command-completed — never automatic (§14
-   *  Reactivation Rule: even a genuinely new mention only reactivates Recently Mentioned, it
-   *  never clears this record on its own). */
-  reopenTicketInDailyCommand(ticketKey: string) {
-    if (!(ticketKey in this.state.dailyCommandCompletions)) return;
-    this.setDailyCommand(ticketKey, null);
-    this.recordTicketEvent("TICKET_REOPENED", ticketKey);
-  }
-
-  /** V2.23 — Daily Command Skip: "this work is relevant, but I am intentionally not
-   *  executing it right now" (e.g. another team owns it) — a PERSONAL EXECUTION STATE,
-   *  distinct from Work Relevance EXCLUDED (a policy/project-truth concept) and from Daily
-   *  Command Completion (types.ts's DailyCommandSkip has the full reasoning). Never touches
-   *  Jira, never mutates data.workItems or any existing Action. `reason` is always optional —
-   *  never required to skip an item (§7). Mutually exclusive with completion/block.
-   *  A4 — `revisitOn` (local YYYY-MM-DD, optional) only schedules a Daily Review re-check;
-   *  it never un-skips anything by itself. */
-  skipTicketInDailyCommand(ticketKey: string, reason?: SkipReason, revisitOn?: string) {
-    const now = new Date().toISOString();
-    const skip: DailyCommandSkip = { ticketKey, skippedAt: now, skippedBy: this.actorName(), reason, ...(isIsoDate(revisitOn) ? { revisitOn } : {}) };
-    this.setDailyCommand(ticketKey, { kind: "skip", record: skip }, now);
-    this.recordTicketEvent("TICKET_SKIPPED", ticketKey, reason);
-  }
-
-  /** The explicit "Reactivate" action (§9) — the only way back from SKIPPED to ACTIVE. Never
-   *  automatic: an ordinary Jira sync, status change, or comment must never clear this record
-   *  on its own (§8) — only this call, completion/block's mutual-exclusion clear, or A4's
-   *  "closed in Jira" move to Completed ever removes a skip. */
-  reactivateSkippedTicket(ticketKey: string) {
-    if (!(ticketKey in this.state.dailyCommandSkips)) return;
-    this.setDailyCommand(ticketKey, null);
-    this.recordTicketEvent("TICKET_REACTIVATED", ticketKey);
-  }
-
-  /** V2.26 — Daily Command Block: "not done, paused — waiting on something outside my
-   *  control". Same shape and guarantees as skipTicketInDailyCommand: never touches Jira or
-   *  data.workItems, `reason` always optional (free text, trimmed, bounded; blank means no
-   *  reason). Clears any completion/skip for the same ticketKey so the three states stay
-   *  mutually exclusive. Re-blocking an already-blocked ticket replaces the record (new
-   *  timestamp/reason). A4 — optional `revisitOn`, same as skip. */
-  blockTicketInDailyCommand(ticketKey: string, reason?: string, revisitOn?: string, pingOn?: string) {
-    const now = new Date().toISOString();
-    const trimmed = reason?.trim().slice(0, MAX_BLOCK_REASON_LENGTH);
-    const block: DailyCommandBlock = {
-      ticketKey,
-      blockedAt: now,
-      blockedBy: this.actorName(),
-      reason: trimmed ? trimmed : undefined,
-      ...(isIsoDate(revisitOn) ? { revisitOn } : {}),
-      // D5 — "ping on <date>": a reminder to chase whoever this waits on.
-      ...(isIsoDate(pingOn) ? { pingOn } : {}),
+    let actions = data.actions;
+    let attentionState = this.state.attentionState;
+    const from = record.history[record.history.length - 1]?.from;
+    if (status === "TODO" && from === "DONE") {
+      // Reopen: the ticket's most recently completed linked action comes back too (it is how
+      // Action Plan represents the ticket); older completed attempts stay history.
+      const latest = data.actions
+        .filter((a) => a.status === "completed" && !!a.relatedWorkItemId && workItemIds.has(a.relatedWorkItemId))
+        .sort((a, b) => (b.completedAt ?? b.createdAt).localeCompare(a.completedAt ?? a.createdAt))[0];
+      if (latest) actions = data.actions.map((a) => (a.id === latest.id ? { ...a, status: "open" as const } : a));
+    }
+    if (status === "DONE") {
+      const done = new Set<string>();
+      actions = data.actions.map((a) => {
+        if (a.status === "completed" || !a.relatedWorkItemId || !workItemIds.has(a.relatedWorkItemId)) return a;
+        done.add(a.id);
+        return { ...a, status: "completed" as const, completedAt: a.completedAt ?? today };
+      });
+      if (done.size === 0) actions = data.actions;
+      const ticketSlug = slug(ticketKey);
+      const belongs = (id: string) =>
+        id.startsWith(`MENTION:${ticketSlug}:`) ||
+        Array.from(workItemIds).some((wid) => id === `ASSIGNMENT:${slug(wid)}` || id === `STALE:${slug(wid)}`) ||
+        Array.from(done).some((aid) => id === `ACTION:${slug(aid)}`);
+      const resolved = Object.entries(this.state.attentionState).filter(([id, s]) => s.lifecycle !== "RESOLVED" && belongs(id));
+      if (resolved.length > 0) {
+        attentionState = { ...this.state.attentionState };
+        for (const [id, s] of resolved) attentionState[id] = { ...s, lifecycle: "RESOLVED", resolvedManually: true };
+      }
+    }
+    return {
+      personalPlan: planChanged ? personalPlan : this.state.personalPlan,
+      data: actions === data.actions ? data : { ...data, actions },
+      attentionState,
     };
-    this.setDailyCommand(ticketKey, { kind: "block", record: block }, now);
-    this.recordTicketEvent("TICKET_BLOCKED", ticketKey, block.reason);
   }
 
-  /** The explicit "Unblock" action — BLOCKED -> ACTIVE. Never automatic, same rule as
-   *  reactivateSkippedTicket: no sync, status change, or comment clears a block on its own. */
-  unblockTicketInDailyCommand(ticketKey: string) {
-    if (!(ticketKey in this.state.dailyCommandBlocks)) return;
-    this.setDailyCommand(ticketKey, null);
-    this.recordTicketEvent("TICKET_UNBLOCKED", ticketKey);
+  /** THE one write path for a ticket's personal status (TicketWorkState). Enforces the
+   *  transition table (ticket-work-state.ts canTransition — DONE only goes back to TODO, via an
+   *  explicit Reopen), appends history, records the TICKET_* memory event reports read, updates
+   *  every linked plan item / action / attention item, and re-derives the deprecated Daily
+   *  Command maps — all in ONE set(). Never touches Jira or data.workItems. Returns false when
+   *  nothing changed (rejected transition or no-op). */
+  setTicketStatus(ticketKey: string, status: TicketWorkStatus, opts: Partial<SetTicketStatusOptions> = {}): boolean {
+    const nowIso = new Date().toISOString();
+    const today = getTodayIso();
+    const result = applyTicketStatus(this.state.ticketWorkStates, ticketKey, status, { by: this.actorName(), ...opts, surface: opts.surface ?? "other" }, nowIso);
+    if (!result.changed) return false;
+    const record = result.states[ticketKey];
+    const event = this.ticketEvent(ticketEventKind(result.from, status), ticketKey, record.reason);
+    this.set({
+      ...this.state,
+      ...this.linkedRecordsFor(ticketKey, record, today),
+      ticketWorkStates: result.states,
+      ...deriveLegacyDailyCommandState(result.states, nowIso, this.state.dailyCommandTombstones),
+      memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS),
+    });
+    // Keep an already-generated report for today current (events + standup), so the action
+    // is in it even if memoryEvents later rolls past its cap before the next sync.
+    if (this.state.dailyReports[event.date]) this.generateDailyReport(event.date, true);
+    return true;
+  }
+
+  /** Whether a transition would be accepted (UI uses it to decide which buttons to show). */
+  canSetTicketStatus(ticketKey: string, status: TicketWorkStatus): boolean {
+    const from = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
+    return canTransition(from, status) && !isNoopTransition(from, status);
+  }
+
+  // ===== Ticket actions — thin, named wrappers over setTicketStatus =====
+  // Kept under their V2.19-V2.26 names so every existing caller keeps working; `surface` is
+  // recorded in the ticket's history only.
+
+  /** V2.19 — "I'm done with this ticket here", independent of Jira's own status. */
+  completeTicketInDailyCommand(ticketKey: string, surface: TicketStatusSurface = "command-center") {
+    this.setTicketStatus(ticketKey, "DONE", { surface });
+  }
+
+  /** The only way back from DONE — never automatic (a new mention only shows a reactivation
+   *  label; it never clears the record). */
+  reopenTicketInDailyCommand(ticketKey: string, surface: TicketStatusSurface = "command-center") {
+    if (ticketStatusOf(this.state.ticketWorkStates, ticketKey) !== "DONE") return;
+    this.setTicketStatus(ticketKey, "TODO", { surface });
+  }
+
+  /** V2.23 — "relevant, but I'm intentionally not executing it right now". `reason` optional;
+   *  A4 `revisitOn` only schedules a re-check, it never un-skips anything by itself. */
+  skipTicketInDailyCommand(ticketKey: string, reason?: SkipReason | string, revisitOn?: string, surface: TicketStatusSurface = "command-center") {
+    this.setTicketStatus(ticketKey, "SKIPPED", { surface, reason, until: revisitOn });
+  }
+
+  /** Explicit Reactivate — SKIPPED/DEFERRED → TODO. Never automatic. */
+  reactivateSkippedTicket(ticketKey: string, surface: TicketStatusSurface = "command-center") {
+    const status = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
+    if (status !== "SKIPPED" && status !== "DEFERRED") return;
+    this.setTicketStatus(ticketKey, "TODO", { surface });
+  }
+
+  /** V2.26 — "not done, paused on something outside my control". Free-text reason (trimmed,
+   *  bounded); optional re-check and D5 ping dates. */
+  blockTicketInDailyCommand(ticketKey: string, reason?: string, revisitOn?: string, pingOn?: string, surface: TicketStatusSurface = "command-center") {
+    this.setTicketStatus(ticketKey, "BLOCKED", { surface, reason: reason?.slice(0, MAX_BLOCK_REASON_LENGTH), until: revisitOn, pingOn });
+  }
+
+  /** Explicit Unblock — BLOCKED → TODO. Never automatic. */
+  unblockTicketInDailyCommand(ticketKey: string, surface: TicketStatusSurface = "command-center") {
+    if (ticketStatusOf(this.state.ticketWorkStates, ticketKey) !== "BLOCKED") return;
+    this.setTicketStatus(ticketKey, "TODO", { surface });
+  }
+
+  /** Start — → IN_PROGRESS. */
+  startTicket(ticketKey: string, surface: TicketStatusSurface = "command-center") {
+    this.setTicketStatus(ticketKey, "IN_PROGRESS", { surface });
+  }
+
+  /** Stop working on an in-progress ticket without finishing it — IN_PROGRESS → TODO. */
+  stopTicket(ticketKey: string, surface: TicketStatusSurface = "command-center") {
+    if (ticketStatusOf(this.state.ticketWorkStates, ticketKey) !== "IN_PROGRESS") return;
+    this.setTicketStatus(ticketKey, "TODO", { surface });
+  }
+
+  /** Defer — → DEFERRED until `until` (default: tomorrow), when it comes back to Today. */
+  deferTicket(ticketKey: string, until?: string, reason?: string, surface: TicketStatusSurface = "command-center") {
+    this.setTicketStatus(ticketKey, "DEFERRED", { surface, reason, until: until ?? addDays(getTodayIso(), 1) });
   }
 
   /** V2.26 — records a Daily Review visit. `at` is injectable for tests. A3 — no longer
@@ -1437,9 +1577,7 @@ export class CommandCenterStore {
       workItems: data.workItems,
       identity: { displayName: this.state.personalIdentity?.displayName ?? this.state.ownerName, accountId: this.state.personalIdentity?.accountId },
       workRelevanceIndex: buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy),
-      dailyCommandCompletions: this.state.dailyCommandCompletions,
-      dailyCommandSkips: this.state.dailyCommandSkips,
-      dailyCommandBlocks: this.state.dailyCommandBlocks,
+      ...selectDailyCommandMaps(this.state, toLocalIso(now)),
       memoryEvents: this.state.memoryEvents,
       mentionEvents: scopeMentionEvents(this.state.mentionEvents, data.workItems, this.state.jiraProjectScope),
       attentionState: this.state.attentionState,
@@ -1449,6 +1587,25 @@ export class CommandCenterStore {
       reviewAcks: this.state.dailyReviewAcks,
       now,
     });
+  }
+
+  /** My Work over the same scoped data the page uses (no focus candidates — they only rank
+   *  Today, never move a ticket between views). Its badge is unreviewed New + due re-checks. */
+  computeMyWork(now: Date = new Date()): MyWork {
+    const data = applyProjectScope(this.state.data, this.state.jiraProjectScope);
+    return buildMyWork({
+      workItems: data.workItems,
+      identity: { displayName: this.state.personalIdentity?.displayName ?? this.state.ownerName, accountId: this.state.personalIdentity?.accountId },
+      workRelevanceIndex: buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy),
+      ticketWorkStates: this.state.ticketWorkStates,
+      today: toLocalIso(now),
+      personalPlan: this.state.personalPlan,
+      review: this.computeDailyReview(now),
+    });
+  }
+
+  computeMyWorkBadge(now: Date = new Date()): number {
+    return this.computeMyWork(now).badge;
   }
 
   /** B4 — Data & Settings: Mon–Fri weeks (default) or 7 calendar days. */
@@ -1495,11 +1652,20 @@ export class CommandCenterStore {
       memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
       dailyReports: synced.dailyReports,
       // A1 — every execution-state field is optional on a synced blob (pre-A1 writers never
-      // sent them): absent means "keep local", never "clear".
-      dailyCommandCompletions: synced.dailyCommandCompletions ?? this.state.dailyCommandCompletions,
-      dailyCommandSkips: synced.dailyCommandSkips ?? this.state.dailyCommandSkips,
-      dailyCommandBlocks: synced.dailyCommandBlocks ?? this.state.dailyCommandBlocks,
-      dailyCommandTombstones: synced.dailyCommandTombstones ?? this.state.dailyCommandTombstones,
+      // sent them): absent means "keep local", never "clear". The synced ticketWorkStates (or,
+      // from a pre-TicketWorkState writer, its legacy maps) are folded into the canonical
+      // state and the deprecated maps re-derived from it.
+      ...ticketStateFromLegacy(
+        synced.ticketWorkStates ? asTicketWorkStates(synced.ticketWorkStates) : this.state.ticketWorkStates,
+        {
+          dailyCommandCompletions: synced.dailyCommandCompletions ?? {},
+          dailyCommandSkips: synced.dailyCommandSkips ?? {},
+          dailyCommandBlocks: synced.dailyCommandBlocks ?? {},
+          dailyCommandTombstones: synced.dailyCommandTombstones ?? this.state.dailyCommandTombstones,
+        },
+        synced.actionPlanState.personalPlan,
+        undefined
+      ),
       syncLog: synced.syncLog ?? this.state.syncLog,
       dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? this.state.dailyReviewLastVisitAt,
       dailyReviewAcks: synced.dailyReviewAcks ?? this.state.dailyReviewAcks,
@@ -1840,11 +2006,13 @@ export class CommandCenterStore {
     // A4 — a skipped/blocked ticket Jira has since closed (Done / COMPLETED) leaves the
     // Skipped/Blocked lists on its own and lands in Completed history, source "jira", keeping
     // the skip/block it replaced. Never the reverse: a Jira reopen does not un-complete it.
-    const jiraClosed = closePausedTicketsFinishedInJira(this.state, merged.workItems, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), observedAt, getTodayIso());
+    const jiraClosed = closePausedTicketsFinishedInJira(this.state.ticketWorkStates, merged.workItems, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), observedAt, getTodayIso());
 
     this.set({
       ...this.state,
-      ...(jiraClosed.closedKeys.length > 0 ? jiraClosed.state : {}),
+      ...(jiraClosed.closedKeys.length > 0
+        ? { ticketWorkStates: jiraClosed.states, ...deriveLegacyDailyCommandState(jiraClosed.states, observedAt, this.state.dailyCommandTombstones) }
+        : {}),
       data: merged,
       dataSource: "jira",
       loaded: true,
@@ -2142,9 +2310,7 @@ export class CommandCenterStore {
    *  instead of silently omitting it just because they run server-of-truth-side rather than
    *  through the React hook. */
   private resolveDailyCommandCompletedWorkItemIds(data: CommandCenterData): ReadonlySet<string> {
-    const keys = new Set(Object.keys(this.state.dailyCommandCompletions ?? {}));
-    if (keys.size === 0) return new Set<string>();
-    return new Set(data.workItems.filter((w) => keys.has(w.key)).map((w) => w.id));
+    return ticketExclusionSets(this.state.ticketWorkStates, data.workItems, getTodayIso()).doneIds;
   }
 
   /** V1.4 §41 — derives the small set of meaningful proactive-intelligence events for a
@@ -2256,8 +2422,11 @@ export class CommandCenterStore {
     priority: number;
     origin?: PlanItemOrigin;
     snapshot?: PersonalPlanItemSnapshot;
+    /** The candidate's ticket, when it has one — links this plan item to TicketWorkState. */
+    ticketKey?: string;
   }): string {
     const id = `plan-${input.sourceType}-${input.sourceId}-${Date.now()}`;
+    const ticketKey = input.ticketKey ?? ticketKeyForPlanItem({ sourceId: input.sourceId }, this.state.data);
     const item: PersonalPlanItem = {
       id,
       sourceType: input.sourceType,
@@ -2270,6 +2439,7 @@ export class CommandCenterStore {
       addedAt: new Date().toISOString(),
       origin: input.origin ?? "user-added",
       snapshot: input.snapshot,
+      ...(ticketKey ? { ticketKey } : {}),
     };
     const personalPlan = [...this.state.personalPlan, item].slice(-MAX_PERSONAL_PLAN_ITEMS);
     this.set({ ...this.state, personalPlan });
@@ -2292,6 +2462,7 @@ export class CommandCenterStore {
       addedAt: new Date().toISOString(),
       origin: "system-suggested",
       snapshot: { category: c.category, projectId: c.projectId, ownershipExplicit: c.ownershipExplicit },
+      ...(c.ticketKey ? { ticketKey: c.ticketKey } : {}),
     }));
     const personalPlan = [...this.state.personalPlan, ...items].slice(-MAX_PERSONAL_PLAN_ITEMS);
     this.set({ ...this.state, personalPlan });
@@ -2316,8 +2487,17 @@ export class CommandCenterStore {
     this.set({ ...this.state, personalPlan: this.state.personalPlan.filter((p) => p.id !== id) });
   }
 
-  deferPersonalPlanItem(id: string) {
-    this.updatePersonalPlanItem(id, { status: "deferred" });
+  /** My Day "Defer". A plan item about a ticket defers the TICKET (TicketWorkState DEFERRED
+   *  until `until`, default tomorrow — it comes back to Today on that date, everywhere); a
+   *  ticketless item (decision loop, free action) keeps its own status. */
+  deferPersonalPlanItem(id: string, until?: string) {
+    const item = this.state.personalPlan.find((p) => p.id === id);
+    const ticketKey = item ? ticketKeyForPlanItem(item, this.state.data) : undefined;
+    if (ticketKey) {
+      this.deferTicket(ticketKey, until, undefined, "my-day");
+      return;
+    }
+    this.updatePersonalPlanItem(id, { status: "deferred", ...(until ? { deferredUntil: until } : {}) });
   }
 
   /** V1.7 §17 — a pinned item is never silently displaced or removed by reconciliation;
@@ -2340,19 +2520,37 @@ export class CommandCenterStore {
       priority: sourcePlanItem.priority,
       origin: "carried-forward",
       snapshot: sourcePlanItem.snapshot,
+      ticketKey: sourcePlanItem.ticketKey,
     });
   }
 
-  private setFocusStatus(id: string, status: PersonalPlanItemStatus, kind: "FOCUS_STARTED" | "FOCUS_COMPLETED" | "FOCUS_BLOCKED" | "FOCUS_SKIPPED", today: string) {
+  /** Focus Session status change. A plan item about a ticket goes through setTicketStatus (so
+   *  the ticket — and every list showing it — moves with it; the plan item follows as a linked
+   *  record); a rejected ticket transition (e.g. the ticket is already DONE) changes nothing.
+   *  A ticketless plan item keeps its own status. The FOCUS_* event carries the ticketKey so
+   *  reports merge it with the TICKET_* event into one line. */
+  private setFocusStatus(id: string, status: PersonalPlanItemStatus, kind: "FOCUS_STARTED" | "FOCUS_COMPLETED" | "FOCUS_BLOCKED" | "FOCUS_SKIPPED", today: string, ticketOpts: { reason?: string } = {}) {
     const item = this.state.personalPlan.find((p) => p.id === id);
     if (!item) return;
-    this.updatePersonalPlanItem(id, { status, ...(status === "completed" ? { completedAt: today } : {}) });
+    const ticketKey = ticketKeyForPlanItem(item, this.state.data);
+    if (ticketKey) {
+      const to: TicketWorkStatus = status === "completed" ? "DONE" : status === "blocked" ? "BLOCKED" : status === "skipped" ? "SKIPPED" : "IN_PROGRESS";
+      const current = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
+      if (!canTransition(current, to)) return;
+      this.setTicketStatus(ticketKey, to, { surface: "focus-session", reason: ticketOpts.reason });
+      // The plan item may be from an earlier day (not touched by the linked-records rule), so
+      // make sure THIS one reflects the session.
+      const after = this.state.personalPlan.find((p) => p.id === id);
+      if (after && after.status !== status) this.updatePersonalPlanItem(id, { status, ticketKey, ...(status === "completed" ? { completedAt: today } : {}) });
+    } else {
+      this.updatePersonalPlanItem(id, { status, ...(status === "completed" ? { completedAt: today } : {}) });
+    }
     // V2.17 Task 2 — a plan item's snapshot.projectId (captured when it was added to the
     // plan) is the only point-in-time project fact readily available here; its source can be
     // any of several entity types (attention/action/decision/loop), so — same "never guess
     // which ticket" discipline as reportContextForDecision above — no ticketKey is attempted.
     const projectName = item.snapshot?.projectId ? this.state.data.projects.find((p) => p.id === item.snapshot!.projectId)?.name : undefined;
-    this.appendMemoryEvent({ kind, title: `Focus ${status}: ${item.sourceType}:${item.sourceId}`, impact: `Planned for ${item.plannedDate}.`, evidence: [], projectId: item.snapshot?.projectId, projectName });
+    this.appendMemoryEvent({ kind, title: `Focus ${status}: ${item.sourceType}:${item.sourceId}`, impact: `Planned for ${item.plannedDate}.`, evidence: [], projectId: item.snapshot?.projectId, projectName, ...(ticketKey ? { ticketKey } : {}) });
   }
 
   /** §16, §18 — Focus Session lifecycle. These are personal execution states only — they
@@ -2368,8 +2566,8 @@ export class CommandCenterStore {
   /** V2.0 §7 — blockedReason/blockedNote are optional capture from the Focus Session
    *  "Blocked" flow; never invented when the user skips the capture step. */
   blockFocusItem(id: string, today: string, blockedReason?: string, blockedNote?: string) {
+    this.setFocusStatus(id, "blocked", "FOCUS_BLOCKED", today, { reason: [blockedReason, blockedNote].filter(Boolean).join(" — ") || undefined });
     if (blockedReason || blockedNote) this.updatePersonalPlanItem(id, { blockedReason, blockedNote });
-    this.setFocusStatus(id, "blocked", "FOCUS_BLOCKED", today);
   }
   skipFocusItem(id: string, today: string) {
     this.setFocusStatus(id, "skipped", "FOCUS_SKIPPED", today);
@@ -2397,9 +2595,8 @@ export class CommandCenterStore {
       data,
       identity: { displayName: this.state.personalIdentity?.displayName ?? this.state.ownerName, accountId: this.state.personalIdentity?.accountId },
       workRelevanceIndex: buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy),
-      dailyCommandCompletions: this.state.dailyCommandCompletions,
-      dailyCommandSkips: this.state.dailyCommandSkips,
-      dailyCommandBlocks: this.state.dailyCommandBlocks,
+      ...selectDailyCommandMaps(this.state, toLocalIso(now)),
+      ticketWorkStates: this.state.ticketWorkStates,
       personalPlan: this.state.personalPlan,
       mentionEvents: scopeMentionEvents(this.state.mentionEvents, data.workItems, this.state.jiraProjectScope),
       attentionState: this.state.attentionState,

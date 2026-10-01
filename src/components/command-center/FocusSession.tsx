@@ -6,6 +6,12 @@
 // "Did It Work?" for an Action, DecisionAssistant for a Decision, or
 // acknowledge/resolve/create-action for a plain attention item. These are personal
 // execution states only — never touches Jira/Risk/Decision status automatically (§18).
+//
+// A candidate about a ticket (candidate.ticketKey) moves the TICKET: start/complete/block/skip
+// go through store.start/complete/block/skipFocusItem, which call setTicketStatus — so the
+// ticket shows the same status on Command Center, My Work, Priorities, Daily Review, Action
+// Plan and Attention immediately. A Follow-up Action is created only when the user ticks
+// "Create a follow-up action" — never automatically.
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -15,7 +21,7 @@ import { useCommandCenter } from "./use-command-center";
 import { DecisionAssistant } from "./DecisionAssistant";
 import { FocusCategoryBadge, MetaPill, TrustLabel } from "./ui";
 import { openSourceHref } from "./personal-focus-helpers";
-import { TicketLink } from "./TicketLink";
+import { TaskRow } from "./TaskReferenceRow";
 
 const OUTCOME_STATUSES: ActionOutcomeStatus[] = ["RESOLVED", "IMPROVED", "PARTIALLY_IMPROVED", "NO_CHANGE", "WORSENED", "UNKNOWN"];
 
@@ -143,12 +149,10 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
           <MetaPill className="ml-auto">{sessionState.replace(/_/g, " ")}</MetaPill>
         </div>
 
-        {(candidate.projectName || candidate.ticketKey) && (
-          <p className="flex items-center gap-2 text-xs text-text3">
-            {candidate.projectName}
-            {candidate.ticketKey && <TicketLink ticketKey={candidate.ticketKey} url={candidate.ticketUrl} className="text-text3" />}
-          </p>
-        )}
+        {candidate.projectName && <p className="text-xs text-text3">{candidate.projectName}</p>}
+        {/* The ticket's status as every other list shows it. readOnly: this session's own
+            Complete / Blocked / Skip buttons below ARE the ticket actions (AUDIT_TASK_STATE.md §2.6). */}
+        {candidate.ticketKey && <TaskRow as="div" ticketKey={candidate.ticketKey} url={candidate.ticketUrl} showTitle={false} signals={candidate.signals} readOnly />}
         <h2 id="focus-session-title" className="mt-1 font-display text-lg text-text">{candidate.title}</h2>
         <div className="mt-1"><FocusCategoryBadge category={candidate.category} /></div>
         {(relatedDecision || relatedAction) && (

@@ -6,10 +6,11 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import type { PersonalFocusCandidate, PersonalFocusResult, SkipReason } from "@/lib/command-center/types";
+import type { PersonalFocusCandidate, PersonalFocusResult } from "@/lib/command-center/types";
 import { isMyActionItem } from "@/lib/command-center/personal-relation";
 import { useCommandCenter } from "./use-command-center";
 import { PersonalFocusCard } from "./PersonalFocusCard";
+import { TaskRow } from "./TaskReferenceRow";
 import { FocusSession } from "./FocusSession";
 import { ensurePlanItemId } from "./personal-focus-helpers";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
@@ -27,13 +28,6 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
     setSession({ candidate, planItemId });
   }
 
-  // V2.23 — "I am intentionally not executing this right now" for a candidate that resolves
-  // to a real ticket. Never called for a candidate with no single underlying work item.
-  function skipCandidate(candidate: PersonalFocusCandidate, reason?: SkipReason) {
-    if (!candidate.ticketKey) return;
-    store.skipTicketInDailyCommand(candidate.ticketKey, reason);
-  }
-
   const top3 = myActionItemsOnly ? personalFocus.top3.filter((c) => isMyActionItem(c.relation)) : personalFocus.top3;
   const thirtyMinutePlan = myActionItemsOnly ? personalFocus.thirtyMinutePlan.filter((c) => isMyActionItem(c.relation)) : personalFocus.thirtyMinutePlan;
   const thirtyMinutePlanTotalMinutes = myActionItemsOnly ? thirtyMinutePlan.reduce((s, c) => s + c.estimatedMinutes, 0) : personalFocus.thirtyMinutePlanTotalMinutes;
@@ -45,8 +39,8 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
         subtitle="Deterministic personal focus — ranked from project intelligence, never a second task system."
         action={
           !compact ? (
-            <Link href="/focus" className="text-xs font-medium text-accent2 hover:underline">
-              Open My Day →
+            <Link href="/my-work?view=today" className="text-xs font-medium text-accent2 hover:underline">
+              Open My Work →
             </Link>
           ) : undefined
         }
@@ -73,7 +67,7 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
           )}
           <div className="grid gap-3 md:grid-cols-3">
             {top3.map((c) => (
-              <PersonalFocusCard key={c.id} candidate={c} onStartFocus={startFocus} onSkip={skipCandidate} />
+              <PersonalFocusCard key={c.id} candidate={c} onStartFocus={startFocus} />
             ))}
           </div>
         </>
@@ -111,13 +105,16 @@ export function YourDeliveryFocus({ personalFocus, compact = false }: { personal
           <Panel className="p-4">
             <ol className="space-y-1 text-sm text-text2">
               {thirtyMinutePlan.map((c, i) => (
-                <li key={c.id} className="flex items-center justify-between gap-2">
-                  <span>
-                    {i + 1}. {c.title} — {c.estimatedMinutes}m
-                  </span>
-                  <button onClick={() => startFocus(c)} className="rounded border border-border px-2 py-0.5 text-xs text-text2 hover:border-accent hover:text-text">
-                    Start
-                  </button>
+                <li key={c.id} className="border-b border-border py-1 last:border-b-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span>
+                      {i + 1}. {c.title} — {c.estimatedMinutes}m
+                    </span>
+                    <button onClick={() => startFocus(c)} className="rounded border border-border px-2 py-0.5 text-xs text-text2 hover:border-accent hover:text-text">
+                      Focus
+                    </button>
+                  </div>
+                  {c.ticketKey && <TaskRow as="div" ticketKey={c.ticketKey} url={c.ticketUrl} showTitle={false} signals={c.signals} surface="command-center" />}
                 </li>
               ))}
             </ol>
