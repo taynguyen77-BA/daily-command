@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { initAppStateSync } from "@/lib/command-center/app-state-sync";
 import { initAutoJiraSync } from "@/lib/command-center/auto-sync";
@@ -24,24 +24,86 @@ interface NavLink {
 // deleted, not broken — just hidden from the default nav until the user opts in.
 // Project Memory (`/memory`) is a different case (auto-populated by real system activity) and
 // is intentionally not in this list at all — see data-settings/page.tsx's Activity Log section.
-const LINKS: NavLink[] = [
-  { href: "/", label: "Command Center" },
-  { href: "/focus", label: "My Day" },
-  // V2.26 — the morning check over new / skipped / blocked / completed tickets.
-  { href: "/daily-review", label: "Daily Review" },
-  { href: "/meeting", label: "Meeting Mode" },
-  { href: "/attention", label: "Attention Queue" },
-  { href: "/loops", label: "Delivery Loops", advanced: true },
-  { href: "/priorities", label: "Priorities" },
-  { href: "/changes", label: "Changes" },
-  { href: "/risks", label: "Risks" },
-  { href: "/dependencies", label: "Dependencies" },
-  { href: "/action-plan", label: "Action Plan" },
-  { href: "/decisions", label: "Decision Log", advanced: true },
-  { href: "/weekly-review", label: "Weekly Review" },
-  { href: "/reports", label: "Reports" },
-  { href: "/data-settings", label: "Data & Settings" },
+// C2 — grouped for the morning workflow (every route kept; only the order/grouping changed):
+// start the day (TODAY), work the queues, look into projects, report out, configure.
+interface NavGroup {
+  label: string;
+  links: NavLink[];
+}
+export const NAV_GROUPS: NavGroup[] = [
+  {
+    label: "Today",
+    links: [
+      // V2.26 — the morning check over new / skipped / blocked / completed tickets.
+      { href: "/daily-review", label: "Daily Review" },
+      { href: "/", label: "Command Center" },
+      { href: "/focus", label: "My Day" },
+    ],
+  },
+  {
+    label: "Work queues",
+    links: [
+      { href: "/priorities", label: "Priorities" },
+      { href: "/action-plan", label: "Action Plan" },
+      { href: "/attention", label: "Attention Queue" },
+    ],
+  },
+  {
+    label: "Project insight",
+    links: [
+      { href: "/risks", label: "Risks" },
+      { href: "/dependencies", label: "Dependencies" },
+      { href: "/changes", label: "Changes" },
+      { href: "/loops", label: "Delivery Loops", advanced: true },
+      { href: "/decisions", label: "Decision Log", advanced: true },
+      { href: "/meeting", label: "Meeting Mode" },
+    ],
+  },
+  {
+    label: "Reports",
+    links: [
+      { href: "/reports", label: "Reports" },
+      { href: "/weekly-review", label: "Weekly Review" },
+    ],
+  },
+  { label: "Settings", links: [{ href: "/data-settings", label: "Data & Settings" }] },
 ];
+const LINKS: NavLink[] = NAV_GROUPS.flatMap((g) => g.links);
+
+/** C2 — Daily Review's badge: unreviewed New rows + re-checks due today. Recomputed only when
+ *  the store state object changes. */
+function useDailyReviewBadge(): number {
+  const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
+  return useMemo(() => {
+    if (!state.loaded) return 0;
+    const review = commandCenterStore.computeDailyReview();
+    return review.newRows.length + review.dueForRecheck.length;
+  }, [state]);
+}
+
+/** C2 — opens the configured landing page once per browser session, only when the app was
+ *  entered at "/" (clicking "Command Center" later always goes to "/"). */
+function useLandingRedirect(pathname: string | null) {
+  const router = useRouter();
+  const landing = useSyncExternalStore(
+    commandCenterStore.subscribe,
+    () => commandCenterStore.getSnapshot().defaultLandingPage,
+    () => undefined
+  );
+  const checked = useRef(false);
+  useEffect(() => {
+    if (checked.current || !landing) return;
+    checked.current = true;
+    let alreadyRedirected = false;
+    try {
+      alreadyRedirected = window.sessionStorage.getItem("command-center:landed") === "1";
+      window.sessionStorage.setItem("command-center:landed", "1");
+    } catch {
+      // storage unavailable — redirect at most once per page load instead
+    }
+    if (!alreadyRedirected && pathname === "/" && landing !== "/") router.replace(landing);
+  }, [landing, pathname, router]);
+}
 
 // V2.24 follow-up — a header shortcut for the exact same incremental sync data-settings/
 // page.tsx's "Sync Jira" button already calls (store.syncJira({ full: false })): zero
@@ -137,6 +199,8 @@ export function Nav() {
     () => commandCenterStore.getServerSnapshot().showAdvancedSettings
   );
   const links = LINKS.filter((link) => !link.advanced || showAdvanced);
+  const reviewBadge = useDailyReviewBadge();
+  useLandingRedirect(pathname);
   const activeLink = links.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? links[0];
 
   // V2.15 §3 point 1 — Nav is mounted exactly once, app-wide, by the root layout (persists
@@ -199,19 +263,35 @@ export function Nav() {
         id="mobile-nav-links"
         className={`${open ? "flex" : "hidden"} flex-col gap-0.5 px-4 pb-3 md:flex md:flex-row md:flex-wrap md:items-center md:gap-1 md:px-6 md:py-2 md:pb-2`}
       >
-        {links.map((link) => {
-          const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
+        {NAV_GROUPS.map((group) => {
+          const groupLinks = group.links.filter((link) => !link.advanced || showAdvanced);
+          if (groupLinks.length === 0) return null;
           return (
-            <Link
-              key={link.href}
-              href={link.href}
-              onClick={() => setOpen(false)}
-              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                active ? "bg-surface2 text-text" : "text-text3 hover:text-text2"
-              }`}
-            >
-              {link.label}
-            </Link>
+            <div key={group.label} data-nav-group={group.label} className="flex flex-col gap-0.5 md:flex-row md:items-center md:gap-1">
+              <span className="px-3 pt-2 text-[10px] font-semibold uppercase tracking-wide text-text3 md:px-1 md:pt-0">{group.label}</span>
+              {groupLinks.map((link) => {
+                const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
+                const badge = link.href === "/daily-review" ? reviewBadge : 0;
+                return (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    onClick={() => setOpen(false)}
+                    className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                      active ? "bg-surface2 text-text" : "text-text3 hover:text-text2"
+                    }`}
+                  >
+                    {link.label}
+                    {badge > 0 && (
+                      <span data-nav-badge title="Unreviewed New tickets + re-checks due today" className="rounded-full bg-accent px-1.5 text-[10px] font-semibold leading-4 text-bg">
+                        {badge}
+                      </span>
+                    )}
+                  </Link>
+                );
+              })}
+              <span aria-hidden="true" className="hidden h-4 w-px bg-border md:mx-1 md:block" />
+            </div>
           );
         })}
         <div className="hidden md:ml-auto md:block">

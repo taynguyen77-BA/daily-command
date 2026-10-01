@@ -18,6 +18,8 @@ import { formatExecutionRecord, resolveTaskExecutionState, type TaskExecutionSta
 import { formatRelativeDateTime } from "@/lib/command-center/relative-time";
 import { BLOCK_REASON_SUGGESTIONS, type SkipReason, type TaskReactivation, type WorkItem } from "@/lib/command-center/types";
 import { FirstSeenBadge, TicketLink } from "./TicketLink";
+import { FollowUpDraft } from "./FollowUpDraft";
+import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 
 export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
 
@@ -86,6 +88,7 @@ export function TaskReferenceRowView({
   caption,
   ticketScoped = false,
   as = "li",
+  followUpRows,
 }: {
   ticketKey: string;
   url?: string;
@@ -103,6 +106,8 @@ export function TaskReferenceRowView({
    *  non-ticket controls. */
   ticketScoped?: boolean;
   as?: "li" | "div";
+  /** C1 — blocked rows: the "Draft follow-up" message rows (who it waits on). */
+  followUpRows?: NeedsFromOthersRow[];
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
@@ -139,6 +144,7 @@ export function TaskReferenceRowView({
           </p>
         )}
         {caption && <p className="text-xs text-text3">{caption}</p>}
+        {execution.kind === "blocked" && followUpRows && <FollowUpDraft rows={followUpRows} />}
       </div>
 
       {actions && execution.kind !== "done-in-jira" && (
@@ -279,6 +285,13 @@ export function TaskReferenceRow({
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const key = workItem?.key ?? ticketKey;
   if (!key) return null;
+  const execution = resolveTaskExecutionState(key, state, finishedInJira);
+  let followUpRows: NeedsFromOthersRow[] | undefined;
+  if (execution.kind === "blocked" && !readOnly) {
+    const w = state.data.workItems.find((x) => x.key === key);
+    const deps = w ? state.data.dependencies.filter((d) => d.workItemId === w.id && d.status === "unresolved") : [];
+    followUpRows = needsFromOthersForBlockedTicket({ key, title: w?.title ?? workItem?.title ?? title, dueDate: w?.dueDate }, execution.reason, deps);
+  }
   return (
     <TaskReferenceRowView
       ticketKey={key}
@@ -286,7 +299,8 @@ export function TaskReferenceRow({
       title={showTitle ? (workItem?.title ?? title) : undefined}
       statusLabel={workItem ? (workItem.jiraStatusName ?? workItem.status) : undefined}
       firstSeenAt={workItem?.firstSeenAt}
-      execution={resolveTaskExecutionState(key, state, finishedInJira)}
+      execution={execution}
+      followUpRows={followUpRows}
       reactivation={reactivation}
       actions={readOnly ? undefined : storeActionsFor(key)}
       caption={caption}

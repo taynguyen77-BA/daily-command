@@ -5,6 +5,7 @@ import { useCommandCenter } from "@/components/command-center/use-command-center
 import { getAIProvider } from "@/lib/command-center/ai";
 import { buildWeeklyReviewFacts, type WeeklyReviewFacts } from "@/lib/command-center/weekly-review";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
+import { buildActionStrategyFacts, repeatedlyIneffective } from "@/lib/command-center/action-effectiveness";
 import { getTodayIso } from "@/lib/command-center/store";
 import { buildWeeklyReportSummary, last7DaysEnding, weeklyReportToMarkdown } from "@/lib/command-center/daily-report";
 import { buildWeeklyClientReport, clientReportToMarkdown, downloadMarkdown } from "@/lib/command-center/client-report";
@@ -79,6 +80,16 @@ export default function WeeklyReviewPage() {
     () => (state.loaded ? buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual") : null),
     [state.loaded, filteredData, state.snapshotHistory, today, state.isDemo]
   );
+  // C1 — actions repeated without effect, with the deterministic "change the approach" facts
+  // (action-effectiveness.ts) — the same facts the action-strategy AI call is grounded in.
+  const repeatedIneffective = useMemo(() => {
+    if (!proactive) return [];
+    return repeatedlyIneffective(proactive.actionEffectiveness, filteredData.actions).map(({ action }) => {
+      const attempts = filteredData.actions.filter((a) => a.status === "completed" && !!action.relatedWorkItemId && a.relatedWorkItemId === action.relatedWorkItemId).length || 1;
+      return { action, facts: buildActionStrategyFacts(action, attempts) };
+    });
+  }, [proactive, filteredData.actions]);
+
   const stalledLoopsCount = proactive?.deliveryLoops.filter((l) => l.health === "STALLED").length ?? 0;
 
   if (!state.loaded) {
@@ -277,6 +288,32 @@ export default function WeeklyReviewPage() {
                 </ul>
               </div>
             )}
+          </Panel>
+        )}
+      </section>
+
+      <section data-repeated-ineffective-section>
+        <p className="font-display text-sm text-text">ACTIONS REPEATED WITHOUT EFFECT</p>
+        {repeatedIneffective.length === 0 ? (
+          <p className="py-4 text-sm text-text3">No action has been repeated without resolving its issue.</p>
+        ) : (
+          <Panel className="mt-2 p-5">
+            <div className="mb-2 flex items-center gap-2">
+              <TrustLabel kind="calculated" />
+              <span className="text-xs text-text3">Same work done again and again with no resolution — time to change the approach, not repeat it.</span>
+            </div>
+            <ul className="space-y-2 text-sm text-text2">
+              {repeatedIneffective.map(({ action, facts }) => (
+                <li key={action.id}>
+                  <p className="text-text">{action.title}</p>
+                  <ul className="ml-4 list-disc text-xs">
+                    {facts.facts.map((f) => (
+                      <li key={f}>{f}</li>
+                    ))}
+                  </ul>
+                </li>
+              ))}
+            </ul>
           </Panel>
         )}
       </section>

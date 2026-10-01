@@ -8,6 +8,8 @@ import React from "react";
 import type { DependencyRadarItem, WorkItem } from "@/lib/command-center/types";
 import { HeatBadge, Panel, TrustLabel } from "./ui";
 import { RelatedTickets } from "./TaskReferenceRow";
+import { FollowUpDraft } from "./FollowUpDraft";
+import { needsFromOthersForDependency } from "@/lib/command-center/communicate";
 
 export function DependencyRadarCard({ item, relatedWorkItems }: { item: DependencyRadarItem; relatedWorkItems?: WorkItem[] }) {
   return (
@@ -50,6 +52,7 @@ export function DependencyRadarCard({ item, relatedWorkItems }: { item: Dependen
       </dl>
       <p className="mt-2 text-xs font-medium text-accent2">Recommended: {item.recommended}</p>
       <RelatedTickets workItems={relatedWorkItems} label="Blocked ticket" />
+      <FollowUpDraft rows={[needsFromOthersForDependency(item)]} />
     </Panel>
   );
 }

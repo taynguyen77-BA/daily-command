@@ -3,13 +3,17 @@
 // V1.5 — one Action Plan candidate row (moved out of action-plan/page.tsx in V2.26 so it is
 // renderable on its own; behavior unchanged apart from the TaskReferenceRow ticket line).
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useCommandCenter } from "./use-command-center";
 import { ActionOutcomeBadge, MetaPill, SeverityBadge } from "./ui";
 import { TaskReferenceRow } from "./TaskReferenceRow";
 import type { PlanCandidate } from "@/lib/command-center/action-plan";
 import { commandCenterStore } from "@/lib/command-center/store";
-import type { ActionOutcomeStatus } from "@/lib/command-center/types";
+import type { Action, ActionOutcomeStatus } from "@/lib/command-center/types";
+import { projectActionImpact } from "@/lib/command-center/impact-projection";
+import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
+import { repeatedlyIneffective } from "@/lib/command-center/action-effectiveness";
+import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 
 const ACTION_TITLE = "Updates only this planned action — the ticket's own state is set with the \u201c… ticket\u201d buttons.";
 
@@ -17,7 +21,7 @@ const ACTION_TITLE = "Updates only this planned action — the ticket's own stat
 const OUTCOME_STATUSES: ActionOutcomeStatus[] = ["RESOLVED", "IMPROVED", "PARTIALLY_IMPROVED", "NO_CHANGE", "WORSENED", "UNKNOWN"];
 
 export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
-  const { state, store } = useCommandCenter();
+  const { state, store, proactive, today } = useCommandCenter();
   const [note, setNote] = useState(candidate.action?.note ?? "");
   const [showNote, setShowNote] = useState(false);
   // V1.5 — buildPlan() re-synthesizes a fresh, action-less candidate for a still-open work
@@ -43,6 +47,29 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
 
   const status = liveAction?.status ?? "open";
 
+  // C1 — "If nothing changes" (impact-projection.ts), the same block Risk/Decision cards use.
+  // A candidate with no logged Action yet is projected as the open action it would become.
+  const impactContent = useMemo(() => {
+    const action: Action = liveAction ?? { id: candidate.id, title: candidate.title, why: candidate.reason, status: "open", estimateMinutes: candidate.estimateMinutes, createdAt: today, ...(candidate.item ? { relatedWorkItemId: candidate.item.id } : {}) };
+    const impact = projectActionImpact(action);
+    return buildWhyShouldICare({
+      fact: [`Planned: ${action.title}`, `Estimate: ${candidate.estimateMinutes} min`, `Status: ${action.status}`],
+      signal: candidate.reason,
+      impact,
+      unknown: liveAction ? [] : ["Not yet logged as an Action — no history for it yet."],
+      nextMove: action.title,
+      evidence: impact.evidence,
+    });
+  }, [liveAction, candidate, today]);
+
+  // C1 — the same work attempted 3+ times without resolving it (action-effectiveness.ts).
+  const repeated = useMemo(() => {
+    if (!liveAction || !proactive) return undefined;
+    const hit = repeatedlyIneffective(proactive.actionEffectiveness, state.data.actions).find((r) => r.action.id === liveAction.id || (!!liveAction.relatedWorkItemId && r.action.relatedWorkItemId === liveAction.relatedWorkItemId));
+    if (!hit) return undefined;
+    return state.data.actions.filter((a) => a.status === "completed" && !!liveAction.relatedWorkItemId && a.relatedWorkItemId === liveAction.relatedWorkItemId).length || 1;
+  }, [liveAction, proactive, state.data.actions]);
+
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       <div className="flex items-start justify-between gap-3">
@@ -52,6 +79,11 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
             <span className="text-xs text-text3">{candidate.estimateMinutes} min</span>
             {status !== "open" && <MetaPill>{status}</MetaPill>}
             {liveAction?.outcomeStatus && <ActionOutcomeBadge status={liveAction.outcomeStatus} />}
+            {repeated !== undefined && (
+              <span data-repeated-ineffective title="The same work was completed before without resolving the issue — consider a different approach." className="rounded bg-red/15 px-1.5 py-0.5 text-[10px] font-medium text-red">
+                ⚠ Repeated without effect ({repeated}×)
+              </span>
+            )}
           </div>
           {/* V2.26 — a candidate tied to a ticket shows the ticket through the shared
               TaskReferenceRow (Jira link + ticket-level Complete/Skip/Block) instead of plain
@@ -97,6 +129,8 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
           {showNote ? "Hide note" : "Add note"}
         </button>
       </div>
+
+      <WhyShouldICareDrawer content={impactContent} triggerLabel="If nothing changes" />
 
       {status === "completed" && !liveAction?.outcomeStatus && (
         <div className="mt-3 border-t border-border pt-3">

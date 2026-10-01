@@ -41,7 +41,7 @@ function matchesRelationFilter(relation: PersonalRelation, filter: RelationFilte
 function PrioritiesInner() {
   const { state, today, derived, filteredData, store, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, dailyCommandBlockedWorkItemIds, proactive, personalFocus } = useCommandCenter();
   const searchParams = useSearchParams();
-  const [filter, setFilter] = useState<string>(searchParams.get("filter") ?? "ALL");
+  const [filter, setFilter] = useState<string>(searchParams?.get("filter") ?? "ALL");
   const [relationFilter, setRelationFilter] = useState<RelationFilter>("ALL");
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
   const myActionItemsOnly = state.myActionItemsOnly.priorities;

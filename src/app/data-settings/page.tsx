@@ -1,5 +1,7 @@
 "use client";
 
+import { NAV_GROUPS } from "@/components/command-center/Nav";
+import { LANDING_PAGES } from "@/lib/command-center/store";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
@@ -891,6 +893,24 @@ export default function DataSettingsPage() {
           />
           <p className="text-xs text-text3">More reliable than display name — find it in your Jira profile URL.</p>
         </div>
+      </Panel>
+
+      <Panel className="p-5">
+        <SectionHeading title="Start page" subtitle="Which page the app opens on. Command Center stays one click away in the navigation." />
+        <select
+          value={state.defaultLandingPage ?? "/"}
+          onChange={(e) => store.setDefaultLandingPage(e.target.value)}
+          aria-label="Start page"
+          className="rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text"
+        >
+          {NAV_GROUPS.flatMap((g) => g.links)
+            .filter((l) => LANDING_PAGES.includes(l.href))
+            .map((l) => (
+              <option key={l.href} value={l.href}>
+                {l.label}
+              </option>
+            ))}
+        </select>
       </Panel>
 
       <Panel className="p-5">

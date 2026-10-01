@@ -20,6 +20,7 @@ import {
   textResponseSchema,
   trendResponseSchema,
 } from "@/lib/command-center/ai/schemas";
+import { aiModelStatus, isAlwaysThinkingModel, resolveAiModel, supportsDefaultFallbacks } from "@/lib/command-center/ai/model-config";
 
 export const runtime = "nodejs";
 
@@ -36,7 +37,8 @@ const COMMUNICATION_ARTIFACT_TASKS = new Set(["generateCommunicationArtifact"]);
 // V1.5 §8-10 — a 2-4 option decision matrix is verbose; give it more room than the other,
 // single-paragraph task shapes.
 const LARGE_OUTPUT_TASKS = new Set(["generateDecisionOptions"]);
-const MODEL = "claude-sonnet-4-5-20250929";
+// C4 — the model is no longer hardcoded here: ANTHROPIC_MODEL (reasoning tasks) and
+// ANTHROPIC_MODEL_FAST (short narration tasks), with current defaults — see model-config.ts.
 
 const SYSTEM_PROMPT = `You are a reasoning engine embedded in a BA/PO/PM delivery tool. You
 receive a prompt that already contains every fact, piece of evidence, and constraint you are
@@ -47,7 +49,8 @@ insufficientEvidence field (when present) rather than guessing.`;
 
 export async function GET() {
   const available = Boolean(process.env.ANTHROPIC_API_KEY);
-  return NextResponse.json({ available });
+  // Model ids only (never a secret) — Setup Health shows whether they were chosen explicitly.
+  return NextResponse.json({ available, ...aiModelStatus({ ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL, ANTHROPIC_MODEL_FAST: process.env.ANTHROPIC_MODEL_FAST }) });
 }
 
 function extractJson(text: string): unknown {
@@ -87,14 +90,25 @@ export async function POST(req: Request) {
     // V2.2.1 §4 — an explicit, sane timeout so a slow/hung model call fails fast into the
     // existing catch-block error handling below rather than running until Vercel's own
     // platform function timeout kills it uncleanly (the SDK's own default is 10 minutes).
-    const client = new Anthropic({ apiKey, timeout: 25_000 });
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: LARGE_OUTPUT_TASKS.has(task) ? 1536 : 512,
+    const { model } = resolveAiModel(task, { ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL, ANTHROPIC_MODEL_FAST: process.env.ANTHROPIC_MODEL_FAST });
+    const client = new Anthropic({ apiKey, timeout: 55_000 });
+    // Always-thinking models spend part of max_tokens on thinking, so they get room for it on
+    // top of the visible JSON; refusals on those models fall back server-side by category.
+    const visibleBudget = LARGE_OUTPUT_TASKS.has(task) ? 1536 : 512;
+    const response = await client.beta.messages.create({
+      model,
+      max_tokens: isAlwaysThinkingModel(model) ? visibleBudget + 6000 : visibleBudget,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],
+      ...(supportsDefaultFallbacks(model) ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
     });
 
+    if (response.stop_reason === "refusal") {
+      return NextResponse.json({ ok: false, error: "The model declined this request." }, { status: 502 });
+    }
+    if (response.stop_reason === "max_tokens") {
+      return NextResponse.json({ ok: false, error: "Model response was cut off before it finished." }, { status: 502 });
+    }
     const textBlock = response.content.find((b) => b.type === "text");
     if (!textBlock || textBlock.type !== "text") {
       return NextResponse.json({ ok: false, error: "Model returned no text content." }, { status: 502 });

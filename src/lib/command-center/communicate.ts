@@ -23,11 +23,14 @@ import type {
   CommandCenterData,
   Decision,
   DecisionOptionsResult,
+  Dependency,
+  DependencyRadarItem,
   Evidence,
   PersonalFocusResult,
   ReleaseHealth,
 } from "./types";
 import type { WhyShouldICareContent } from "./why-should-i-care";
+import type { WaitingForItem } from "./waiting-for";
 import { deriveDontForget } from "./personal-focus";
 import { isInRelease, selectReleaseHealth } from "./release-health";
 import type { WorkRelevanceIndex } from "./jira/work-relevance";
@@ -405,11 +408,62 @@ export function buildNeedsFromOthers(data: CommandCenterData, proactive: Proacti
   return rows;
 }
 
+/** C1 — one follow-up message per recipient: rows for the same Person/Team are grouped under
+ *  a single header (first-seen order), so several asks to one team become one copyable
+ *  message. A single row per recipient renders exactly as before. */
 export function renderNeedsFromOthersText(rows: NeedsFromOthersRow[]): string {
   if (rows.length === 0) return "NEEDS FROM OTHERS\n(none currently)";
-  return rows
-    .map((r) => `NEEDS FROM OTHERS\n\nPerson/Team: ${r.person}${r.isUnknownPerson ? ` — ${NO_UNKNOWN_TEXT}` : ""}\nWhat I need: ${r.what}\nWhy: ${r.why}\nBy when: ${r.by}${r.isUnknownBy && !r.isUnknownPerson ? ` — ${NO_UNKNOWN_TEXT}` : ""}`)
+  const groups = new Map<string, NeedsFromOthersRow[]>();
+  for (const r of rows) groups.set(r.person, [...(groups.get(r.person) ?? []), r]);
+  return Array.from(groups.values())
+    .map((group) => {
+      const head = `NEEDS FROM OTHERS\n\nPerson/Team: ${group[0].person}${group[0].isUnknownPerson ? ` — ${NO_UNKNOWN_TEXT}` : ""}`;
+      const items = group.map((r) => `What I need: ${r.what}\nWhy: ${r.why}\nBy when: ${r.by}${r.isUnknownBy && !r.isUnknownPerson ? ` — ${NO_UNKNOWN_TEXT}` : ""}`);
+      return `${head}\n${items.join("\n\n")}`;
+    })
     .join("\n\n---\n\n");
+}
+
+// ===== C1 — row-level "Draft follow-up" sources (Dependencies, Waiting For, Blocked) =====
+// Same NeedsFromOthersRow shape and the same "UNKNOWN, never guessed" rule as
+// buildNeedsFromOthers above: a recipient or deadline the data doesn't have reads UNKNOWN.
+
+function followUpRow(person: string | undefined, what: string, why: string, by: string | undefined, evidenceText: string): NeedsFromOthersRow {
+  const p = person?.trim();
+  return {
+    person: p || "UNKNOWN",
+    what,
+    why,
+    by: by || "UNKNOWN",
+    evidence: [makeEvidence(evidenceText, "manual")],
+    isUnknownPerson: !p,
+    isUnknownBy: !by,
+  };
+}
+
+/** A Dependency Radar card (Dependencies page). "By" is the release it threatens, when known. */
+export function needsFromOthersForDependency(item: Pick<DependencyRadarItem, "dependsOnTeam" | "description" | "blockedItemCount" | "releaseProximity" | "ageDays">): NeedsFromOthersRow {
+  const by = item.releaseProximity ? `before ${item.releaseProximity.fixVersion} (in ${item.releaseProximity.daysToRelease} day(s))` : undefined;
+  return followUpRow(item.dependsOnTeam, item.description, `It blocks ${item.blockedItemCount} item(s) and has been open ${item.ageDays} day(s).`, by, `${item.dependsOnTeam}: ${item.description}`);
+}
+
+/** A Waiting For row. `expectedBy` is never invented (waiting-for.ts), so "By" is usually UNKNOWN. */
+export function needsFromOthersForWaitingFor(item: Pick<WaitingForItem, "who" | "what" | "since" | "ageDays" | "expectedBy" | "blockedItemCount" | "projectNames">): NeedsFromOthersRow {
+  const blocking = item.projectNames.length > 0 ? ` — blocking ${item.blockedItemCount} item(s) in ${item.projectNames.join(", ")}` : "";
+  return followUpRow(item.who, item.what, `Waiting since ${item.since} (${item.ageDays} day(s))${blocking}.`, item.expectedBy, `${item.who}: ${item.what}`);
+}
+
+/** A Daily-Command-blocked ticket: one row per unresolved dependency of that ticket (each
+ *  team is a recipient), or a single UNKNOWN-recipient row carrying the block reason. */
+export function needsFromOthersForBlockedTicket(
+  ticket: { key: string; title?: string; dueDate?: string },
+  reason: string | undefined,
+  unresolvedDependencies: Pick<Dependency, "dependsOnTeam" | "description">[]
+): NeedsFromOthersRow[] {
+  const label = ticket.title ? `${ticket.key} (${ticket.title})` : ticket.key;
+  const why = `${label} is blocked${reason?.trim() ? `: ${reason.trim()}` : ""}.`;
+  if (unresolvedDependencies.length === 0) return [followUpRow(undefined, `Unblock ${label}`, why, ticket.dueDate, why)];
+  return unresolvedDependencies.map((d) => followUpRow(d.dependsOnTeam, d.description, why, ticket.dueDate, `${d.dependsOnTeam}: ${d.description}`));
 }
 
 // ===== §12 — Meeting Mode =====

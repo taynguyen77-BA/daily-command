@@ -355,6 +355,18 @@ export class ClaudeProvider implements AIProvider {
 
 /** One-shot check of whether the server has an API key configured — used only for the
  *  "AI provider" status label; it never blocks provider construction or method calls. */
+/** C4 — the server's AI status: whether a key is configured and which models it will use
+ *  (ids only). null when the endpoint is unreachable. */
+export async function checkAiModelStatus(): Promise<{ available: boolean; model?: string; fastModel?: string; modelFromEnv?: boolean; fastModelFromEnv?: boolean } | null> {
+  try {
+    const res = await fetch(ENDPOINT, { method: "GET" });
+    if (!res.ok) return null;
+    return (await res.json()) as { available: boolean; model?: string; fastModel?: string; modelFromEnv?: boolean; fastModelFromEnv?: boolean };
+  } catch {
+    return null;
+  }
+}
+
 export async function checkClaudeAvailability(): Promise<boolean> {
   try {
     const res = await fetch(ENDPOINT, { method: "GET" });

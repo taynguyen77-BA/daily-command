@@ -23,6 +23,7 @@ import { idbGet, idbUpdate } from "./local-db";
 import { browserStateChannel, createLocalStorageStateStorage, readRevFromRaw, rebaseState, serializeWithRev, type StateChannel, type StateChannelFactory, type StateStorage } from "./state-persistence";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope, scopeMentionEvents } from "./jira/project-scope";
 import { buildStandupState, type StandupState } from "./reports";
+import { buildDailyReview, type DailyReview } from "./daily-review";
 import { buildWorkRelevanceIndex, DEFAULT_WORK_RELEVANCE_POLICY_MAP, parseWorkRelevancePolicyMap, withStatusRelevance } from "./jira/work-relevance";
 import { updateWorkItemCalibrationHistory, type WorkItemCalibrationHistory } from "./jira/work-relevance-history";
 import { computeActionEffectiveness } from "./action-effectiveness";
@@ -95,6 +96,8 @@ const STORAGE_KEY = "command-center:v1";
 const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for trend/pattern/weekly-review, bounded
 const MAX_MEMORY_EVENTS = 200;
 const MAX_BLOCK_REASON_LENGTH = 200;
+/** C2 — routes a user may pick as the landing page (every primary nav destination). */
+export const LANDING_PAGES = ["/", "/daily-review", "/focus", "/priorities", "/action-plan", "/attention", "/risks", "/dependencies", "/changes", "/loops", "/decisions", "/meeting", "/reports", "/weekly-review"];
 const MAX_KNOWN_TICKETS = 20000;
 /** Bounded like every other history-shaped field: past the cap, the oldest-first-seen keys go
  *  first (unknown-provenance "" sorts oldest). */
@@ -268,6 +271,8 @@ export interface StoreState {
   jiraSprintFieldId?: string;
   // B4 — what a "week" means in the Weekly Report: Mon–Fri (default) or 7 calendar days.
   weeklyReportMode?: "workweek" | "calendar";
+  // C2 — where the app opens ("/" = Command Center). Only ever one of the nav routes.
+  defaultLandingPage?: string;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -731,6 +736,7 @@ export function parseStoredState(raw: string): StoreState {
       dailyReviewBaselineAt: typeof parsed.dailyReviewBaselineAt === "string" ? parsed.dailyReviewBaselineAt : undefined,
       knownTicketFirstSeen: asStringRecord(parsed.knownTicketFirstSeen),
       jiraSprintFieldId: typeof parsed.jiraSprintFieldId === "string" && /^customfield_\d{1,9}$/.test(parsed.jiraSprintFieldId) ? parsed.jiraSprintFieldId : undefined,
+      defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
     };
   } catch {
@@ -1001,7 +1007,15 @@ export class CommandCenterStore {
   // render, and a freshly-built object here trips React's "getServerSnapshot should be
   // cached" infinite-loop guard.
   private static readonly SERVER_SNAPSHOT: StoreState = initialState();
-  getServerSnapshot = (): StoreState => CommandCenterStore.SERVER_SNAPSHOT;
+  getServerSnapshot = (): StoreState => (this.liveServerSnapshot ? this.state : CommandCenterStore.SERVER_SNAPSHOT);
+
+  /** C3 — the offline page smoke test renders every page with react-dom/server, where React
+   *  reads getServerSnapshot. This makes that return the live state, so pages render real data
+   *  instead of the pristine first-paint state. Never enabled by the app itself. */
+  private liveServerSnapshot = false;
+  renderLiveStateOnServerForTests(on: boolean) {
+    this.liveServerSnapshot = on;
+  }
 
   loadDemoData() {
     const { snapshotHistory, current } = buildDemoData(getTodayIso());
@@ -1307,6 +1321,33 @@ export class CommandCenterStore {
     if (trimmed && !/^customfield_\d{1,9}$/.test(trimmed)) return false;
     this.set({ ...this.state, jiraSprintFieldId: trimmed || undefined });
     return true;
+  }
+
+  /** C2 — Data & Settings: the page the app opens on. Unknown routes are refused. */
+  setDefaultLandingPage(route: string) {
+    if (!LANDING_PAGES.includes(route)) return;
+    this.set({ ...this.state, defaultLandingPage: route === "/" ? undefined : route });
+  }
+
+  /** C2 — Daily Review over the same scoped data the page uses (badge counts, standup). */
+  computeDailyReview(now: Date = new Date()): DailyReview {
+    const data = applyProjectScope(this.state.data, this.state.jiraProjectScope);
+    return buildDailyReview({
+      workItems: data.workItems,
+      identity: { displayName: this.state.personalIdentity?.displayName ?? this.state.ownerName, accountId: this.state.personalIdentity?.accountId },
+      workRelevanceIndex: buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy),
+      dailyCommandCompletions: this.state.dailyCommandCompletions,
+      dailyCommandSkips: this.state.dailyCommandSkips,
+      dailyCommandBlocks: this.state.dailyCommandBlocks,
+      memoryEvents: this.state.memoryEvents,
+      mentionEvents: scopeMentionEvents(this.state.mentionEvents, data.workItems, this.state.jiraProjectScope),
+      attentionState: this.state.attentionState,
+      syncLog: this.state.syncLog,
+      baselineAt: this.state.dailyReviewBaselineAt,
+      lastVisitAt: this.state.dailyReviewLastVisitAt,
+      reviewAcks: this.state.dailyReviewAcks,
+      now,
+    });
   }
 
   /** B4 — Data & Settings: Mon–Fri weeks (default) or 7 calendar days. */

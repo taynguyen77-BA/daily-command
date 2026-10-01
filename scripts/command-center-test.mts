@@ -34,7 +34,6 @@ import { DisabledJiraActionProvider } from "../src/lib/command-center/jira/jira-
 import { applyFilters, availableFixVersions } from "../src/lib/command-center/filters";
 import { computeFreshness } from "../src/lib/command-center/freshness";
 import { computeReleaseHealth, computeAllReleaseHealth } from "../src/lib/command-center/release-health";
-import { buildAIContext } from "../src/lib/command-center/ai-context";
 import { classifyQuery, answerFromRoute, familyForIntent } from "../src/lib/command-center/query-router";
 import { JiraDataSource } from "../src/lib/command-center/datasource/jira-source";
 import { deriveData, dedupeRisks } from "../src/lib/command-center/selectors";
@@ -226,6 +225,10 @@ import { parseSprintFieldValue } from "../src/lib/command-center/jira/normalize"
 import { DEFAULT_WORK_RELEVANCE_POLICY_MAP } from "../src/lib/command-center/jira/work-relevance";
 import type { ArtifactDraft } from "../src/lib/command-center/types";
 import { isValidCustomFieldId } from "../src/lib/command-center/jira/http";
+import { needsFromOthersForBlockedTicket, needsFromOthersForDependency, needsFromOthersForWaitingFor } from "../src/lib/command-center/communicate";
+import { NAV_GROUPS } from "../src/components/command-center/Nav";
+import { LANDING_PAGES } from "../src/lib/command-center/store";
+import { DEFAULT_AI_MODEL, DEFAULT_AI_MODEL_FAST, resolveAiModel } from "../src/lib/command-center/ai/model-config";
 import { applyDailyCommandChange, emptyTombstones, mergeDailyCommandState, TOMBSTONE_RETENTION_DAYS, type DailyCommandState } from "../src/lib/command-center/execution-state-merge";
 import { RiskCard } from "../src/components/command-center/RiskCard";
 import { DecisionCard } from "../src/components/command-center/DecisionCard";
@@ -233,7 +236,7 @@ import { ChangeItem } from "../src/components/command-center/ChangeItem";
 import { DependencyRadarCard } from "../src/components/command-center/DependencyRadarCard";
 import { DeliveryLoopCard } from "../src/components/command-center/DeliveryLoopCard";
 import { RECENT_MENTION_WINDOW_HOURS, selectRecentMentions, computeMentionReactivations } from "../src/lib/command-center/recent-mentions";
-import { ReactivatedBadge } from "../src/components/command-center/TaskReferenceRow";
+import { ReactivatedBadge, storeActionsFor } from "../src/components/command-center/TaskReferenceRow";
 import type { DailyCommandCompletion, DailyCommandSkip } from "../src/lib/command-center/types";
 // V2.24 — Attention Truth & Automatic Jira Sync Reliability
 import { shouldAutoSyncJira, initAutoJiraSync, resetAutoJiraSyncForTests } from "../src/lib/command-center/auto-sync";
@@ -1173,15 +1176,11 @@ function makeJiraIssue(overrides: Partial<JiraIssue["fields"]> & { key?: string 
   ok("Change detection (Jira)", changes.some((c) => c.field === "Status"), "the existing change-detection engine works unchanged on Jira-normalized WorkItems — no engine changes were needed");
 }
 
-// ===== AI Context Builder =====
+// ===== AI Context Builder — removed in C1 (never used by any AI call; see types.ts) =====
 {
-  const { current: ctxData } = buildDemoData(TODAY);
-  const ctxDerived = deriveData(ctxData, null, TODAY);
-  const context = buildAIContext(ctxData, ctxDerived, null, TODAY, { dataSourceType: "jira", lastSyncedAt: "2026-08-28T21:30:00.000Z", baseUrlHost: "acme.atlassian.net" });
-  ok("AI context builder", context.topScores.length <= 8 && context.topRisks.length <= 8 && context.meaningfulChanges.length <= 8, "context slices are capped (§34 minimize token usage), not the full dataset");
-  ok("AI context builder", context.source.type === "jira" && context.source.baseUrlHost === "acme.atlassian.net", "source metadata is included");
-  const serialized = JSON.stringify(context);
-  ok("AI context builder", !serialized.includes("apiToken") && !serialized.includes("JIRA_API_TOKEN") && !serialized.includes("ANTHROPIC_API_KEY"), "the built context never contains a credential field or env var name");
+  ok("AI context builder (removed)", !fs.existsSync(path.join(process.cwd(), "src/lib/command-center/ai-context.ts")), "ai-context.ts is gone — every AI task builds its own task-scoped prompt (ai/prompts/*)");
+  const promptSrc = fs.readdirSync(path.join(process.cwd(), "src/lib/command-center/ai/prompts")).map((f) => fs.readFileSync(path.join(process.cwd(), "src/lib/command-center/ai/prompts", f), "utf8")).join("\n");
+  ok("AI context builder (removed)", !/apiToken|JIRA_API_TOKEN|ANTHROPIC_API_KEY/.test(promptSrc), "no prompt builder ever references a credential field or env var name");
 }
 
 // ===== Natural-language query routing =====
@@ -5500,14 +5499,8 @@ const v22PersonalFocus = computePersonalFocus(v22Data, v22Proactive, undefined, 
   ok("V2.3 applyProjectScope", !emptyScoped.projects.some((p) => p.sourceType === "jira"), "an empty FOCUSED project list excludes every Jira project — never silently reinterpreted as ALL");
   ok("V2.3 applyProjectScope", emptyScoped.workItems.length === 1 && emptyScoped.workItems[0].id === "wi-demo-1", "with zero focused projects, only the non-Jira work item remains");
 
-  // ----- AI context excludes out-of-scope data (§16, §24) -----
-  const scopedForAI = applyProjectScope(scopeFixtureData, focusedScope);
-  const derivedAI = deriveData(scopedForAI, null, TODAY);
-  const aiContext = buildAIContext(scopedForAI, derivedAI, null, TODAY, { dataSourceType: "jira" });
-  ok("V2.3 AI context scope", !aiContext.topScores.some((s) => /UBS/i.test(s.title)), "AI context topScores built from scoped data contains no trace of the out-of-scope project's work items");
-  ok("V2.3 AI context scope", !aiContext.topRisks.some((r) => /UBS/i.test(r.title)), "AI context topRisks contains no trace of the out-of-scope project's risks");
-  ok("V2.3 AI context scope", aiContext.topScores.some((s) => /JPMC/i.test(s.title)), "AI context DOES include the in-scope project's work items — scoping never accidentally hides everything");
-  ok("V2.3 AI context scope", aiContext.topRisks.some((r) => /JPMC/i.test(r.title)), "AI context DOES include the in-scope project's risks");
+  // (AI context scope checks removed with ai-context.ts in C1 — AI prompts are built from the
+  // same scope-filtered data every page uses.)
 }
 
 // ----- Jira query behavior: ALL vs FOCUSED, combined with incremental sync, and the
@@ -9736,12 +9729,12 @@ function mockPersonalFocus(candidates: PersonalFocusCandidate[]): any {
   // ----- Personal Identity row -----
   ok(
     "V2.25 Setup Health",
-    computeSetupHealthRows(undefined, "demo", emptyData(), idx, fullyConfigured).some((r) => r.id === "identity"),
-    "no personalIdentity at all — the identity row is shown"
+    computeSetupHealthRows(undefined, "jira", emptyData(), idx, fullyConfigured).some((r) => r.id === "identity") && !computeSetupHealthRows(undefined, "demo", emptyData(), idx, fullyConfigured).some((r) => r.id === "identity"),
+    "no personalIdentity at all — the identity row is shown on a Jira install (C4: never on demo/local data)"
   );
   ok(
     "V2.25 Setup Health",
-    computeSetupHealthRows({ displayName: "Alice" }, "demo", emptyData(), idx, fullyConfigured).some((r) => r.id === "identity"),
+    computeSetupHealthRows({ displayName: "Alice" }, "jira", emptyData(), idx, fullyConfigured).some((r) => r.id === "identity"),
     "a personalIdentity with a displayName but no accountId still shows the identity row — accountId specifically is what mention/assignment matching needs"
   );
   ok(
@@ -11135,6 +11128,187 @@ const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226J
   const closeDay = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/CloseDayModal.tsx"), "utf8");
   const weeklyPage = fs.readFileSync(path.join(process.cwd(), "src/app/weekly-review/page.tsx"), "utf8");
   ok(group, /dailyReportToMarkdown/.test(closeDay) && /weeklyReportToMarkdown/.test(weeklyPage), "Close Day and Weekly Review keep their existing copy buttons");
+}
+
+
+// ===== C3 — functional smoke test of every page (demo data + a seeded Jira-like dataset) =====
+// Every route is rendered with react-dom/server against the REAL app store (live state, see
+// store.renderLiveStateOnServerForTests). Asserted per page: renders without a runtime error,
+// no "undefined"/"NaN" leaks, and every ticket row links to Jira when the ticket has a Jira URL
+// (never an empty/"undefined" href). Then every ticket action the rows expose (complete,
+// reopen, skip, reactivate, block, unblock, Daily Review "Seen") is run through the exact
+// functions the buttons call, and each result is checked again after a reload.
+{
+  const group = "C3 Page smoke";
+  // A browser-like origin for this block: one localStorage that the app store and a "reloaded"
+  // store share (so reload checks hit real persistence), and React as a global for the pages'
+  // JSX (Next compiles it away; tsx's classic transform needs it in scope).
+  const smokeStorage = new Map<string, string>();
+  (globalThis as unknown as { window: unknown }).window = {
+    localStorage: {
+      getItem: (k: string) => smokeStorage.get(k) ?? null,
+      setItem: (k: string, v: string) => void smokeStorage.set(k, v),
+      removeItem: (k: string) => void smokeStorage.delete(k),
+    },
+  };
+  (globalThis as unknown as { React: typeof React }).React = React;
+  const routes: [string, string][] = [
+    ["/", "../src/app/page.tsx"],
+    ...["daily-review", "focus", "priorities", "action-plan", "attention", "risks", "dependencies", "changes", "loops", "decisions", "meeting", "reports", "weekly-review", "memory", "data-settings"].map((r): [string, string] => [`/${r}`, `../src/app/${r}/page.tsx`]),
+  ];
+  const pages = await Promise.all(routes.map(async ([route, mod]) => [route, (await import(mod)).default as React.ComponentType] as const));
+  const failures: string[] = [];
+
+  const jiraPayloadItems = ["SMK-1", "SMK-2", "SMK-3", "SMK-4"].map((k, i) =>
+    v226JiraItem(k, { projectId: "jira-project-SMK", jiraStatusName: "In Progress", priority: "P1", dueDate: "2026-01-05", businessImpact: 5, fixVersion: "SMK 1.0", blocked: i === 3, blockerReason: i === 3 ? "Flagged in Jira" : undefined })
+  );
+  const realFetch = globalThis.fetch;
+  const seedJira = async () => {
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).includes("/api/command-center/jira/sync")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            data: { ...emptyData(), projects: [{ id: "jira-project-SMK", name: "Smoke Project", clientId: "c-1", status: "on-track", sourceType: "jira", sourceId: "SMK" }], workItems: jiraPayloadItems, dependencies: [{ id: "jira-dep-1", workItemId: "jira-SMK-4", description: "API keys", dependsOnTeam: "Platform", status: "unresolved", raisedDate: "2026-01-01" }] },
+            recordsFetched: jiraPayloadItems.length,
+            syncedAt: new Date().toISOString(),
+            mentionEvents: [{ issueKey: "SMK-2", commentId: "c-smk", commentAuthor: "Anna", excerpt: "can you check?", mentionedAt: new Date().toISOString() }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(JSON.stringify({ ok: false }), { status: 503 });
+    }) as typeof fetch;
+    commandCenterStore.setPersonalIdentity({ displayName: "Tay", accountId: "acc-tay" });
+    commandCenterStore.setJiraStatusRelevance("In Progress", "ACTIONABLE");
+    const r = await commandCenterStore.syncJira({ full: true });
+    globalThis.fetch = realFetch;
+    return r.ok;
+  };
+
+  for (const dataset of ["demo", "jira"] as const) {
+    commandCenterStore.resetAll();
+    if (dataset === "demo") commandCenterStore.loadDemoData();
+    else ok(group, await seedJira(), "the Jira-like dataset syncs into the real store");
+    if (dataset === "jira") {
+      commandCenterStore.blockTicketInDailyCommand("SMK-4", "Waiting on Platform");
+      commandCenterStore.skipTicketInDailyCommand("SMK-3", "Not my action");
+    }
+    commandCenterStore.renderLiveStateOnServerForTests(true);
+    let rowsChecked = 0;
+    for (const [route, Page] of pages) {
+      let html = "";
+      try {
+        html = renderToStaticMarkup(React.createElement(Page));
+      } catch (err) {
+        failures.push(`${dataset} ${route}: runtime error — ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+      const text = html.replace(/<[^>]+>/g, " ");
+      if (/\bundefined\b|\bNaN\b|\[object Object\]/.test(text)) failures.push(`${dataset} ${route}: renders "undefined"/"NaN" text`);
+      if (/href="(undefined|null|)"/.test(html)) failures.push(`${dataset} ${route}: empty/undefined href`);
+      // Every ticket row: if its ticket has a Jira URL, the row links to it.
+      for (const m of html.matchAll(/data-task-row="([^"]+)"([\s\S]*?)(?=data-task-row="|$)/g)) {
+        const key = m[1];
+        const item = commandCenterStore.getSnapshot().data.workItems.find((w) => w.key === key);
+        rowsChecked++;
+        if (item?.sourceUrl && !m[2].includes(`href="${item.sourceUrl}"`)) failures.push(`${dataset} ${route}: ticket ${key} row has no working Jira link`);
+      }
+    }
+    commandCenterStore.renderLiveStateOnServerForTests(false);
+    ok(group, rowsChecked > 0, `[${dataset}] ticket rows were actually rendered and checked (${rowsChecked})`);
+  }
+  ok(group, failures.length === 0, `every page renders cleanly with demo data and with Jira data${failures.length ? `:\n   - ${failures.join("\n   - ")}` : ""}`);
+
+  // Jira dataset is loaded now — exercise every row action, each surviving a reload.
+  const reload = () => new CommandCenterStore().getSnapshot();
+  const steps: [string, () => void, (s: StoreState) => boolean][] = [
+    ["Mark completed", () => storeActionsFor("SMK-1").onComplete(), (s) => "SMK-1" in s.dailyCommandCompletions],
+    ["Reopen", () => storeActionsFor("SMK-1").onReopen(), (s) => !("SMK-1" in s.dailyCommandCompletions)],
+    ["Skip (reason + re-check)", () => storeActionsFor("SMK-1").onSkip("Team is handling it", "2026-12-01"), (s) => s.dailyCommandSkips["SMK-1"]?.reason === "Team is handling it" && s.dailyCommandSkips["SMK-1"]?.revisitOn === "2026-12-01"],
+    ["Reactivate", () => storeActionsFor("SMK-1").onReactivateSkip(), (s) => !("SMK-1" in s.dailyCommandSkips)],
+    ["Block (reason)", () => storeActionsFor("SMK-1").onBlock("Waiting for a reply"), (s) => s.dailyCommandBlocks["SMK-1"]?.reason === "Waiting for a reply"],
+    ["Unblock", () => storeActionsFor("SMK-1").onUnblock(), (s) => !("SMK-1" in s.dailyCommandBlocks)],
+    ["Seen (Daily Review)", () => commandCenterStore.markDailyReviewSeen(["SMK-2"]), (s) => !!s.dailyReviewAcks["SMK-2"]],
+  ];
+  for (const [label, act, check] of steps) {
+    act();
+    const live = check(commandCenterStore.getSnapshot());
+    const reloaded = check(reload());
+    ok(group, live && reloaded, `"${label}" changes state and the change survives a reload (live ${live}, reloaded ${reloaded})`);
+  }
+  delete (globalThis as unknown as { window?: unknown }).window;
+  const reportsSrc = fs.readFileSync(path.join(process.cwd(), "README.md"), "utf8");
+  ok(group, /## Page smoke test/.test(reportsSrc), "README lists the page smoke-test results");
+}
+
+
+// ===== C1 / C2 / C4 — surfaced modules, navigation, setup health + AI model config =====
+{
+  const group = "C Surfacing, nav & setup";
+  (globalThis as unknown as { React: typeof React }).React = React;
+  // C1 — follow-ups grouped per recipient.
+  const twoForPlatform = [
+    needsFromOthersForDependency({ dependsOnTeam: "Platform", description: "API keys", blockedItemCount: 2, ageDays: 4, releaseProximity: { fixVersion: "2.0", daysToRelease: 5 } as never }),
+    ...needsFromOthersForBlockedTicket({ key: "PAY-3", title: "Card vault", dueDate: "2026-10-09" }, "Waiting on keys", [{ dependsOnTeam: "Platform", description: "Sandbox access" }]),
+    needsFromOthersForWaitingFor({ who: "Legal", what: "Contract sign-off", since: "2026-09-20", ageDays: 11, expectedBy: undefined, blockedItemCount: 1, projectNames: ["Pay"] }),
+  ];
+  const text = renderNeedsFromOthersText(twoForPlatform);
+  ok(group, (text.match(/Person\/Team: Platform/g) ?? []).length === 1 && text.includes("What I need: API keys") && text.includes("What I need: Sandbox access") && text.includes("By when: before 2.0 (in 5 day(s))") && text.includes("By when: 2026-10-09"), "Draft follow-up groups every ask to the same recipient into one message");
+  ok(group, text.includes("Person/Team: Legal") && /Legal[\s\S]*By when: UNKNOWN — No owner\/deadline/.test(text), "a missing deadline reads UNKNOWN, never guessed");
+  const noDeps = needsFromOthersForBlockedTicket({ key: "X-1" }, "Waiting for a reply", []);
+  ok(group, noDeps.length === 1 && noDeps[0].person === "UNKNOWN" && noDeps[0].what === "Unblock X-1" && noDeps[0].why === "X-1 is blocked: Waiting for a reply.", "a blocked ticket with no known dependency still gets a follow-up, recipient UNKNOWN");
+  const blockedView = renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: "X-1", execution: { kind: "blocked", reason: "Waiting for a reply" }, followUpRows: noDeps }));
+  const activeView = renderToStaticMarkup(React.createElement(TaskReferenceRowView, { ticketKey: "X-1", execution: { kind: "active" }, followUpRows: noDeps }));
+  ok(group, blockedView.includes("Draft follow-up") && !activeView.includes("Draft follow-up"), "Blocked rows carry a 'Draft follow-up' button (only when blocked)");
+  const depCard = renderToStaticMarkup(React.createElement(DependencyRadarCard, { item: { dependencyId: "d1", description: "API keys", dependsOnTeam: "Platform", ageDays: 3, blockedItemCount: 1, blockedHighPriorityCount: 0, heat: "WARM", recommended: "Chase it" } as never }));
+  ok(group, depCard.includes("Draft follow-up"), "Dependency cards carry 'Draft follow-up'");
+  ok(group, /needsFromOthersForWaitingFor/.test(fs.readFileSync(path.join(process.cwd(), "src/components/command-center/WaitingFor.tsx"), "utf8")), "Waiting For rows (and the whole list, one message per person) carry 'Draft follow-up'");
+  // C1 — "If nothing changes" on loops and action plan rows; evidence on changes.
+  const loopCard = renderToStaticMarkup(React.createElement(DeliveryLoopCard, { loop: { id: "l1", issue: "Vendor delay", health: "STALLED", why: "No action for 5 days", nowWhat: "Escalate" } as never }));
+  ok(group, loopCard.includes("If nothing changes"), "Loop cards show the 'If nothing changes' block");
+  const planSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/PlanCandidateRow.tsx"), "utf8");
+  ok(group, /projectActionImpact\(/.test(planSrc) && /triggerLabel="If nothing changes"/.test(planSrc) && /repeatedlyIneffective\(/.test(planSrc) && /Repeated without effect/.test(planSrc), "Action Plan rows show 'If nothing changes' and a 'Repeated without effect' badge");
+  ok(group, /buildActionStrategyFacts\(/.test(fs.readFileSync(path.join(process.cwd(), "src/app/weekly-review/page.tsx"), "utf8")), "Weekly Review has an 'Actions repeated without effect' section built from buildActionStrategyFacts");
+  const changeCard = renderToStaticMarkup(React.createElement(ChangeItem, { change: { id: "c1", entityType: "WorkItem", entityId: "w1", entityLabel: "PAY-1", field: "Status", before: "To Do", after: "Blocked", impact: "Blocked now", date: "2026-10-01" } as never }));
+  ok(group, changeCard.includes("Evidence (1)") && changeCard.includes("Status: &quot;To Do&quot; → &quot;Blocked&quot;"), "ChangeItem has an evidence drawer (evidenceForChange)");
+
+  // C2 — grouped navigation, nothing removed.
+  const flat = NAV_GROUPS.flatMap((g) => g.links.map((l) => l.href));
+  const expectedRoutes = ["/", "/focus", "/daily-review", "/meeting", "/attention", "/loops", "/priorities", "/changes", "/risks", "/dependencies", "/action-plan", "/decisions", "/weekly-review", "/reports", "/data-settings"];
+  ok(group, expectedRoutes.every((r) => flat.includes(r)) && flat.length === expectedRoutes.length, "every previous nav destination is still there, exactly once");
+  ok(group, JSON.stringify(NAV_GROUPS.map((g) => g.label)) === '["Today","Work queues","Project insight","Reports","Settings"]' && JSON.stringify(NAV_GROUPS[0].links.map((l) => l.href)) === '["/daily-review","/","/focus"]' && JSON.stringify(NAV_GROUPS[1].links.map((l) => l.href)) === '["/priorities","/action-plan","/attention"]' && JSON.stringify(NAV_GROUPS[3].links.map((l) => l.href)) === '["/reports","/weekly-review"]', "groups follow the morning workflow: Today (Daily Review → Command Center → My Day), Work queues, Project insight, Reports, Settings");
+  const navStore = new CommandCenterStore({ jiraSyncLockManager: null, stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
+  navStore.getSnapshot();
+  navStore.setDefaultLandingPage("/daily-review");
+  navStore.setDefaultLandingPage("/not-a-page");
+  ok(group, navStore.getSnapshot().defaultLandingPage === "/daily-review" && LANDING_PAGES.includes("/reports") && parseStoredState(JSON.stringify({ defaultLandingPage: "/evil" })).defaultLandingPage === undefined, "the landing page is configurable, limited to real routes");
+  const navSrc = fs.readFileSync(path.join(process.cwd(), "src/components/command-center/Nav.tsx"), "utf8");
+  ok(group, /review\.newRows\.length \+ review\.dueForRecheck\.length/.test(navSrc) && /data-nav-badge/.test(navSrc) && /router\.replace\(landing\)/.test(navSrc), "Daily Review shows a badge (unreviewed New + due re-checks); the app opens on the configured page");
+  const { store: badgeStore, setJira: badgeJira } = v226ConfiguredStore({ stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
+  badgeJira([v226Actionable("BG-1")]);
+  await badgeStore.syncJira();
+  await v226Tick();
+  badgeJira([v226Actionable("BG-1"), v226Actionable("BG-2")]);
+  await badgeStore.syncJira();
+  badgeStore.blockTicketInDailyCommand("BG-1", "x", getTodayIso());
+  const rv = badgeStore.computeDailyReview();
+  ok(group, rv.newRows.length + rv.dueForRecheck.length === 2, "badge count = 1 unreviewed New (BG-2) + 1 re-check due today (BG-1)");
+
+  // C4 — setup health.
+  const idx = buildWorkRelevanceIndex(DEFAULT_WORK_RELEVANCE_POLICY_MAP);
+  const fine = { configured: true, serverSideNotifyActive: true } as never;
+  const rowsFor = (extras: Parameters<typeof computeSetupHealthRows>[5], source: "jira" | "demo" = "jira") => computeSetupHealthRows({ id: "i", displayName: "T", accountId: "a" }, source, emptyData(), idx, fine, extras).map((r) => r.id);
+  ok(group, !rowsFor({ crossDevice: { enabledOrEverPaired: false, status: { configured: false, paired: false } } }).includes("cross-device"), "cross-device row never shows for someone who never turned sync on");
+  ok(group, rowsFor({ crossDevice: { enabledOrEverPaired: true, status: { configured: false, paired: false } } }).includes("cross-device") && rowsFor({ crossDevice: { enabledOrEverPaired: true, status: { configured: true, paired: false } } }).includes("cross-device") && !rowsFor({ crossDevice: { enabledOrEverPaired: true, status: { configured: true, paired: true } } }).includes("cross-device") && !rowsFor({ crossDevice: { enabledOrEverPaired: true, status: null } }).includes("cross-device"), "cross-device row: shown when enabled/ever paired but not configured or not paired; hidden while loading or when fine");
+  ok(group, rowsFor({ sprintFieldMapped: false }).includes("sprint-field") && !rowsFor({ sprintFieldMapped: false }, "demo").includes("sprint-field") && !rowsFor({ sprintFieldMapped: true }).includes("sprint-field"), "sprint-field row only on a Jira install without a mapped field");
+  ok(group, rowsFor({ ai: { available: true, modelFromEnv: false, fastModelFromEnv: true, model: "claude-opus-5-5" } }).includes("ai-model") && !rowsFor({ ai: { available: true, modelFromEnv: true, fastModelFromEnv: true } }).includes("ai-model") && !rowsFor({ ai: { available: false } }).includes("ai-model") && !rowsFor({ ai: null }).includes("ai-model"), "AI model row when a key is set but the model env isn't; never when AI is off or still loading");
+  ok(group, !computeSetupHealthRows(undefined, "demo", emptyData(), idx, fine).some((r) => r.id === "identity") && computeSetupHealthRows(undefined, "jira", emptyData(), idx, fine).some((r) => r.id === "identity"), "identity row is gated to dataSource === 'jira'");
+  // C4 — AI model from env.
+  ok(group, resolveAiModel("analyzePriorities", {}).model === DEFAULT_AI_MODEL && resolveAiModel("interpretTrend", {}).model === DEFAULT_AI_MODEL_FAST && DEFAULT_AI_MODEL === "claude-opus-5-5" && DEFAULT_AI_MODEL_FAST === "claude-haiku-4-5", "defaults: a current model for reasoning tasks, a cheaper one for short tasks");
+  ok(group, resolveAiModel("analyzePriorities", { ANTHROPIC_MODEL: "claude-sonnet-5-5" }).model === "claude-sonnet-5-5" && resolveAiModel("interpretTrend", { ANTHROPIC_MODEL_FAST: "claude-sonnet-5-5" }).model === "claude-sonnet-5-5" && resolveAiModel("analyzePriorities", { ANTHROPIC_MODEL: "bad model; rm" }).model === DEFAULT_AI_MODEL, "ANTHROPIC_MODEL / ANTHROPIC_MODEL_FAST override the defaults; a malformed value is ignored");
+  const routeSrc = fs.readFileSync(path.join(process.cwd(), "src/app/api/command-center/ai/route.ts"), "utf8");
+  ok(group, !/"claude-[a-z0-9.-]+"/.test(routeSrc) && /resolveAiModel\(task/.test(routeSrc), "the AI route never hardcodes a model id");
 }
 
 if (skipped > 0) console.log(`\n⏭️  ${skipped} check group(s) skipped for missing runtime capabilities (see SKIPPED lines above).`);

@@ -29,7 +29,22 @@ import Link from "next/link";
 import { useCommandCenter } from "./use-command-center";
 import { countUnclassifiedJiraStatuses, listUnclassifiedJiraStatuses, type WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import { checkSlackNotifyStatus, type SlackNotifyStatus } from "@/lib/command-center/notify-client";
+import { checkAppStateSyncStatus } from "@/lib/command-center/app-state-sync";
+import { isDevicePaired } from "@/lib/command-center/device-pairing";
+import { checkAiModelStatus } from "@/lib/command-center/ai/claude-provider";
 import type { CommandCenterData, DataSourceType, PersonalIdentity } from "@/lib/command-center/types";
+
+/** C4 — additional, independently-loaded facts. Every field optional: undefined/null means
+ *  "not known yet" and never produces a row. */
+export interface SetupHealthExtras {
+  /** Cross-device sync: the user turned it on (this device holds a pairing secret) or this
+   *  device has synced before; and what the server says (null = still loading). */
+  crossDevice?: { enabledOrEverPaired: boolean; status: { configured: boolean; paired: boolean } | null };
+  /** Whether a Jira sprint custom field id is set in Data & Settings. */
+  sprintFieldMapped?: boolean;
+  /** The AI endpoint's status (null = still loading / unreachable). */
+  ai?: { available: boolean; modelFromEnv?: boolean; fastModelFromEnv?: boolean; model?: string; fastModel?: string } | null;
+}
 
 export interface SetupHealthRow {
   id: string;
@@ -44,11 +59,13 @@ export function computeSetupHealthRows(
   dataSource: DataSourceType,
   data: CommandCenterData,
   workRelevanceIndex: WorkRelevanceIndex,
-  notifyStatus: SlackNotifyStatus | null
+  notifyStatus: SlackNotifyStatus | null,
+  extras: SetupHealthExtras = {}
 ): SetupHealthRow[] {
   const rows: SetupHealthRow[] = [];
 
-  if (!personalIdentity?.accountId) {
+  // C4 — only meaningful once Jira is the data source (demo/local-import have no accounts).
+  if (dataSource === "jira" && !personalIdentity?.accountId) {
     rows.push({
       id: "identity",
       text: "No Jira account ID configured — Mention and Assignment tracking are completely off (nothing to match comments/assignees against).",
@@ -66,6 +83,26 @@ export function computeSetupHealthRows(
         text: `${unclassifiedCount} Jira status${unclassifiedCount === 1 ? "" : "es"} not yet classified in the Work Relevance Policy (${names.join(", ")}${unclassifiedCount > names.length ? ", …" : ""}) — tickets sitting in ${unclassifiedCount === 1 ? "this status" : "these statuses"} may look like they've simply disappeared from Action Plan/Priorities.`,
       });
     }
+  }
+
+  // C4 — cross-device sync, only for someone who actually uses (or used) it.
+  const cd = extras.crossDevice;
+  if (cd?.enabledOrEverPaired && cd.status && (!cd.status.configured || !cd.status.paired)) {
+    rows.push({
+      id: "cross-device",
+      text: !cd.status.configured
+        ? "Cross-device sync is not configured on the server (APP_STATE_SECRET + Vercel KV) — Complete/Skip/Block and reviews stay on this device only."
+        : "This device is no longer paired for cross-device sync — re-pair it in Data & Settings, or changes made here won't reach your other devices.",
+    });
+  }
+
+  if (dataSource === "jira" && extras.sprintFieldMapped === false) {
+    rows.push({ id: "sprint-field", text: "Sprint field not mapped (optional) — set your Jira sprint field id in Data & Settings to group reports by sprint." });
+  }
+
+  if (extras.ai?.available && (!extras.ai.modelFromEnv || !extras.ai.fastModelFromEnv)) {
+    const missing = [!extras.ai.modelFromEnv ? `ANTHROPIC_MODEL (using ${extras.ai.model ?? "the default"})` : "", !extras.ai.fastModelFromEnv ? `ANTHROPIC_MODEL_FAST (using ${extras.ai.fastModel ?? "the default"})` : ""].filter(Boolean);
+    rows.push({ id: "ai-model", text: `AI model not set explicitly: ${missing.join(", ")} — set it on the server to pin which model answers.` });
   }
 
   if (notifyStatus && !notifyStatus.serverSideNotifyActive) {
@@ -95,9 +132,36 @@ export function SetupHealthBanner() {
     };
   }, []);
 
+  const [crossDeviceStatus, setCrossDeviceStatus] = useState<{ configured: boolean; paired: boolean } | null>(null);
+  const [ai, setAi] = useState<SetupHealthExtras["ai"]>(null);
+  const enabledOrEverPaired = state.loaded && (isDevicePaired() || !!state.lastAppStateSyncIso);
+  useEffect(() => {
+    let cancelled = false;
+    checkAiModelStatus().then((s) => {
+      if (!cancelled) setAi(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  useEffect(() => {
+    if (!enabledOrEverPaired) return;
+    let cancelled = false;
+    checkAppStateSyncStatus().then((s) => {
+      if (!cancelled) setCrossDeviceStatus(s);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabledOrEverPaired]);
+
   if (!state.loaded) return null;
 
-  const rows = computeSetupHealthRows(state.personalIdentity, state.dataSource, filteredData, workRelevanceIndex, notifyStatus);
+  const rows = computeSetupHealthRows(state.personalIdentity, state.dataSource, filteredData, workRelevanceIndex, notifyStatus, {
+    crossDevice: { enabledOrEverPaired, status: crossDeviceStatus },
+    sprintFieldMapped: !!state.jiraSprintFieldId,
+    ai,
+  });
   if (rows.length === 0) return null;
 
   return (

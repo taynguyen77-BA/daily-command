@@ -4,6 +4,8 @@
 // the existing Dependency Radar (see waiting-for.ts's own top comment) — no new tracking
 // engine, no invented owner, no invented target date.
 
+import { FollowUpDraft } from "./FollowUpDraft";
+import { needsFromOthersForWaitingFor } from "@/lib/command-center/communicate";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { buildWaitingFor } from "@/lib/command-center/waiting-for";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
@@ -35,6 +37,7 @@ export function WaitingFor({
       <div className="mb-2 flex items-center gap-2">
         <TrustLabel kind="calculated" />
       </div>
+      {items.length > 1 && <FollowUpDraft rows={items.map(needsFromOthersForWaitingFor)} label="Draft all follow-ups (one per person)" />}
       {items.length === 0 ? (
         <Panel className="p-4 text-sm text-text3">Nothing currently waiting on someone else.</Panel>
       ) : (
@@ -62,6 +65,7 @@ export function WaitingFor({
                   </>
                 )}
               </dl>
+              <FollowUpDraft rows={[needsFromOthersForWaitingFor(item)]} />
             </Panel>
           ))}
         </div>

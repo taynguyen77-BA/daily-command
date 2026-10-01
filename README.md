@@ -54,6 +54,8 @@ A malformed value for any optional variable is ignored (never throws) and falls 
 | Variable | Behavior when missing |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Every AI-labeled output (risk explanations, communication drafts, artifact wording, weekly review narrative, etc.) runs through the deterministic **Mock AI** provider instead — same schemas, same trust labeling, clearly marked "Mock fallback" everywhere it appears. No external call is made, no data leaves the browser. |
+| `ANTHROPIC_MODEL` (C4) | Reasoning tasks (priorities, risks, decision options, artifacts, Ask…) use the default `claude-opus-5-5`. Setup Health notes that the model isn't pinned. |
+| `ANTHROPIC_MODEL_FAST` (C4) | Short narration tasks (explain changes, trend/outcome interpretation, end-of-day summary, daily guidance) use the cheaper default `claude-haiku-4-5`. |
 
 Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser only ever POSTs an already-built prompt string and receives back schema-validated JSON — it never talks to Anthropic directly and never sees the key.
 
@@ -123,6 +125,38 @@ Every mutation to a synced field debounces a single `POST` a few seconds later (
 ### Configuring in Vercel
 
 Project Settings → Environment Variables → add the ones you need for the **Production** (and optionally **Preview**) environment, then redeploy. Never commit real values to the repo — `.env*.local` is already git-ignored.
+
+## Page smoke test (C3)
+
+`npm test` renders **every route** with `react-dom/server` against the real app store, twice — once with the demo dataset and once with a seeded Jira-like dataset (synced through the real `syncJira` path with a mocked sync endpoint) — and asserts: no runtime error, no `undefined`/`NaN` text, no empty/`undefined` link, and every ticket row links to its Jira URL. It then runs every ticket action the rows expose (Mark completed, Reopen, Skip with reason + re-check date, Reactivate, Block with reason, Unblock, Daily Review "Seen") through the exact functions the buttons call and checks each result again after a reload. The same 16 routes were also loaded in a real browser (dev server, demo data) with console errors captured.
+
+| Route | Demo data | Jira-like data | Browser |
+| --- | --- | --- | --- |
+| `/` Command Center | ✅ | ✅ | ✅ |
+| `/daily-review` | ✅ | ✅ | ✅ |
+| `/focus` My Day | ✅ | ✅ | ✅ |
+| `/priorities` | ✅ | ✅ | ✅ |
+| `/action-plan` | ✅ | ✅ | ✅ |
+| `/attention` | ✅ | ✅ | ✅ |
+| `/risks` | ✅ | ✅ | ✅ |
+| `/dependencies` | ✅ | ✅ | ✅ |
+| `/changes` | ✅ | ✅ | ✅ |
+| `/loops` | ✅ | ✅ | ✅ |
+| `/decisions` | ✅ | ✅ | ✅ |
+| `/meeting` | ✅ | ✅ | ✅ |
+| `/reports` | ✅ | ✅ | ✅ |
+| `/weekly-review` | ✅ | ✅ | ✅ |
+| `/memory` | ✅ | ✅ | ✅ |
+| `/data-settings` | ✅ | ✅ | ✅ |
+
+Every ticket action (complete / reopen / skip / reactivate / block / unblock / seen) changed state and survived a reload.
+
+**Found and fixed while building it:**
+- `/priorities` read `useSearchParams().get(...)` without a null check — crashes wherever the search-params context is absent (it now reads `searchParams?.get(...)`).
+- `ReleaseHealthPanel` used JSX without importing React, so it could not be rendered outside the Next.js compiler (fixed in B5).
+- Weekly Report counted days that haven't happened yet as "missing" (fixed in B4's review).
+
+**Notes for C1:** `ai-context.ts` (`buildAIContext`) was **deleted**, not wired in: no AI call ever used it — every AI task builds its own task-scoped prompt (`src/lib/command-center/ai/prompts/*`) from deterministic facts over the same scope-filtered data every page uses. Making one global context blob the input of every call would have meant rewriting every prompt and sending more tokens per call, not fewer.
 
 ## Validation Status
 

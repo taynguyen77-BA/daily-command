@@ -619,26 +619,10 @@ export interface ReleaseItemRef {
   blockerReason?: string;
 }
 
-/** V1.3 §23 — the compact, token-conscious context handed to Claude. Never the raw Jira
- *  payload; never credentials. */
-export interface AIContext {
-  clientFilter?: string;
-  projectFilter?: string;
-  currentMetrics: SnapshotMetrics;
-  previousMetrics?: SnapshotMetrics;
-  topScores: { key: string; title: string; score: number; classification: Severity }[];
-  topRisks: { title: string; level: RiskLevel; reason: string }[];
-  meaningfulChanges: { entityLabel: string; field: string; before: string; after: string }[];
-  activeDecisions: { title: string; status: DecisionStatus }[];
-  recentActionOutcomes: { title: string; outcome: string }[];
-  source: { type: DataSourceType; lastSyncedAt?: string; baseUrlHost?: string };
-  // V1.4 §27-28 additions — small, optional, token-conscious (same capping as the fields
-  // above). Absent rather than empty when there's nothing proactive to report.
-  drift?: { level: string; score: number; trendQuality: string };
-  topRiskEscalations?: { title: string; severity: string; trend: string; daysOpen: number }[];
-  topDependencyRadar?: { description: string; team: string; heat: string }[];
-  topAttentionItems?: { category: string; severity: string; what: string; why: string }[];
-}
+// C1 — the V1.3 §23 `AIContext` shape (and its builder, ai-context.ts) was removed: no AI call
+// ever used it. Every AI task builds its own task-scoped prompt from deterministic facts (see
+// ai/prompts/*), over the same scope-filtered data every page uses — one global context blob
+// would have meant more tokens per call, not fewer.
 
 /** V1.3 §26 — one query, one grounded answer. Not a chat transcript. */
 export interface QueryAnswer {
