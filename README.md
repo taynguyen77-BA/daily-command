@@ -19,7 +19,7 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000). Without any environment variables set, the app works fully in **Demo** mode (fictional seed data) and **Mock AI** mode (deterministic template output, no external calls) — nothing below is required to try it.
 
 ```bash
-npm test          # deterministic-engine test suite (scripts/command-center-test.mts)
+npm test          # deterministic-engine test suite (scripts/tests/run.mts → scripts/tests/*.test.mts)
 npx tsc --noEmit   # typecheck
 npm run build      # production build
 ```
@@ -113,7 +113,7 @@ Everything else stays local, per device, un-synced by design — e.g. `snapshotH
 **Never put `APP_STATE_SECRET` in a `NEXT_PUBLIC_*` env var** — that would bundle it into every visitor's JS at build time. Instead, each browser is "paired" individually: open **Data & Settings → Cross-Device Sync**, paste the secret once, and it's stored only in that device's own `localStorage` (`device-pairing.ts`) — the same one-time-per-device setup as a password manager or 2FA app. The paired secret is also what a browser's own "Sync Now" button sends to `/api/command-center/jira/sync` (see the `CRON_SECRET` fix above) — it is never a third secret, just reused.
 
 **Client sync lifecycle:** on load, the app renders immediately from local state (unchanged, no blank-screen wait); in the background, a paired device pulls the server's copy and reconciles it against local state:
-- Server has no state yet → this device's local state becomes the baseline (protects an existing pre-V2.15 install's real local data — see the dedicated migration-safety test in `scripts/command-center-test.mts`).
+- Server has no state yet → this device's local state becomes the baseline (protects an existing pre-V2.15 install's real local data — see the dedicated migration-safety test in `scripts/tests/`).
 - Local looks never-meaningfully-used (no attention lifecycle activity, no decisions, no planning activity) → adopt the server's copy wholesale.
 - Both sides have real content and the server is newer → merge: record collections (decisions, actions, personal-plan items, memory events) union by id so a locally-added-but-not-yet-synced record is never dropped, even though the single-timestamp blob design (§ below) means simple preference blocks resolve to "whichever whole side is newer," not true per-field freshness.
 - Otherwise (this device is already at least as fresh as the server knows) → push local forward.
@@ -300,7 +300,7 @@ hook tree). `change-detection.ts` deliberately does NOT thread Daily Command Com
 describes a raw Jira-side status transition event, not a personal-execution exclusion filter, so
 only the two Jira-side completion signals (native Done, Work Relevance Policy) apply there.
 14 new regression tests (one pair — "index omitted reproduces old behavior" / "index passed fixes
-it" — per file, `scripts/command-center-test.mts`, `V2.25 <file>` group) confirm each engine now
+it" — per file, `scripts/tests/`, `V2.25 <file>` group) confirm each engine now
 agrees with the canonical gate on a work item whose native status isn't literally "Done" but whose
 real Jira status name is classified COMPLETED in the policy. `ai-context.ts`'s `buildAIContext`
 and `demo-data.ts` were deliberately left untouched — the former has no caller wiring
@@ -337,7 +337,7 @@ detected Jira completions are reflected immediately — see that method's own co
 gating this by day-change would defeat the point for the common multiple-syncs-per-day case).
 Close Day keeps its exact existing role — review and confirm, calling the same
 `generateDailyReport` — this pass only removes the requirement that it be the sole entry point.
-21 new tests (`scripts/command-center-test.mts`, `V2.25 jira-completion-detection`/`V2.25
+21 new tests (`scripts/tests/`, `V2.25 jira-completion-detection`/`V2.25
 daily-report label split`/`V2.25 Daily Report e2e`/`V2.25 Auto Daily Report gate` groups) cover
 the pure diff function (open→done, no-change, first-sync-has-no-history, already-done-not-
 re-reported, non-Jira items excluded, policy-COMPLETED-without-native-Done), the label-split
@@ -447,7 +447,7 @@ ticket done," exactly as the dev prompt required.
 
 Two independent pieces of work, both in this pass.
 
-**Server-Side Real-Time Notify:** see the [Server-Side Real-Time Notify](#server-side-real-time-notify-v213-optional) section above for the full picture. In short: a small, single-key server-side store (`src/lib/server/notify-store.ts`, `@vercel/kv`-backed) tracks a personal Jira account's assigned-issue-keys and already-notified comment IDs, so `src/lib/command-center/cron-notify.ts`'s `runServerSideNotifyCheck` (wired into `jira/sync/route.ts`'s GET handler, the one Vercel Cron/GitHub Actions actually calls) can detect a genuinely new assignment/mention and Slack it with no browser open — reusing V2.10's own `detectNewAssignments`/`buildMentionEvents` rather than a second implementation. The client (`use-command-center.ts`) checks a new `serverSideNotifyActive` status flag and defers entirely to the server path once it's active, preventing the two independent tracking systems (server KV vs. browser localStorage) from double-sending the same signal. `cron-notify.ts` itself is deliberately NOT `import "server-only"` (unlike the dev prompt's literal instruction) and takes an injected `fetchImpl`/`NotifyStateStore`, so the cold-start, double-notification-prevention, and connectivity-failure-never-corrupts-state guarantees are all covered by real, offline, dependency-injected tests (`scripts/command-center-test.mts`) rather than a manual trace — the credential/env-var-touching pieces (`notify-store.ts`'s real KV client, the sync route's wiring) stay server-only and are verified the same way the existing `jira-client.ts`/`jira/sync/route.ts` split already is (source-text assertions, never imported into the test process).
+**Server-Side Real-Time Notify:** see the [Server-Side Real-Time Notify](#server-side-real-time-notify-v213-optional) section above for the full picture. In short: a small, single-key server-side store (`src/lib/server/notify-store.ts`, `@vercel/kv`-backed) tracks a personal Jira account's assigned-issue-keys and already-notified comment IDs, so `src/lib/command-center/cron-notify.ts`'s `runServerSideNotifyCheck` (wired into `jira/sync/route.ts`'s GET handler, the one Vercel Cron/GitHub Actions actually calls) can detect a genuinely new assignment/mention and Slack it with no browser open — reusing V2.10's own `detectNewAssignments`/`buildMentionEvents` rather than a second implementation. The client (`use-command-center.ts`) checks a new `serverSideNotifyActive` status flag and defers entirely to the server path once it's active, preventing the two independent tracking systems (server KV vs. browser localStorage) from double-sending the same signal. `cron-notify.ts` itself is deliberately NOT `import "server-only"` (unlike the dev prompt's literal instruction) and takes an injected `fetchImpl`/`NotifyStateStore`, so the cold-start, double-notification-prevention, and connectivity-failure-never-corrupts-state guarantees are all covered by real, offline, dependency-injected tests (`scripts/tests/`) rather than a manual trace — the credential/env-var-touching pieces (`notify-store.ts`'s real KV client, the sync route's wiring) stay server-only and are verified the same way the existing `jira-client.ts`/`jira/sync/route.ts` split already is (source-text assertions, never imported into the test process).
 
 **Five bug fixes**, reported directly by the user:
 1. **Jira Work Relevance Policy "resets on deploy"** — investigated thoroughly; the policy is persisted in browser `localStorage` (`command-center:v1`, unchanged since it was introduced) with fully defensive parsing/migration, and no code path in this app ever clears or version-gates it. No code bug was found. The overwhelmingly likely real cause is environmental: Vercel gives every deployment (including Production ones without a stable custom domain) its own unique `*.vercel.app` URL in addition to the stable aliased production URL — visiting a fresh per-deployment URL after each deploy is a different browser origin, hence empty `localStorage`, which looks exactly like "reset on deploy" without actually being one. If you're seeing this, check which URL you're opening after each deploy; visiting the same stable Production URL every time should persist the policy correctly.

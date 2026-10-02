@@ -53,7 +53,7 @@ function DataSourceBadge() {
 
 /** Exported so the offline test suite can verify this arithmetic directly (Header itself
  *  can't be rendered there — its state comes from useSyncExternalStore's server snapshot, a
- *  Node/no-DOM environment always takes the SSR branch — see scripts/command-center-test.mts's
+ *  Node/no-DOM environment always takes the SSR branch — see scripts/tests/'s
  *  V2.16 section). */
 export function daysStale(lastSyncCompletedAtIso: string | undefined, nowMs: number = Date.now()): number | undefined {
   if (!lastSyncCompletedAtIso) return undefined;
