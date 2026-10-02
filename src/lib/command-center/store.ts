@@ -113,7 +113,7 @@ import type {
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
 } from "./types";
-import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, emptyData } from "./types";
+import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, SKIP_REASONS, emptyData } from "./types";
 import { rollDailySyncSummary } from "./sync-history";
 import { mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
@@ -320,6 +320,10 @@ export interface StoreState {
   followUpNotified: Record<string, string>;
   /** D1 — local day the one-click morning flow last ran. */
   morningBriefLastRunDay?: string;
+  /** E1 — when this device last exported a backup (local-only). */
+  lastBackupAt?: string;
+  /** E1 — when the weekly backup reminder was last put off ("Remind me next week"). */
+  backupReminderSnoozedAt?: string;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -427,6 +431,19 @@ export interface CommandCenterStoreDeps {
    *  undefined → window + document. */
   stateFocusTargets?: Pick<EventTarget, "addEventListener">[];
 }
+
+/** E2 — a Focus Session action the store refused: the ticket's current status doesn't allow
+ *  the move (ticket-work-state.ts canTransition). `since`/`surface` describe the change that
+ *  put it there, for "already Done (changed <since> on <surface>)". */
+export interface FocusItemRejection {
+  ok: false;
+  reason: "transition-rejected";
+  current: TicketWorkStatus;
+  ticketKey: string;
+  since?: string;
+  surface?: TicketStatusSurface;
+}
+export type FocusItemResult = { ok: true } | FocusItemRejection | { ok: false; reason: "not-found" };
 
 const IDLE_JIRA_SYNC_ACTIVITY: JiraSyncActivity = { inProgress: false };
 
@@ -573,7 +590,7 @@ function asDailyCommandCompletions(v: unknown): Record<string, DailyCommandCompl
   return out;
 }
 
-const VALID_SKIP_REASONS = new Set<SkipReason>(["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"]);
+const VALID_SKIP_REASONS = new Set<SkipReason>(SKIP_REASONS);
 
 // V2.23 — same discipline as isDailyCommandCompletionShape above: a malformed entry (or a
 // corrupted map) is dropped rather than trusted; a missing/invalid entry just means that
@@ -870,12 +887,53 @@ export function parseStoredState(raw: string): StoreState {
       myTicketActivity: asMyTicketActivity(parsed.myTicketActivity),
       followUpNotified: asStringRecord(parsed.followUpNotified),
       morningBriefLastRunDay: typeof parsed.morningBriefLastRunDay === "string" ? parsed.morningBriefLastRunDay : undefined,
+      lastBackupAt: typeof parsed.lastBackupAt === "string" ? parsed.lastBackupAt : undefined,
+      backupReminderSnoozedAt: typeof parsed.backupReminderSnoozedAt === "string" ? parsed.backupReminderSnoozedAt : undefined,
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
     };
   } catch {
     return initialState();
   }
+}
+
+/** The synced slice applied onto a local state — ONLY the synced fields (see
+ *  applySyncedAppState). Pure; also used by importBackup's merge (E1). */
+export function applySyncedSlice(state: StoreState, synced: SyncedAppState): StoreState {
+  return {
+    ...state,
+    personalIdentity: synced.personalIdentity,
+    ownerName: synced.personalIdentity?.displayName,
+    jiraWorkRelevancePolicy: synced.jiraWorkRelevancePolicy,
+    attentionState: synced.attentionState,
+    data: { ...state.data, decisions: synced.decisions, actions: synced.actionPlanState.actions },
+    personalPlan: synced.actionPlanState.personalPlan,
+    memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
+    dailyReports: synced.dailyReports,
+    // A1 — every execution-state field is optional on a synced blob (pre-A1 writers never
+    // sent them): absent means "keep local", never "clear". The synced ticketWorkStates (or,
+    // from a pre-TicketWorkState writer, its legacy maps) are folded into the canonical
+    // state and the deprecated maps re-derived from it.
+    ...ticketStateFromLegacy(
+      synced.ticketWorkStates ? asTicketWorkStates(synced.ticketWorkStates) : state.ticketWorkStates,
+      {
+        dailyCommandCompletions: synced.dailyCommandCompletions ?? {},
+        dailyCommandSkips: synced.dailyCommandSkips ?? {},
+        dailyCommandBlocks: synced.dailyCommandBlocks ?? {},
+        dailyCommandTombstones: synced.dailyCommandTombstones ?? state.dailyCommandTombstones,
+      },
+      synced.actionPlanState.personalPlan,
+      undefined
+    ),
+    syncLog: synced.syncLog ?? state.syncLog,
+    dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? state.dailyReviewLastVisitAt,
+    dailyReviewAcks: synced.dailyReviewAcks ?? state.dailyReviewAcks,
+    dailyReviewBaselineAt: synced.dailyReviewBaselineAt ?? state.dailyReviewBaselineAt,
+    mentionReplies: synced.mentionReplies ? asMentionReplies(synced.mentionReplies) : state.mentionReplies,
+    showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
+    myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
+    jiraProjectScope: synced.uiPreferences.jiraProjectScope,
+  };
 }
 
 export class CommandCenterStore {
@@ -1197,6 +1255,22 @@ export class CommandCenterStore {
 
   resetAll() {
     this.set(initialState());
+  }
+
+  /** E1 — adopt an imported backup's state (already merged or chosen by backup.ts —
+   *  mergeImportedState / replaceWithImportedState). Persisted like any other change. */
+  adoptImportedState(next: StoreState) {
+    this.set(next);
+  }
+
+  /** E1 — a backup file was just downloaded. */
+  markBackupExported(at: string = new Date().toISOString()) {
+    this.set({ ...this.state, lastBackupAt: at, backupReminderSnoozedAt: undefined });
+  }
+
+  /** E1 — "Remind me next week" on the backup reminder. */
+  snoozeBackupReminder(at: string = new Date().toISOString()) {
+    this.set({ ...this.state, backupReminderSnoozedAt: at });
   }
 
   /** V1.2 §17 "No Hidden Memory" — memory must be deletable without wiping live data.
@@ -1641,41 +1715,7 @@ export class CommandCenterStore {
    *  `personalIdentity.displayName` via the same rule setPersonalIdentity() already enforces,
    *  rather than being set independently and risking the two diverging. */
   applySyncedAppState(synced: SyncedAppState) {
-    this.set({
-      ...this.state,
-      personalIdentity: synced.personalIdentity,
-      ownerName: synced.personalIdentity?.displayName,
-      jiraWorkRelevancePolicy: synced.jiraWorkRelevancePolicy,
-      attentionState: synced.attentionState,
-      data: { ...this.state.data, decisions: synced.decisions, actions: synced.actionPlanState.actions },
-      personalPlan: synced.actionPlanState.personalPlan,
-      memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
-      dailyReports: synced.dailyReports,
-      // A1 — every execution-state field is optional on a synced blob (pre-A1 writers never
-      // sent them): absent means "keep local", never "clear". The synced ticketWorkStates (or,
-      // from a pre-TicketWorkState writer, its legacy maps) are folded into the canonical
-      // state and the deprecated maps re-derived from it.
-      ...ticketStateFromLegacy(
-        synced.ticketWorkStates ? asTicketWorkStates(synced.ticketWorkStates) : this.state.ticketWorkStates,
-        {
-          dailyCommandCompletions: synced.dailyCommandCompletions ?? {},
-          dailyCommandSkips: synced.dailyCommandSkips ?? {},
-          dailyCommandBlocks: synced.dailyCommandBlocks ?? {},
-          dailyCommandTombstones: synced.dailyCommandTombstones ?? this.state.dailyCommandTombstones,
-        },
-        synced.actionPlanState.personalPlan,
-        undefined
-      ),
-      syncLog: synced.syncLog ?? this.state.syncLog,
-      dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? this.state.dailyReviewLastVisitAt,
-      dailyReviewAcks: synced.dailyReviewAcks ?? this.state.dailyReviewAcks,
-      dailyReviewBaselineAt: synced.dailyReviewBaselineAt ?? this.state.dailyReviewBaselineAt,
-      mentionReplies: synced.mentionReplies ? asMentionReplies(synced.mentionReplies) : this.state.mentionReplies,
-      showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
-      myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
-      jiraProjectScope: synced.uiPreferences.jiraProjectScope,
-      lastAppStateSyncIso: synced.updatedAtIso,
-    });
+    this.set({ ...applySyncedSlice(this.state, synced), lastAppStateSyncIso: synced.updatedAtIso });
   }
 
   /** Records that this device's local synced slice is now known to match the server as of
@@ -2526,17 +2566,19 @@ export class CommandCenterStore {
 
   /** Focus Session status change. A plan item about a ticket goes through setTicketStatus (so
    *  the ticket — and every list showing it — moves with it; the plan item follows as a linked
-   *  record); a rejected ticket transition (e.g. the ticket is already DONE) changes nothing.
-   *  A ticketless plan item keeps its own status. The FOCUS_* event carries the ticketKey so
-   *  reports merge it with the TICKET_* event into one line. */
-  private setFocusStatus(id: string, status: PersonalPlanItemStatus, kind: "FOCUS_STARTED" | "FOCUS_COMPLETED" | "FOCUS_BLOCKED" | "FOCUS_SKIPPED", today: string, ticketOpts: { reason?: string } = {}) {
+   *  record); a rejected ticket transition (e.g. the ticket is already DONE) changes nothing —
+   *  no ticket write, no plan-item write, no event — and is reported back (E2) so the Focus
+   *  Session never shows an outcome the store refused. A ticketless plan item keeps its own
+   *  status. The FOCUS_* event carries the ticketKey so reports merge it with the TICKET_*
+   *  event into one line. */
+  private setFocusStatus(id: string, status: PersonalPlanItemStatus, kind: "FOCUS_STARTED" | "FOCUS_COMPLETED" | "FOCUS_BLOCKED" | "FOCUS_SKIPPED", today: string, ticketOpts: { reason?: string } = {}): FocusItemResult {
     const item = this.state.personalPlan.find((p) => p.id === id);
-    if (!item) return;
+    if (!item) return { ok: false, reason: "not-found" };
     const ticketKey = ticketKeyForPlanItem(item, this.state.data);
     if (ticketKey) {
       const to: TicketWorkStatus = status === "completed" ? "DONE" : status === "blocked" ? "BLOCKED" : status === "skipped" ? "SKIPPED" : "IN_PROGRESS";
-      const current = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
-      if (!canTransition(current, to)) return;
+      const rejected = this.focusTransitionRejection(ticketKey, to);
+      if (rejected) return rejected;
       this.setTicketStatus(ticketKey, to, { surface: "focus-session", reason: ticketOpts.reason });
       // The plan item may be from an earlier day (not touched by the linked-records rule), so
       // make sure THIS one reflects the session.
@@ -2551,26 +2593,67 @@ export class CommandCenterStore {
     // which ticket" discipline as reportContextForDecision above — no ticketKey is attempted.
     const projectName = item.snapshot?.projectId ? this.state.data.projects.find((p) => p.id === item.snapshot!.projectId)?.name : undefined;
     this.appendMemoryEvent({ kind, title: `Focus ${status}: ${item.sourceType}:${item.sourceId}`, impact: `Planned for ${item.plannedDate}.`, evidence: [], projectId: item.snapshot?.projectId, projectName, ...(ticketKey ? { ticketKey } : {}) });
+    return { ok: true };
+  }
+
+  /** E2 — the rejection a Focus Session shows when the ticket can't make this move (the ticket
+   *  transition rules themselves live in ticket-work-state.ts and are not changed here). */
+  private focusTransitionRejection(ticketKey: string, to: TicketWorkStatus): FocusItemRejection | null {
+    const current = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
+    if (canTransition(current, to)) return null;
+    const record = this.state.ticketWorkStates[ticketKey];
+    const last = record?.history[record.history.length - 1];
+    return { ok: false, reason: "transition-rejected", current, ticketKey, ...(record?.updatedAt ? { since: record.updatedAt } : {}), ...(last ? { surface: last.surface } : {}) };
   }
 
   /** §16, §18 — Focus Session lifecycle. These are personal execution states only — they
-   *  never alter Jira status, Risk status, or auto-advance Decision status (§18). */
-  startFocusItem(id: string, today: string) {
-    this.setFocusStatus(id, "in-progress", "FOCUS_STARTED", today);
-    this.bumpUsage(USAGE_KEYS.FOCUS_STARTED);
+   *  never alter Jira status, Risk status, or auto-advance Decision status (§18).
+   *  E2 — each returns whether the store accepted it; the Focus Session changes its own state
+   *  only on `{ ok: true }`. */
+  startFocusItem(id: string, today: string): FocusItemResult {
+    const result = this.setFocusStatus(id, "in-progress", "FOCUS_STARTED", today);
+    if (result.ok) this.bumpUsage(USAGE_KEYS.FOCUS_STARTED);
+    return result;
   }
-  completeFocusItem(id: string, today: string, note?: string) {
+  completeFocusItem(id: string, today: string, note?: string): FocusItemResult {
+    const rejected = this.focusItemRejection(id, "DONE");
+    if (rejected) return rejected;
     if (note) this.updatePersonalPlanItem(id, { note });
-    this.setFocusStatus(id, "completed", "FOCUS_COMPLETED", today);
+    return this.setFocusStatus(id, "completed", "FOCUS_COMPLETED", today);
   }
   /** V2.0 §7 — blockedReason/blockedNote are optional capture from the Focus Session
-   *  "Blocked" flow; never invented when the user skips the capture step. */
-  blockFocusItem(id: string, today: string, blockedReason?: string, blockedNote?: string) {
-    this.setFocusStatus(id, "blocked", "FOCUS_BLOCKED", today, { reason: [blockedReason, blockedNote].filter(Boolean).join(" — ") || undefined });
-    if (blockedReason || blockedNote) this.updatePersonalPlanItem(id, { blockedReason, blockedNote });
+   *  "Blocked" flow; never invented when the user skips the capture step, and never written
+   *  when the block itself was rejected (E2). */
+  blockFocusItem(id: string, today: string, blockedReason?: string, blockedNote?: string): FocusItemResult {
+    const result = this.setFocusStatus(id, "blocked", "FOCUS_BLOCKED", today, { reason: [blockedReason, blockedNote].filter(Boolean).join(" — ") || undefined });
+    if (result.ok && (blockedReason || blockedNote)) this.updatePersonalPlanItem(id, { blockedReason, blockedNote });
+    return result;
   }
-  skipFocusItem(id: string, today: string) {
-    this.setFocusStatus(id, "skipped", "FOCUS_SKIPPED", today);
+  /** E3 — `reason` is one of the same SKIP_REASONS TaskRow offers (optional). */
+  skipFocusItem(id: string, today: string, reason?: SkipReason): FocusItemResult {
+    return this.setFocusStatus(id, "skipped", "FOCUS_SKIPPED", today, { reason });
+  }
+  /** E3 — Focus Session "Defer": same as My Day's Defer (deferPersonalPlanItem) — a ticket goes
+   *  DEFERRED until `until` (default tomorrow) and comes back to Today on that date — but
+   *  reports a rejection instead of silently doing nothing. */
+  deferFocusItem(id: string, until?: string): FocusItemResult {
+    const rejected = this.focusItemRejection(id, "DEFERRED");
+    if (rejected) return rejected;
+    const item = this.state.personalPlan.find((p) => p.id === id);
+    if (!item) return { ok: false, reason: "not-found" };
+    const date = until ?? addDays(getTodayIso(), 1);
+    const ticketKey = ticketKeyForPlanItem(item, this.state.data);
+    if (ticketKey) this.deferTicket(ticketKey, date, undefined, "focus-session");
+    else this.updatePersonalPlanItem(id, { status: "deferred", deferredUntil: date });
+    return { ok: true };
+  }
+
+  /** The rejection for a plan item's ticket moving to `to`, or null (ticketless / allowed).
+   *  Public so the Focus Session can check before opening a flow (e.g. Decision Assistant). */
+  focusItemRejection(id: string, to: TicketWorkStatus): FocusItemRejection | null {
+    const item = this.state.personalPlan.find((p) => p.id === id);
+    const ticketKey = item ? ticketKeyForPlanItem(item, this.state.data) : undefined;
+    return ticketKey ? this.focusTransitionRejection(ticketKey, to) : null;
   }
 
   /** §22 — a single, low-frequency "the user actually reviewed today's focus" event,

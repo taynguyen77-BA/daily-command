@@ -1206,7 +1206,7 @@ export interface PersonalFocusResult {
 
 /** §18 — Focus Session's own ephemeral execution state. READY/CANCELLED are never
  *  persisted; the other four map 1:1 onto PersonalPlanItem.status transitions. */
-export type FocusSessionState = "READY" | "IN_PROGRESS" | "BLOCKED" | "COMPLETED" | "SKIPPED" | "CANCELLED";
+export type FocusSessionState = "READY" | "IN_PROGRESS" | "BLOCKED" | "COMPLETED" | "SKIPPED" | "DEFERRED" | "CANCELLED";
 
 /** §13 — deliberately minimal: a reference plus planning metadata, never a copy of the
  *  source object. Existing project state (via sourceType+sourceId) remains the source of
@@ -1712,6 +1712,8 @@ export interface DailyCommandCompletion {
 // completeTicketInDailyCommand each clear the other map's entry for the same ticketKey, so
 // "Completed + Skipped" is never a representable combination.
 export type SkipReason = "Team is handling it" | "Not my action" | "Waiting on another team" | "Not relevant right now" | "Other";
+/** E3 — the one Skip reason list (TaskRow and Focus Session both render it). */
+export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
 
 export interface DailyCommandSkip {
   ticketKey: string;
@@ -1764,6 +1766,8 @@ export interface FeatureToggles {
   followUpReminders: boolean;
   staleUseMyActivity: boolean;
   reportExport: boolean;
+  /** E1 — weekly "download a backup" reminder while cross-device sync is off. */
+  backupReminder: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1774,6 +1778,7 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   followUpReminders: true,
   staleUseMyActivity: false,
   reportExport: true,
+  backupReminder: true,
 };
 
 /** D3 — one day's roll-up of successful Jira syncs (kept 90 days). */
@@ -1843,7 +1848,14 @@ export interface TaskReactivation {
   reactivatedAt?: string;
 }
 
+/** E3 — the ONE Block reason vocabulary (quick-fill; any text is valid), rendered by TaskRow and
+ *  Focus Session alike through ReasonPickers.tsx. "Not enough time today" (Focus Session's old
+ *  list) is not a block — that is Defer. Records that already carry it are kept and shown
+ *  as-is (LEGACY_BLOCK_REASONS), never rewritten. */
 export const BLOCK_REASON_SUGGESTIONS = ["Waiting for a reply", "Depends on another ticket", "Waiting on environment/access", "Waiting on client decision"] as const;
+/** Reasons older versions offered for Block and no longer do. Kept only so their meaning stays
+ *  documented; parsing never rewrites them. */
+export const LEGACY_BLOCK_REASONS = ["Not enough time today", "Waiting on someone else", "Missing information", "Dependency not resolved"] as const;
 
 // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. A lightweight, local-only feedback
 // record — three simple 0/1/2 questions, never a productivity score, never sent anywhere.

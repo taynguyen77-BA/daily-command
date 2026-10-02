@@ -1,7 +1,10 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { useCommandCenter } from "./use-command-center";
+import { BackupReminderBar } from "./BackupReminder";
+import { ensurePersistentStorage } from "@/lib/command-center/storage-persistence";
 import { computeFreshness, FRESHNESS_LABEL } from "@/lib/command-center/freshness";
 import { JIRA_ERROR_HELP } from "@/lib/command-center/jira/error-help";
 
@@ -102,6 +105,10 @@ function SyncFailedBanner() {
 }
 
 export function Header() {
+  // E1 — on first load, ask the browser to keep this origin's storage (shown in Data & Settings).
+  useEffect(() => {
+    void ensurePersistentStorage();
+  }, []);
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   return (
     <>
@@ -121,6 +128,7 @@ export function Header() {
         <DataSourceBadge />
       </header>
       <SyncFailedBanner />
+      <BackupReminderBar />
     </>
   );
 }

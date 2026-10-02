@@ -22,13 +22,15 @@ import React, { useState, useSyncExternalStore } from "react";
 import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
 import { formatExecutionRecord, resolveTicketExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
 import { formatRelativeDateTime } from "@/lib/command-center/relative-time";
-import { BLOCK_REASON_SUGGESTIONS, type FocusSignal, type SkipReason, type TaskReactivation, type TicketStatusSurface, type WorkItem } from "@/lib/command-center/types";
+import { SKIP_REASONS, type FocusSignal, type SkipReason, type TaskReactivation, type TicketStatusSurface, type WorkItem } from "@/lib/command-center/types";
+import { BlockReasonField, SkipReasonSelect } from "./ReasonPickers";
 import { FirstSeenBadge, TicketLink } from "./TicketLink";
 import { FollowUpDraft } from "./FollowUpDraft";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
 
-export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
+/** Re-exported for existing importers; the list itself lives in types.ts (E3). */
+export { SKIP_REASONS };
 
 export interface TaskRowActions {
   onComplete: () => void;
@@ -164,6 +166,7 @@ export function TaskReferenceRowView({
   signals,
   newReason,
   stacked = false,
+  initialPicker = null,
 }: {
   ticketKey: string;
   url?: string;
@@ -194,11 +197,13 @@ export function TaskReferenceRowView({
   newReason?: string;
   /** Layout only: actions always sit under the ticket info (for rows inside narrow cards). */
   stacked?: boolean;
+  /** Which picker starts open (render tests compare its options with Focus Session's). */
+  initialPicker?: "skip" | "block" | "defer" | null;
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
   const hidden = new Set(hideActions ?? []);
-  const [picker, setPicker] = useState<"skip" | "block" | "defer" | null>(null);
+  const [picker, setPicker] = useState<"skip" | "block" | "defer" | null>(initialPicker);
   const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   const [blockReason, setBlockReason] = useState("");
   const [revisitOn, setRevisitOn] = useState("");
@@ -317,19 +322,7 @@ export function TaskReferenceRowView({
           )}
           {picker === "skip" && (
             <>
-              <select
-                value={skipReason}
-                onChange={(e) => setSkipReason(e.target.value as SkipReason | "")}
-                aria-label="Skip reason (optional)"
-                className={FIELD}
-              >
-                <option value="">No reason</option>
-                {SKIP_REASONS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
+              <SkipReasonSelect value={skipReason} onChange={setSkipReason} className={FIELD} />
               {revisitInput}
               <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); close(); }} className={BTN}>
                 {L.skip}
@@ -341,20 +334,7 @@ export function TaskReferenceRowView({
           )}
           {picker === "block" && (
             <>
-              <input
-                value={blockReason}
-                onChange={(e) => setBlockReason(e.target.value)}
-                list={`block-reasons-${ticketKey}`}
-                placeholder="Blocked on… (optional)"
-                aria-label="Block reason (optional)"
-                maxLength={200}
-                className={`w-44 ${FIELD}`}
-              />
-              <datalist id={`block-reasons-${ticketKey}`}>
-                {BLOCK_REASON_SUGGESTIONS.map((r) => (
-                  <option key={r} value={r} />
-                ))}
-              </datalist>
+              <BlockReasonField listId={`block-reasons-${ticketKey}`} value={blockReason} onChange={setBlockReason} className={`w-44 ${FIELD}`} />
               {revisitInput}
               {showPingOn && (
                 <input

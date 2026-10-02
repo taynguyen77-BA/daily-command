@@ -24,6 +24,8 @@ const FILES = [
   "./13-personal-work-reporting.test.mts",
   "./14-sync-reports-helpers.test.mts",
   "./15-ticket-work-state.test.mts",
+  "./16-data-durability.test.mts",
+  "./17-focus-session-outcomes.test.mts",
 ];
 
 for (const file of FILES) await import(file);
