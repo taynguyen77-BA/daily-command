@@ -76,7 +76,8 @@ export class JiraDataSource implements DataSourceProvider {
 
 export async function checkJiraConfigured(): Promise<{ configured: boolean; baseUrlHost?: string }> {
   try {
-    const res = await fetch(STATUS_ENDPOINT, { method: "GET" });
+    // E5 — the host is only returned to a paired device; unpaired gets `configured` alone.
+    const res = await fetch(STATUS_ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
     if (!res.ok) return { configured: false };
     return (await res.json()) as { configured: boolean; baseUrlHost?: string };
   } catch {

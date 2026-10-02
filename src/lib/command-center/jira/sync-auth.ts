@@ -26,6 +26,9 @@
 // auth check in this app, which was already correctly fail-closed (503 "not configured") in
 // the same situation — the two checks now share both the same default-closed contract and the
 // same discriminated result shape, so every sensitive route in the app is gated consistently.
+
+import { bearerMatches } from "../secure-compare";
+
 // A trailing newline/space in the env var — e.g. from copy-pasting `openssl rand -hex 32`
 // terminal output straight into Vercel's env var UI — makes the configured secret silently
 // never equal `Bearer <what the user pasted into Data & Settings>`, even though both values
@@ -53,7 +56,10 @@ export function checkSyncRequestAuth(
   if (!authorizationHeader) {
     return { ok: false, status: 401, error: "Missing Authorization header. Pair this device in Data & Settings." };
   }
-  const authorized = (!!cronSecret && authorizationHeader === `Bearer ${cronSecret}`) || (!!appStateSecret && authorizationHeader === `Bearer ${appStateSecret}`);
+  // E5 — constant-time; both secrets are always checked so timing never says which one exists.
+  const cronOk = bearerMatches(authorizationHeader, cronSecret);
+  const appStateOk = bearerMatches(authorizationHeader, appStateSecret);
+  const authorized = cronOk || appStateOk;
   if (!authorized) {
     return { ok: false, status: 401, error: "Invalid Authorization header. Pair this device in Data & Settings." };
   }
