@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.25
+**Current version:** V2.33
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version-line reconciliation (yet again):** this line had drifted stale at V2.15 even though nine real passes (V2.16's IndexedDB persistence backend, V2.17's Daily/Weekly Reports and Delivery Artifacts hardening, V2.18 through V2.24's various sync/trust/attention-truth/automatic-Jira-sync fixes) had already shipped without ever updating it here — the same class of gap this README has now flagged and fixed three times (see the V2.10 and V2.13 sections below for the two prior occurrences). Corrected to V2.25 as part of this pass, which itself adds the "is this ticket done?" consistency audit, Jira-aware Daily/Weekly Reports, the Stale Assigned Ticket detector, and the Setup Health checklist described below.
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.33.0` ↔ `V2.33`) and the test suite fails if this line disagrees with it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -125,6 +125,15 @@ Every mutation to a synced field debounces a single `POST` a few seconds later (
 ### Configuring in Vercel
 
 Project Settings → Environment Variables → add the ones you need for the **Production** (and optionally **Preview**) environment, then redeploy. Never commit real values to the repo — `.env*.local` is already git-ignored.
+
+## Final-review fixes (V2.33)
+
+- **Backup & storage (Data & Settings).** The app asks the browser for persistent storage on first load (`navigator.storage.persist()`, feature-detected) and shows the result ("Storage: persistent" / "may be cleared by the browser"). **Export backup** downloads the full local state (ticket statuses, plan, actions, attention, history, reports, sync log, settings) with `schemaVersion` + `exportedAt`. **Import backup** validates the file (a malformed one is rejected with the reason and changes nothing), runs the normal migrations (older backups come in upgraded), previews counts, then **Merge** (default — per-record newest-wins, the same merge cross-device sync uses) or **Replace** (explicit). **Reset all data** offers "Export backup first" and needs `RESET` typed. While cross-device sync isn't active, a weekly reminder offers a backup download (Features → "Weekly backup reminder", on by default) and Setup Health says "No backup in the last 7 days and no cross-device sync".
+- **Focus Session tells the truth.** Its actions return `{ ok }` / `{ ok: false, reason: "transition-rejected", current }`; the session re-reads storage first (another tab may have moved the ticket) and only shows Completed/Blocked/Skipped/Deferred when the store accepted it — otherwise "This ticket is already Done (changed … on …). Reopen it first?" with a Reopen button. A rejected Block writes no reason.
+- **One reason vocabulary.** Focus Session and every TaskRow render the same Block suggestions and Skip reasons (`ReasonPickers.tsx`). "Not enough time today" is gone from Block — Focus Session has **Defer** (+date, default tomorrow) for that, plus **Skip** (+reason). Old records that carry it are kept and shown as-is.
+- **Reports without opening the app.** With Vercel KV + `APP_STATE_SECRET` + `PERSONAL_JIRA_ACCOUNT_ID`, the scheduled cron also writes a server-side standup snapshot for each workday (new assigned, new mentions, closed in Jira, open assigned). A paired device pulls them (`GET /api/command-center/reports/server`) into its Daily Reports — whatever the app itself recorded always wins for in-app sections. A day with neither shows "No data recorded".
+- **Security.** Every secret check is constant-time (`secure-compare.ts`, `crypto.timingSafeEqual` over SHA-256 digests). `/api/command-center/jira/status` returns only `{ configured }` to an unauthenticated caller; the Jira host is returned only with the same auth as every other route (a paired device sends it).
+- **Tests** are split per domain under `scripts/tests/` (one runner, `scripts/tests/run.mts`); the split moved 2616 checks verbatim and in order.
 
 ## Daily helpers (V2.30) — each can be switched off in Data & Settings → Features
 
@@ -441,7 +450,7 @@ or "completion" concept was introduced anywhere in this pass — every fix reuse
 `isWorkItemOperationallyOpen`/`isWorkItemDoneOrExcluded` as the one canonical truth for "is this
 ticket done," exactly as the dev prompt required.
 
-**Current version:** V2.25.
+**Version at the end of the V2.25 pass:** V2.25.
 
 # V2.13 — Server-Side Real-Time Notify (Option B) + Five Bug Fixes
 

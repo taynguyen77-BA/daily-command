@@ -27,6 +27,7 @@ const FILES = [
   "./16-data-durability.test.mts",
   "./17-focus-session-outcomes.test.mts",
   "./18-server-daily-reports.test.mts",
+  "./19-security-and-docs.test.mts",
 ];
 
 for (const file of FILES) await import(file);
