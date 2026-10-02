@@ -62,7 +62,7 @@ function syntheticPreviousSnapshot(assignedIssueKeys: string[], accountId: strin
   return { date: today, workItems, risks: [], requirements: [], dependencies: [], projects: [] };
 }
 
-interface MentionEntry {
+export interface MentionEntry {
   commentId: string;
   event: MentionEvent;
 }
@@ -74,7 +74,8 @@ interface MentionEntry {
  *  longer needs a second, locally-duplicated identity function. A single issue's comment-fetch
  *  failure is best-effort (never fails the whole check), same discipline as
  *  jira/sync/route.ts's own mention-fetching chain. */
-async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, issueKeys: string[], today: string): Promise<MentionEntry[]> {
+/** Exported for server-daily-report.ts (E4), which needs the same per-comment mention list. */
+export async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, issueKeys: string[], today: string): Promise<MentionEntry[]> {
   const entries: MentionEntry[] = [];
   await Promise.all(
     issueKeys.map(async (issueKey) => {

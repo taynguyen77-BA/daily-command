@@ -36,6 +36,7 @@ import { matchesIdentity, type PersonalRelationIdentity } from "./personal-relat
 import { isWorkItemDoneOrExcluded, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { slug } from "./attention-queue";
 import { isMentionReplied } from "./mention-replies";
+import { isServerDailyStandup } from "./server-report-merge";
 
 // ===== Shared shapes ===================================================================
 
@@ -252,6 +253,13 @@ export interface DailyReportView {
   standupAvailable: boolean;
   /** Whether "mine" could be told apart from "team" (an identity is configured). */
   identityConfigured: boolean;
+  /** E4 — open work assigned to me per the server snapshot (only when the app recorded no
+   *  standup that day). */
+  openAssigned?: ReportTicket[];
+  /** E4 — set when a server-side (cron) snapshot supplied Jira-derived sections. */
+  serverSnapshot?: { generatedAt: string; coldStart?: boolean };
+  /** E4 — neither the app nor the server recorded anything for this day. */
+  noData?: boolean;
 }
 
 const IN_APP_DONE = new Set<MemoryEvent["kind"]>(["TICKET_COMPLETED", "ACTION_COMPLETED", "FOCUS_COMPLETED"]);
@@ -338,28 +346,50 @@ function pausedFromEvents(events: MemoryEvent[]): { blocked: ReportTicket[]; ski
   return { blocked, skipped };
 }
 
-/** One day's report. `standup` overrides the snapshot's own (pass the live state for today). */
+/** One day's report. `standup` overrides the snapshot's own (pass the live state for today).
+ *  E4 — a server snapshot (snapshot.server, written by the cron while the app was closed) fills
+ *  the Jira-derived sections the app didn't record; whatever the app recorded always wins. */
 export function buildDailyReportView(snapshot: DailyReportSnapshot | undefined, date: string, identity: PersonalRelationIdentity, standup?: StandupState): DailyReportView {
   const events = snapshot?.events ?? [];
   const state = standup ?? (isStandupState(snapshot?.standup) ? snapshot!.standup : undefined);
+  const server = isServerDailyStandup(snapshot?.server) ? snapshot!.server : undefined;
   const { mine, team } = doneFromEvents(events, identity);
+  const mineKeys = new Set(mine.map((t) => t.key).filter(Boolean));
+  const closedByServer = (server?.closedInJira ?? []).filter((t) => !t.key || !mineKeys.has(t.key));
   const paused = state ? { blocked: state.blocked, skipped: state.skipped } : pausedFromEvents(events);
+  const usedServer = !!server && (!state || closedByServer.length > 0);
   return {
     date,
     ...(snapshot?.generatedAt ? { generatedAt: snapshot.generatedAt } : {}),
-    doneMine: mine,
+    doneMine: [...mine, ...closedByServer],
     inProgress: state?.inProgress ?? [],
     blocked: paused.blocked,
     skipped: paused.skipped,
-    newToday: state?.newToday ?? [],
-    mentionsAwaitingReply: state?.mentionsAwaitingReply ?? [],
+    newToday: state?.newToday ?? server?.newAssigned ?? [],
+    mentionsAwaitingReply: state?.mentionsAwaitingReply ?? server?.newMentions ?? [],
     teamDone: team,
     removedFromScope: events.filter((e) => e.kind === "JIRA_REMOVED_FROM_SCOPE").map((e) => ticketFromEvent(e, [jiraDatedNote(e).replace("in Jira", "in Jira status")])),
     decisions: events.filter((e) => e.kind === "DECISION_MADE").map((e) => e.title),
     standupAvailable: !!state,
     identityConfigured: !!identity.accountId || !!identity.displayName,
+    openAssigned: !state && server ? server.openAssigned : [],
+    ...(usedServer ? { serverSnapshot: { generatedAt: server!.generatedAt, ...(server!.coldStart ? { coldStart: true } : {}) } } : {}),
+    noData: !snapshot && !standup,
   };
 }
+
+/** E4 — the note shown when the app recorded no standup that day. */
+export function missingStandupNote(report: Pick<DailyReportView, "standupAvailable" | "serverSnapshot">): string | undefined {
+  if (report.standupAvailable) return undefined;
+  if (report.serverSnapshot) {
+    return report.serverSnapshot.coldStart
+      ? "Recorded by the server while the app was closed (first server run — new assignments and Jira closures start from the next run). In progress / blocked / skipped come from the app and weren't recorded."
+      : "Recorded by the server while the app was closed — new assignments, mentions, Jira closures and open work come from Jira. In progress / blocked / skipped come from the app and weren't recorded.";
+  }
+  return "No standup snapshot was saved for this day — in progress / new / mentions are not available.";
+}
+
+export const NO_DATA_RECORDED = "No data recorded for this day — the app wasn't opened and no server snapshot was taken.";
 
 // ===== Rendering =======================================================================
 
@@ -425,6 +455,8 @@ export interface RenderOptions {
 
 export function renderDailyReport(report: DailyReportView, format: ReportFormat, options: RenderOptions = {}): string {
   const lines: string[] = [heading(`Daily Report — ${report.date}`, 1, format), ""];
+  // E4 — nothing recorded at all: say so instead of a page of empty sections.
+  if (report.noData) return [...lines, format === "text" ? `(${NO_DATA_RECORDED})` : `_${NO_DATA_RECORDED}_`].join("\n");
   section(lines, "Done", report.doneMine, format);
   section(lines, "In progress / planned today", report.inProgress, format);
   section(lines, "Blocked", report.blocked, format);
@@ -436,11 +468,10 @@ export function renderDailyReport(report: DailyReportView, format: ReportFormat,
     lines.push(heading(`Decisions (${report.decisions.length})`, 2, format));
     lines.push(...report.decisions.map((d) => `${bullet(format)} ${format === "slack" ? escapeSlack(d) : format === "markdown" ? escapeMarkdown(d) : d}`), "");
   }
+  if (report.openAssigned && report.openAssigned.length > 0) section(lines, "Open assigned (from Jira)", report.openAssigned, format);
   if (options.includeTeam !== false) section(lines, "Team: done", report.teamDone, format, { showAssignee: true });
-  if (!report.standupAvailable) {
-    const note = "No standup snapshot was saved for this day — in progress / new / mentions are not available.";
-    lines.push(format === "text" ? `(${note})` : `_${note}_`, "");
-  }
+  const note = missingStandupNote(report);
+  if (note) lines.push(format === "text" ? `(${note})` : `_${note}_`, "");
   while (lines[lines.length - 1] === "") lines.pop();
   return lines.join("\n");
 }

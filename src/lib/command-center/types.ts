@@ -985,6 +985,9 @@ export interface DailyReportSnapshot {
   // reports generated before B3 and on past days regenerated later (reports/build fall back
   // to the events alone).
   standup?: import("./reports").StandupState;
+  // E4 — the server-side (cron) snapshot for this day, when one was written: Jira-derived
+  // sections only. Recorded next to — never instead of — the client's own events/standup.
+  server?: import("./server-report-merge").ServerDailyStandup;
 }
 
 /** V1.4 §32-33 — a single labeled Jira changelog field change. Never used to infer actual

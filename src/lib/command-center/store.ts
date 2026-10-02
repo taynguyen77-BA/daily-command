@@ -115,6 +115,7 @@ import type {
 } from "./types";
 import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, SKIP_REASONS, emptyData } from "./types";
 import { rollDailySyncSummary } from "./sync-history";
+import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
 import { mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
@@ -2704,6 +2705,8 @@ export class CommandCenterStore {
       generatedAt: new Date().toISOString(),
       events: this.state.memoryEvents.filter((e) => e.date === dateIso).map((e) => ({ ...e })),
       ...(standup ? { standup } : {}),
+      // E4 — a server snapshot already merged for this day is kept across regeneration.
+      ...(existing?.server ? { server: existing.server } : {}),
     };
     const dailyReports: Record<string, DailyReportSnapshot> = { ...this.state.dailyReports, [dateIso]: snapshot };
     const overflow = Object.keys(dailyReports).length - MAX_DAILY_REPORTS;
@@ -2712,6 +2715,13 @@ export class CommandCenterStore {
     }
     this.set({ ...this.state, dailyReports });
     return snapshot;
+  }
+
+  /** E4 — folds the cron-written server snapshots into dailyReports (server-daily-report.ts
+   *  mergeServerDailyReports: client data wins for in-app sections). No write when unchanged. */
+  mergeServerDailyReports(server: Record<string, ServerDailyStandup>) {
+    const dailyReports = mergeServerDailyReports(this.state.dailyReports, server);
+    if (dailyReports !== this.state.dailyReports) this.set({ ...this.state, dailyReports });
   }
 
   // ===== V2.2 — Delivery Artifacts (§16) =====

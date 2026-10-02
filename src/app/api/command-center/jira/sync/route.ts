@@ -16,6 +16,8 @@ import {
   getJiraTimezoneOffsetMinutes,
   getProjectClientMap,
 } from "@/lib/server/jira-client";
+import { createServerReportStore } from "@/lib/server/server-report-store";
+import { isServerDailyReportConfigured, runServerDailySnapshot } from "@/lib/command-center/server-daily-report";
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
@@ -280,6 +282,10 @@ export async function POST(req: Request) {
  * either PERSONAL_JIRA_ACCOUNT_ID or KV is absent, this is a complete no-op (the sync response
  * is returned completely unchanged) — same graceful-degradation contract as every optional
  * capability in this app.
+ *
+ * E4 — when Vercel KV + APP_STATE_SECRET + PERSONAL_JIRA_ACCOUNT_ID are configured, this GET
+ * also writes the day's server-side standup snapshot (server-daily-report.ts) on workdays, so a
+ * Daily Report exists even for a day the app was never opened.
  */
 export async function GET(req: Request) {
   const forwarded = new Request(req.url, {
@@ -291,23 +297,33 @@ export async function GET(req: Request) {
 
   const accountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
   const config = getJiraConfig();
-  if (!accountId || !config || !isNotifyStoreConfigured()) return response;
+  if (!accountId || !config) return response;
 
-  // §2 Task 2 point 3 — a connectivity failure inside the notify check must never corrupt
-  // persisted state (cron-notify.ts already guarantees `store.set` is never called on a fetch
-  // failure) AND must never fail this response — the sync above already succeeded or failed
-  // on its own terms; this is a genuinely separate, best-effort concern layered on top.
-  try {
-    const result = await runServerSideNotifyCheck(fetch, config, accountId, createNotifyStore());
-    if (!result.error) return response;
-    const body = (await response.clone().json()) as Record<string, unknown>;
-    const warnings = Array.isArray(body.warnings) ? [...body.warnings] : [];
-    warnings.push(`Server-side notify check failed: ${result.error}`);
-    return NextResponse.json({ ...body, warnings }, { status: response.status });
-  } catch (err) {
-    const body = (await response.clone().json()) as Record<string, unknown>;
-    const warnings = Array.isArray(body.warnings) ? [...body.warnings] : [];
-    warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    return NextResponse.json({ ...body, warnings }, { status: response.status });
+  // §2 Task 2 point 3 — a connectivity failure inside either step below must never corrupt
+  // persisted state (both modules only write after every fetch succeeded) AND must never fail
+  // this response — the sync above already succeeded or failed on its own terms; these are
+  // separate, best-effort concerns layered on top, surfaced as warnings.
+  const warnings: string[] = [];
+  if (isNotifyStoreConfigured()) {
+    try {
+      const result = await runServerSideNotifyCheck(fetch, config, accountId, createNotifyStore());
+      if (result.error) warnings.push(`Server-side notify check failed: ${result.error}`);
+    } catch (err) {
+      warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    }
   }
+  // E4 — with KV + APP_STATE_SECRET, also write today's server-side standup snapshot (workdays
+  // only), so a day the app was never opened still has a Daily Report.
+  if (isServerDailyReportConfigured(process.env)) {
+    try {
+      const result = await runServerDailySnapshot(fetch, config, accountId, createServerReportStore(), { now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes() });
+      if (result.error) warnings.push(`Server-side daily report failed: ${result.error}`);
+    } catch (err) {
+      warnings.push(`Server-side daily report failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    }
+  }
+  if (warnings.length === 0) return response;
+  const body = (await response.clone().json()) as Record<string, unknown>;
+  const merged = [...(Array.isArray(body.warnings) ? body.warnings : []), ...warnings];
+  return NextResponse.json({ ...body, warnings: merged }, { status: response.status });
 }

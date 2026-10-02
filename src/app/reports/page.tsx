@@ -14,6 +14,7 @@ import {
   formatTicketLine,
   mondayOf,
   renderDailyReport,
+  missingStandupNote,
   renderWeeklyReport,
   type ReportFormat,
   type ReportTicket,
@@ -124,7 +125,8 @@ export default function ReportsPage() {
   const liveStandup = useMemo(() => (state.loaded ? store.buildLiveStandup() : undefined), [state, store]);
   const daily = useMemo(() => {
     const isToday = date === today;
-    const snapshot = isToday ? { date, generatedAt: new Date().toISOString(), events: state.memoryEvents.filter((e) => e.date === date) } : state.dailyReports[date];
+    const server = state.dailyReports[date]?.server;
+    const snapshot = isToday ? { date, generatedAt: new Date().toISOString(), events: state.memoryEvents.filter((e) => e.date === date), ...(server ? { server } : {}) } : state.dailyReports[date];
     return { snapshot, view: buildDailyReportView(snapshot, date, identity, isToday ? liveStandup : undefined) };
   }, [date, today, state.memoryEvents, state.dailyReports, identity, liveStandup]);
 
@@ -173,11 +175,13 @@ export default function ReportsPage() {
             <CopyButtons render={(format) => renderDailyReport(v, format, { includeTeam })} />
             {state.features.reportExport && <ShareButtons subject={`Daily Report — ${v.date}`} render={(format) => renderDailyReport(v, format, { includeTeam })} />}
           </div>
-          {!daily.snapshot && date !== today ? (
-            <p className="text-sm text-text3">No Daily Report was generated for {date}.</p>
+          {v.noData ? (
+            <p className="text-sm text-text3" data-report-no-data>
+              No data recorded for {date} — the app wasn&apos;t opened that day and no server snapshot was taken.
+            </p>
           ) : (
             <>
-              {!v.standupAvailable && <p className="text-xs text-text3">No standup snapshot was saved for this day — in progress / new / mentions are not available; blocked and skipped come from that day&apos;s recorded actions.</p>}
+              {!v.standupAvailable && <p className="text-xs text-text3">{missingStandupNote(v)}</p>}
               {!v.identityConfigured && <p className="text-xs text-orange">Set your identity in Data &amp; Settings to tell your own Jira completions from the team&apos;s.</p>}
               <Section title="Done" tickets={v.doneMine} />
               <Section title="In progress / planned today" tickets={v.inProgress} />
@@ -190,6 +194,7 @@ export default function ReportsPage() {
                 onReplied={date === today && state.features.mentionReplyTracking ? (t) => t.mention && t.key && store.markMentionReplied(t.mention.commentId, t.key) : undefined}
               />
               {v.removedFromScope.length > 0 && <Section title="Removed from scope" tickets={v.removedFromScope} showAssignee />}
+              {v.openAssigned && v.openAssigned.length > 0 && <Section title="Open assigned (from Jira)" tickets={v.openAssigned} />}
               {v.decisions.length > 0 && (
                 <div>
                   <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Decisions ({v.decisions.length})</h3>

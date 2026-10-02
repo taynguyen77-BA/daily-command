@@ -762,7 +762,14 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
   ok("V2.13 Sync route wiring", /runServerSideNotifyCheck/.test(syncRouteSrc), "the GET handler calls the real runServerSideNotifyCheck, never a second implementation");
   ok("V2.13 Sync route wiring", /createNotifyStore/.test(syncRouteSrc), "the GET handler wires the real KV-backed store, not the in-memory test fake");
   ok("V2.13 Sync route wiring", /isNotifyStoreConfigured/.test(syncRouteSrc), "the GET handler gates on the shared isNotifyStoreConfigured() check, not a duplicated env-var check");
-  ok("V2.13 Sync route wiring", /if \(!accountId \|\| !config \|\| !isNotifyStoreConfigured\(\)\) return response;/.test(syncRouteSrc), "with either PERSONAL_JIRA_ACCOUNT_ID or KV absent, the sync response is returned completely unchanged — a full no-op");
+  // E4 restructured the GET into gated steps; the contract is the same: no account → return the
+  // sync response untouched, and every step is KV-gated (isServerDailyReportConfigured requires KV
+  // too), so with KV absent no warning is added and the response is returned unchanged.
+  ok(
+    "V2.13 Sync route wiring",
+    /if \(!accountId \|\| !config\) return response;/.test(syncRouteSrc) && /if \(isNotifyStoreConfigured\(\)\) \{/.test(syncRouteSrc) && /if \(isServerDailyReportConfigured\(process\.env\)\) \{/.test(syncRouteSrc) && /if \(warnings\.length === 0\) return response;/.test(syncRouteSrc),
+    "with either PERSONAL_JIRA_ACCOUNT_ID or KV absent, the sync response is returned completely unchanged — a full no-op"
+  );
   ok("V2.13 Sync route wiring", /export async function GET/.test(syncRouteSrc), "the notify check is wired into the GET handler (the one cron actually calls), not POST (the browser's manual Sync Now button)");
 }
 
