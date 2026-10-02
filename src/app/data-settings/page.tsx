@@ -9,7 +9,7 @@ import { useCommandCenter } from "@/components/command-center/use-command-center
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { BackupPanel } from "@/components/command-center/BackupPanel";
 import { JiraWriteBackPanel } from "@/components/command-center/JiraWriteBackPanel";
-import { downloadBackup } from "@/components/command-center/BackupReminder";
+import { ExportBackupDialog } from "@/components/command-center/ExportBackupDialog";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
@@ -678,6 +678,7 @@ export default function DataSettingsPage() {
   const [confirmingReset, setConfirmingReset] = useState(false);
   // E1 — Reset requires typing RESET (and offers a backup download first).
   const [resetConfirmText, setResetConfirmText] = useState("");
+  const [resetExporting, setResetExporting] = useState(false);
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
   // Local `syncing` only drives this page's own button label/elapsed timer; the real guard
@@ -1108,7 +1109,7 @@ export default function DataSettingsPage() {
               {state.lastBackupAt ? ` (last backup: ${new Date(state.lastBackupAt).toLocaleString()})` : " and you have never downloaded a backup"}.
             </p>
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <button onClick={() => downloadBackup(store)} className="btn btn-sm btn-primary">
+              <button onClick={() => setResetExporting((v) => !v)} className="btn btn-sm btn-primary" aria-expanded={resetExporting}>
                 Export backup first
               </button>
               <input
@@ -1141,6 +1142,7 @@ export default function DataSettingsPage() {
                 Cancel
               </button>
             </div>
+            {resetExporting && <ExportBackupDialog onDone={() => setResetExporting(false)} onCancel={() => setResetExporting(false)} />}
           </div>
         )}
       </Panel>

@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.34
+**Current version:** V2.35
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.34.0` ↔ `V2.34`) and the test suite fails if this line disagrees with it (group `E6 Version line`).
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.35.0` ↔ `V2.35`) and the test suite fails if this line disagrees with it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -48,6 +48,18 @@ Optional, only meaningful once the three above are set:
 | `CRON_SECRET` (V2.10, fixed V2.15) | Requires `Authorization: Bearer <value>` on every request to `/api/command-center/jira/sync`, for the scheduled sync in `vercel.json` / `.github/workflows/sync.yml`. | The sync route stays exactly as open as it always was — no auth check. **V2.15 fix:** configuring `CRON_SECRET` alone used to disable the in-app "Sync Now" button (a browser can never safely hold `CRON_SECRET`). The route now also accepts `Authorization: Bearer <APP_STATE_SECRET>` (see Cross-Device Sync below) — pair this device once in Data & Settings and Sync Now works again even with `CRON_SECRET` locked down. Without pairing, the button now fails with a specific "pair this device" message instead of a bare 401. |
 
 A malformed value for any optional variable is ignored (never throws) and falls back to the safe default above.
+
+**Jira write-back (V2.35, server gate — all three required to write anything):**
+
+| Variable | Purpose | Behavior when missing |
+| --- | --- | --- |
+| `JIRA_WRITE_ENABLED` | Must be exactly `true` for `/api/command-center/jira/write` to send anything to Jira. | Default **false**: every write and transition lookup answers 503, whatever the in-app switch says. Setup Health names the missing variable when the in-app switch is on. |
+| `JIRA_WRITE_PROJECT_KEYS` | Comma list of project keys the server may write to (e.g. `PAY,OPS`). Required when enabled. | 503. An issue outside the list → 403, nothing sent to Jira. |
+| `JIRA_WRITE_SECRET` | Its own secret for writes (generate like the others, e.g. `openssl rand -hex 32`). Each device that may write pastes it once in Data & Settings → Jira write-back (stored only in that device's localStorage, like the sync pairing). Writes need `Authorization: Bearer <JIRA_WRITE_SECRET>` (constant-time check). `CRON_SECRET` and `APP_STATE_SECRET` are never accepted for a write (401); reading a ticket's available transitions also accepts the sync pairing. | 503. |
+
+Writes are limited to 30 per hour per server instance (429 beyond), and every write past authentication — ok, failed, refused for the project, rate-limited — is appended to a server log in Vercel KV (time, issue key, action, outcome; at most 200 characters of comment text), shown in Data & Settings → Jira write-back.
+
+**Server report snapshot timing (V2.35):** the Vercel cron in `vercel.json` runs at `0 11 * * *` — 11:00 UTC, i.e. 18:00 in UTC+7 — so the day's server snapshot (see "Reports without opening the app") is taken after the workday and includes afternoon Jira closes. For another timezone, set the hour so it lands at or after 17:00 local: local hour − UTC offset (e.g. `0 22 * * *` for 17:00 in UTC−5); Setup Health warns, using `JIRA_TIMEZONE_OFFSET_MINUTES`, when the scheduled run falls before 17:00 local. `REPORT_SNAPSHOT_HOUR_LOCAL` (0–23, default `17`) is the local hour from which a cron run may write the day's snapshot — an earlier run still syncs and notifies but writes nothing, so adding a second, morning cron for the Morning Brief (e.g. `0 0 * * *` = 07:00 UTC+7, if your Vercel plan allows two crons) can never freeze a day that isn't over. This repo keeps one cron.
 
 ### Claude / Anthropic (optional — enables real AI wording instead of Mock)
 
@@ -125,6 +137,14 @@ Every mutation to a synced field debounces a single `POST` a few seconds later (
 ### Configuring in Vercel
 
 Project Settings → Environment Variables → add the ones you need for the **Production** (and optionally **Preview**) environment, then redeploy. Never commit real values to the repo — `.env*.local` is already git-ignored.
+
+## Review fixes (V2.35)
+
+- **Action Plan has one status vocabulary.** A planned action about a ticket has no action-level Defer / Snooze / Blocked any more — the ticket buttons are its only status controls, and the action is in today's plan exactly when the ticket is (deferred tickets come back on their date, Unblock / Reactivate bring them back). A ticket reopened after its action was completed is suggested again. A ticketless action keeps Defer (+date, default tomorrow), Snooze (+until) and Blocked (+reason); deferred and snoozed ones wake up on their date by themselves, and a **Not in today's plan** list shows the set-aside ones with a Reopen button. Old ticket-backed actions that were deferred/snoozed/blocked are moved onto the ticket on load (DEFERRED until tomorrow / until the snooze date, BLOCKED "Migrated from action") unless the ticket already has a newer status. Also fixed: two actions — or two memory events — created in the same millisecond got the same id.
+- **Jira write-back has a server gate** — `JIRA_WRITE_ENABLED`, `JIRA_WRITE_PROJECT_KEYS`, `JIRA_WRITE_SECRET` (see Environment Variables), a rate limit and a server log.
+- **The server snapshot runs after the workday** (11:00 UTC by default; see "Server report snapshot timing").
+- **Encrypted backups.** Export warns that the file holds client ticket data and offers an optional passphrase: AES-GCM with a PBKDF2-SHA-256 key (250,000 iterations, random salt and IV in the file header), all in the browser (WebCrypto). Import recognises an encrypted file and asks for the passphrase; a wrong one (or an altered file) is refused with a clear message and nothing changes. Without a passphrase, export is the plain JSON file as before.
+- **Fewer recomputes, one event.** `detectRisks` is memoized per dataset (it ran three times per render), and related-ticket lookups use cached indexes: the attention queue now takes ~40–55 ms at 3,000 items / 1,500 mentions with cold caches (was ~105–120 ms). A new budget test changes one ticket's status and recomputes every selector (priorities, attention queue, focus, Daily Review, My Work, Action Plan, standup, daily and weekly reports): ~95 ms, budget 250 ms. A ticket's Done now records `ACTION_COMPLETED` for the action it completes, and Focus Session no longer completes that action a second time.
 
 ## Daily flow (V2.34) — each can be switched off in Data & Settings → Features
 

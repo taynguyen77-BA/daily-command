@@ -1501,7 +1501,7 @@ export class CommandCenterStore {
    *  reason; no Follow-up Action is ever created here); TODO → plan items dated today or later
    *  go back to planned. A plan item from a past day that is already finished is history and is
    *  never rewritten. */
-  private linkedRecordsFor(ticketKey: string, record: TicketWorkState, today: string): Pick<StoreState, "personalPlan" | "data" | "attentionState"> {
+  private linkedRecordsFor(ticketKey: string, record: TicketWorkState, today: string): Pick<StoreState, "personalPlan" | "data" | "attentionState"> & { completedActionIds: string[] } {
     const data = this.state.data;
     const status = record.status;
     const workItemIds = new Set(data.workItems.filter((w) => w.key === ticketKey).map((w) => w.id));
@@ -1534,6 +1534,7 @@ export class CommandCenterStore {
 
     let actions = data.actions;
     let attentionState = this.state.attentionState;
+    let completedActionIds: string[] = [];
     const from = record.history[record.history.length - 1]?.from;
     if (status === "TODO" && from === "DONE") {
       // Reopen: the ticket's most recently completed linked action comes back too (it is how
@@ -1551,6 +1552,7 @@ export class CommandCenterStore {
         return { ...a, status: "completed" as const, completedAt: a.completedAt ?? today };
       });
       if (done.size === 0) actions = data.actions;
+      completedActionIds = Array.from(done);
       const ticketSlug = slug(ticketKey);
       const belongs = (id: string) =>
         id.startsWith(`MENTION:${ticketSlug}:`) ||
@@ -1566,6 +1568,7 @@ export class CommandCenterStore {
       personalPlan: planChanged ? personalPlan : this.state.personalPlan,
       data: actions === data.actions ? data : { ...data, actions },
       attentionState,
+      completedActionIds,
     };
   }
 
@@ -1582,12 +1585,16 @@ export class CommandCenterStore {
     if (!result.changed) return false;
     const record = result.states[ticketKey];
     const event = this.ticketEvent(ticketEventKind(result.from, status), ticketKey, record.reason);
+    const { completedActionIds, ...linked } = this.linkedRecordsFor(ticketKey, record, today);
+    // G5 — an action the ticket's DONE completes is recorded once, here (ACTION_COMPLETED), so
+    // a caller must not complete it again (Focus Session checks before calling completeAction).
+    const actionEvents = completedActionIds.map((id) => this.actionCompletedEvent(linked.data.actions.find((a) => a.id === id)));
     this.set({
       ...this.state,
-      ...this.linkedRecordsFor(ticketKey, record, today),
+      ...linked,
       ticketWorkStates: result.states,
       ...deriveLegacyDailyCommandState(result.states, nowIso, this.state.dailyCommandTombstones),
-      memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS),
+      memoryEvents: [...this.state.memoryEvents, event, ...actionEvents].slice(-MAX_MEMORY_EVENTS),
     });
     // F4 — offer the Jira write-back for a user's Block/Done (planJiraWriteBack returns null
     // when the feature is off or the project isn't allow-listed). Only proposed here.
@@ -2330,9 +2337,17 @@ export class CommandCenterStore {
   }
 
   completeAction(id: string) {
+    // G5 — completing an already-completed action records nothing new (one ACTION_COMPLETED).
+    if (this.state.data.actions.find((a) => a.id === id)?.status === "completed") return;
     this.updateAction(id, { status: "completed", completedAt: getTodayIso() });
     const action = this.state.data.actions.find((a) => a.id === id);
-    this.appendMemoryEvent({
+    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, this.actionCompletedEvent(action, id)].slice(-MAX_MEMORY_EVENTS) });
+    this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
+  }
+
+  /** The ACTION_COMPLETED memory event (shared by completeAction and the ticket-DONE linkage). */
+  private actionCompletedEvent(action: Action | undefined, id = action?.id ?? "?"): MemoryEvent {
+    return this.buildMemoryEvent({
       kind: "ACTION_COMPLETED",
       title: `Action completed: ${action?.title ?? id}`,
       impact: "Awaiting outcome confirmation.",
@@ -2340,7 +2355,6 @@ export class CommandCenterStore {
       projectId: this.projectIdForAction(action),
       ...this.reportContextForWorkItem(action?.relatedWorkItemId),
     });
-    this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
   }
   // G1 — action-level Defer / Snooze / Blocked are for TICKETLESS actions only (a ticket-backed
   // action follows its ticket's TicketWorkState). Each wakes up on its own: an action whose
@@ -2507,8 +2521,22 @@ export class CommandCenterStore {
    *  immediately (decisions/actions are never snapshotted, so this is the only correct
    *  place to observe these transitions; see memory-events.ts for the closeDay/sync path). */
   private appendMemoryEvent(event: Omit<MemoryEvent, "id" | "date">) {
-    const entry: MemoryEvent = { id: `memory-event-${event.kind}-${Date.now()}`, date: getTodayIso(), ...event };
-    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, entry].slice(-MAX_MEMORY_EVENTS) });
+    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, this.buildMemoryEvent(event)].slice(-MAX_MEMORY_EVENTS) });
+  }
+
+  /** G5 — a memory event with an id unique even within one millisecond (ids were
+   *  `memory-event-<kind>-<ms>`, so two same-kind events in one tick collided — and events are
+   *  merged across devices BY ID, which silently dropped one). */
+  private memoryEventMs = 0;
+  private memoryEventSeq = 0;
+  private buildMemoryEvent(event: Omit<MemoryEvent, "id" | "date">): MemoryEvent {
+    const ms = Date.now();
+    this.memoryEventSeq = ms === this.memoryEventMs ? this.memoryEventSeq + 1 : 0;
+    this.memoryEventMs = ms;
+    let id = `memory-event-${event.kind}-${ms}${this.memoryEventSeq ? `-${this.memoryEventSeq}` : ""}`;
+    // Another tab/device may have used the plain id in the same millisecond.
+    while (this.state.memoryEvents.some((e) => e.id === id)) id = `memory-event-${event.kind}-${ms}-${++this.memoryEventSeq}`;
+    return { id, date: getTodayIso(), ...event };
   }
 
   /** V2.25 — the exact ticket-key -> WorkItem-id resolution use-command-center.ts's own

@@ -4,7 +4,9 @@
 // itself is switched on in Features (off by default); this panel holds the per-project
 // allow-list, the optional Flag, and which transition Done offers per project.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
+import { clearJiraWriteSecret, getJiraWriteSecret, setJiraWriteSecret } from "@/lib/command-center/device-pairing";
 import { Panel, SectionHeading } from "./ui";
 import { useCommandCenter } from "./use-command-center";
 
@@ -14,6 +16,15 @@ export function JiraWriteBackPanel() {
   const [projectDraft, setProjectDraft] = useState("");
   const [flagDraft, setFlagDraft] = useState(settings.flagFieldId ?? "");
   const on = state.features.jiraWriteBack;
+  // G2 — the server gate decides what is really written.
+  const [server, setServer] = useState<JiraWriteServerStatus | null | undefined>(undefined);
+  const [secretDraft, setSecretDraft] = useState("");
+  const [devicePaired, setDevicePaired] = useState(false);
+  const refresh = () => {
+    setDevicePaired(!!getJiraWriteSecret());
+    void checkJiraWriteServerStatus().then(setServer);
+  };
+  useEffect(refresh, []);
 
   return (
     <Panel className="p-5" data-jira-write-back-settings>
@@ -26,6 +37,49 @@ export function JiraWriteBackPanel() {
         }
       />
       <div className="space-y-3 text-sm text-text2">
+        <div data-jira-write-server className="rounded-md border border-border bg-surface2 p-3 text-xs">
+          <p className="font-semibold uppercase tracking-wide text-text3">Server gate</p>
+          {server === undefined ? (
+            <p>Checking…</p>
+          ) : server === null ? (
+            <p>Couldn&apos;t reach the server.</p>
+          ) : server.missing.length > 0 ? (
+            <p className="text-orange">Off on the server — nothing can be written until it sets: {server.missing.join(", ")}.</p>
+          ) : (
+            <p className="text-green">
+              On{server.projectKeys ? ` — server allows: ${server.projectKeys.join(", ")}` : ""}. Writes need this device paired with JIRA_WRITE_SECRET (separate from sync), and are limited to 30 per hour.
+            </p>
+          )}
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span>This device: {devicePaired ? <span className="text-green">paired for writes</span> : "not paired for writes"}</span>
+            {devicePaired ? (
+              <button
+                onClick={() => {
+                  clearJiraWriteSecret();
+                  refresh();
+                }}
+                className="btn btn-sm btn-ghost"
+              >
+                Unpair
+              </button>
+            ) : (
+              <>
+                <input type="password" value={secretDraft} onChange={(e) => setSecretDraft(e.target.value)} placeholder="Paste JIRA_WRITE_SECRET" aria-label="JIRA_WRITE_SECRET" className="w-56 rounded-md border border-border bg-surface px-2 py-1" />
+                <button
+                  disabled={!secretDraft.trim()}
+                  onClick={() => {
+                    setJiraWriteSecret(secretDraft);
+                    setSecretDraft("");
+                    refresh();
+                  }}
+                  className="btn btn-sm btn-secondary disabled:opacity-50"
+                >
+                  Pair for writes
+                </button>
+              </>
+            )}
+          </div>
+        </div>
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-text3">Allowed projects</p>
           <div className="mt-1 flex flex-wrap items-center gap-2">
@@ -89,6 +143,23 @@ export function JiraWriteBackPanel() {
           </div>
         )}
 
+        {server?.log && (
+          <details data-jira-write-server-log>
+            <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-text3">Server log ({server.log.length} latest)</summary>
+            {server.log.length === 0 ? (
+              <p className="mt-1 text-xs text-text3">No writes recorded on the server.</p>
+            ) : (
+              <ul className="mt-1 space-y-0.5 text-xs">
+                {server.log.map((e, i) => (
+                  <li key={`${e.at}-${i}`} className={e.outcome === "ok" ? "text-text2" : "text-red"}>
+                    {new Date(e.at).toLocaleString()} · <span className="font-mono">{e.issueKey}</span> · {e.action} · {e.outcome}
+                    {e.detail ? ` — ${e.detail}` : ""}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
+        )}
         <details data-jira-write-log>
           <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-text3">Write history ({state.jiraWriteLog.length})</summary>
           {state.jiraWriteLog.length === 0 ? (

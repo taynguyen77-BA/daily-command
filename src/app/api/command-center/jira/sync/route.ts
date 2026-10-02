@@ -17,7 +17,7 @@ import {
   getProjectClientMap,
 } from "@/lib/server/jira-client";
 import { createServerReportStore } from "@/lib/server/server-report-store";
-import { isServerDailyReportConfigured, runServerDailySnapshot } from "@/lib/command-center/server-daily-report";
+import { isServerDailyReportConfigured, reportSnapshotHourLocal, runServerDailySnapshot } from "@/lib/command-center/server-daily-report";
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
@@ -316,7 +316,7 @@ export async function GET(req: Request) {
   // only), so a day the app was never opened still has a Daily Report.
   if (isServerDailyReportConfigured(process.env)) {
     try {
-      const result = await runServerDailySnapshot(fetch, config, accountId, createServerReportStore(), { now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes() });
+      const result = await runServerDailySnapshot(fetch, config, accountId, createServerReportStore(), { now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) });
       if (result.error) warnings.push(`Server-side daily report failed: ${result.error}`);
     } catch (err) {
       warnings.push(`Server-side daily report failed: ${err instanceof Error ? err.message : "unknown error"}`);

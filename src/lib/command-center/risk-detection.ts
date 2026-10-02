@@ -41,7 +41,28 @@ type AutoRiskInput = Omit<Risk, "id" | "detectedAt" | "status" | "auto"> & { rul
  *  means a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item never generates
  *  a fresh deadline/stalled/owner-overload risk, matching what Personal Focus/Action Plan
  *  already treat as finished. */
+// G5 — detectRisks runs for the same dataset from several engines per render (deriveData,
+// Release Health, the daily snapshot metrics). Results are memoized per `data` object (WeakMap,
+// so a new dataset is always recomputed and an old one is collected with it) and per the exact
+// other arguments (same today / index / completion-set objects). Callers get a fresh array each
+// time; the Risk objects are shared and treated as read-only, as everywhere else.
+const detectRisksCache = new WeakMap<CommandCenterData, { today: string; idx?: WorkRelevanceIndex; done?: ReadonlySet<string>; risks: Risk[] }[]>();
+
 export function detectRisks(
+  data: CommandCenterData,
+  today: string,
+  workRelevanceIndex?: WorkRelevanceIndex,
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+): Risk[] {
+  const entries = detectRisksCache.get(data) ?? [];
+  const hit = entries.find((e) => e.today === today && e.idx === workRelevanceIndex && e.done === dailyCommandCompletedWorkItemIds);
+  if (hit) return [...hit.risks];
+  const risks = detectRisksUncached(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  detectRisksCache.set(data, [...entries.slice(-3), { today, idx: workRelevanceIndex, done: dailyCommandCompletedWorkItemIds, risks }]);
+  return [...risks];
+}
+
+function detectRisksUncached(
   data: CommandCenterData,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,

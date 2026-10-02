@@ -90,13 +90,8 @@ export async function buildPerfFixture() {
   return { store, today, mentions };
 }
 
-const time = (fn: () => unknown): number => {
-  const t0 = performance.now();
-  fn();
-  return performance.now() - t0;
-};
-
-/** The worst of 3 warm runs per selector (first, cold run discarded). */
+/** The worst of 3 timed runs per selector (after one discarded JIT warm-up), each on a fresh
+ *  dataset copy so no per-dataset cache is warm. */
 export async function timeSelectors(env: Awaited<ReturnType<typeof buildPerfFixture>>): Promise<Record<string, number>> {
   const { store, today, mentions } = env;
   const s = store.getSnapshot();
@@ -121,26 +116,36 @@ export async function timeSelectors(env: Awaited<ReturnType<typeof buildPerfFixt
       now: new Date(),
     });
   const reviewOnce = review();
-  const runs: Record<string, () => unknown> = {
-    "Priorities (deriveData)": () => deriveData(s.data, null, today, idx),
-    "Attention queue (proactive)": () => {
-      const derived = deriveData(s.data, null, today, idx);
-      return computeProactiveIntelligence(s.data, derived, s.snapshotHistory, null, s.attentionState, "jira", today, idx, mentions, "acc-tay", "Tay");
+  // G5 — every timed run gets a FRESH copy of the dataset object, so the per-dataset caches
+  // (entity indexes, detectRisks) start cold, as after a sync — the number is the real cost.
+  // The Attention queue is timed on its own, given the derived data the page memoizes
+  // separately (Priorities is timed on its own above it), computed untimed on the same copy.
+  const fresh = () => ({ ...s.data });
+  type Run = { setup?: (d: typeof s.data) => unknown; run: (d: typeof s.data, ctx: unknown) => unknown };
+  const runs: Record<string, Run> = {
+    "Priorities (deriveData)": { run: (d) => deriveData(d, null, today, idx) },
+    "Attention queue (proactive)": {
+      setup: (d) => deriveData(d, null, today, idx),
+      run: (d, derived) => computeProactiveIntelligence(d, derived as ReturnType<typeof deriveData>, s.snapshotHistory, null, s.attentionState, "jira", today, idx, mentions, "acc-tay", "Tay"),
     },
-    "Personal focus (My Work Today)": () => computePersonalFocus(s.data, proactive, "Tay", today, "acc-tay", idx, derivedOnce.risks, mentions),
-    "Daily Review": () => review(),
-    "My Work": () => {
-      const review = reviewOnce;
-      return buildMyWork({ workItems: s.data.workItems, identity, workRelevanceIndex: idx, ticketWorkStates: s.ticketWorkStates, today, personalPlan: s.personalPlan, review, blockerSlaBusinessDays: 2 });
-    },
-    "Standup (live report state)": () => store.buildLiveStandup(),
-    "Daily Report view": () => buildDailyReportView(s.dailyReports[today], today, identity, store.buildLiveStandup(), { blockerSlaBusinessDays: 2, summaries: { risks: s.data.risks, decisions: s.data.decisions } }),
-    "Weekly Report view": () => buildWeeklyReportView({ weekStart: mondayOf(today), dailyReports: s.dailyReports, identity, today, summaries: { risks: s.data.risks, decisions: s.data.decisions } }),
+    "Personal focus (My Work Today)": { run: (d) => computePersonalFocus(d, proactive, "Tay", today, "acc-tay", idx, derivedOnce.risks, mentions) },
+    "Daily Review": { run: () => review() },
+    "My Work": { run: () => buildMyWork({ workItems: s.data.workItems, identity, workRelevanceIndex: idx, ticketWorkStates: s.ticketWorkStates, today, personalPlan: s.personalPlan, review: reviewOnce, blockerSlaBusinessDays: 2 }) },
+    "Standup (live report state)": { run: () => store.buildLiveStandup() },
+    "Daily Report view": { run: () => buildDailyReportView(s.dailyReports[today], today, identity, store.buildLiveStandup(), { blockerSlaBusinessDays: 2, summaries: { risks: s.data.risks, decisions: s.data.decisions } }) },
+    "Weekly Report view": { run: () => buildWeeklyReportView({ weekStart: mondayOf(today), dailyReports: s.dailyReports, identity, today, summaries: { risks: s.data.risks, decisions: s.data.decisions } }) },
+  };
+  const once = (r: Run): number => {
+    const d = fresh();
+    const ctx = r.setup?.(d);
+    const t0 = performance.now();
+    r.run(d, ctx);
+    return performance.now() - t0;
   };
   const out: Record<string, number> = {};
-  for (const [name, fn] of Object.entries(runs)) {
-    fn();
-    out[name] = Math.max(time(fn), time(fn), time(fn));
+  for (const [name, r] of Object.entries(runs)) {
+    once(r); // warm-up (JIT), discarded
+    out[name] = Math.max(once(r), once(r), once(r));
   }
   return out;
 }

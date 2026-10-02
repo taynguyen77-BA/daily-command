@@ -8,17 +8,22 @@
 import { useEffect, useState } from "react";
 import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
 import { backupFileName, buildBackup, isBackupReminderDue, serializeBackup } from "@/lib/command-center/backup";
+import { encryptBackupText } from "@/lib/command-center/backup-crypto";
+import Link from "next/link";
 import { checkAppStateSyncStatus } from "@/lib/command-center/app-state-sync";
 import { useCommandCenter } from "./use-command-center";
 
-/** Downloads a backup of the current state and records when. */
-export function downloadBackup(store: CommandCenterStore = commandCenterStore): void {
+/** Downloads a backup of the current state and records when. G4 — with a passphrase the file
+ *  is AES-GCM encrypted (backup-crypto.ts); without one it is the plain JSON as before. */
+export async function downloadBackup(store: CommandCenterStore = commandCenterStore, passphrase?: string): Promise<void> {
   const exportedAt = new Date().toISOString();
-  const blob = new Blob([serializeBackup(buildBackup(store.getSnapshot(), exportedAt))], { type: "application/json" });
+  const plain = serializeBackup(buildBackup(store.getSnapshot(), exportedAt));
+  const body = passphrase ? await encryptBackupText(plain, passphrase) : plain;
+  const blob = new Blob([body], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = backupFileName(exportedAt);
+  a.download = backupFileName(exportedAt, !!passphrase);
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -69,9 +74,9 @@ export function BackupReminderBar() {
           sync isn&apos;t on.
         </p>
         <div className="flex shrink-0 gap-2">
-          <button onClick={() => downloadBackup(store)} className="btn btn-sm btn-primary">
-            Download backup
-          </button>
+          <Link href="/data-settings#backup" className="btn btn-sm btn-primary">
+            Back up now…
+          </Link>
           <button onClick={() => store.snoozeBackupReminder()} className="btn btn-sm btn-ghost">
             Remind me next week
           </button>

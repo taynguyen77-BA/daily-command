@@ -1,14 +1,17 @@
-// F4 — the only route that writes to Jira. Called solely by the write-back confirmation dialog
-// (feature off by default, per-project allow-list, preview + explicit confirm — see
-// jira/write-back.ts). Same auth as every other route (a paired device or the cron secret);
-// strict body validation; one write per request.
+// F4/G2 — the only route that writes to Jira. The server gate (jira/write-gate.ts) decides:
+// JIRA_WRITE_ENABLED=true, the issue's project in JIRA_WRITE_PROJECT_KEYS, and
+// `Authorization: Bearer <JIRA_WRITE_SECRET>` (never CRON_SECRET / APP_STATE_SECRET for a
+// write), rate limited per instance, every outcome logged in KV. GET returns the gate's status
+// (and, to a paired device, the allowed projects and the server log) for Data & Settings and
+// Setup Health.
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getJiraConfig } from "@/lib/server/jira-client";
-import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
+import { createJiraWriteLogStore } from "@/lib/server/jira-write-log-store";
 import { HttpJiraActionProvider } from "@/lib/command-center/jira/jira-action-provider";
-import { performJiraWrite } from "@/lib/command-center/jira/write-back";
+import { createWriteRateLimiter, handleJiraWriteRequest, readJiraWriteConfig } from "@/lib/command-center/jira/write-gate";
+import { bearerMatches } from "@/lib/command-center/secure-compare";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,9 +24,10 @@ const bodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("list-transitions"), issueKey }),
 ]);
 
+// One limiter per server instance (module scope survives across requests on a warm instance).
+const limiter = createWriteRateLimiter();
+
 export async function POST(req: Request) {
-  const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
-  if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
   const config = getJiraConfig();
   if (!config) return NextResponse.json({ ok: false, error: "Jira is not configured on the server." }, { status: 503 });
   let json: unknown;
@@ -34,6 +38,24 @@ export async function POST(req: Request) {
   }
   const parsed = bodySchema.safeParse(json);
   if (!parsed.success) return NextResponse.json({ ok: false, error: "Request did not match the expected shape." }, { status: 400 });
-  const result = await performJiraWrite(new HttpJiraActionProvider(fetch, config), parsed.data);
-  return NextResponse.json(result, { status: result.ok ? 200 : 502 });
+  const result = await handleJiraWriteRequest(parsed.data, req.headers.get("authorization"), {
+    env: process.env,
+    provider: new HttpJiraActionProvider(fetch, config),
+    limiter,
+    log: createJiraWriteLogStore(),
+    now: () => new Date(),
+  });
+  return NextResponse.json(result.body, { status: result.status });
+}
+
+export async function GET(req: Request) {
+  const gate = readJiraWriteConfig(process.env);
+  const auth = req.headers.get("authorization");
+  const paired = bearerMatches(auth, process.env.JIRA_WRITE_SECRET?.trim()) || bearerMatches(auth, process.env.APP_STATE_SECRET?.trim());
+  const writePaired = bearerMatches(auth, process.env.JIRA_WRITE_SECRET?.trim());
+  return NextResponse.json({
+    enabled: gate.enabled,
+    missing: gate.missing,
+    ...(paired ? { projectKeys: gate.projectKeys, writePaired, log: await createJiraWriteLogStore().list(50) } : {}),
+  });
 }

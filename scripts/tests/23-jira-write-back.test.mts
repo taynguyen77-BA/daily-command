@@ -140,7 +140,8 @@ const ON = { jiraWriteBack: true };
 {
   const group = "F4 Route & confirmation";
   const route = read("src/app/api/command-center/jira/write/route.ts");
-  ok(group, /checkSyncRequestAuth\(req\.headers\.get\("authorization"\)/.test(route) && /z\.discriminatedUnion\("action"/.test(route) && /performJiraWrite\(new HttpJiraActionProvider\(fetch, config\), parsed\.data\)/.test(route), "the write route needs the same auth as every route and validates the body strictly");
+  // G2 (V2.35) — the route delegates every decision to the server gate (write-gate.ts, tested in 27).
+  ok(group, /handleJiraWriteRequest\(parsed\.data, req\.headers\.get\("authorization"\)/.test(route) && /z\.discriminatedUnion\("action"/.test(route) && /provider: new HttpJiraActionProvider\(fetch, config\)/.test(route) && !/checkSyncRequestAuth/.test(route), "the write route validates the body strictly and leaves auth/allow-list/rate limit to the server gate (never the shared sync auth)");
   const users = ["src/app", "src/components", "src/lib"].flatMap(function walk(dir: string): string[] {
     return fs.readdirSync(path.join(process.cwd(), dir), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : /\.tsx?$/.test(e.name) && /new HttpJiraActionProvider\(/.test(read(path.join(dir, e.name))) ? [path.join(dir, e.name)] : []));
   });

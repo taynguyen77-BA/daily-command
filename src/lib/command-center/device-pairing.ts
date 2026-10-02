@@ -45,3 +45,42 @@ export function pairedAuthHeader(): { Authorization: string } | undefined {
   const secret = getPairedSecret();
   return secret ? { Authorization: `Bearer ${secret}` } : undefined;
 }
+
+// ===== G2 — Jira write-back pairing =====================================================
+// A SEPARATE secret (JIRA_WRITE_SECRET), pasted once per device that may write to Jira, kept
+// only in that device's localStorage. A device paired for sync is not thereby allowed to write.
+
+const JIRA_WRITE_KEY = "command-center:jira-write-secret:v1";
+
+export function getJiraWriteSecret(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(JIRA_WRITE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setJiraWriteSecret(secret: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(JIRA_WRITE_KEY, secret.trim());
+  } catch {
+    // storage unavailable — writes simply stay unauthorized on this device
+  }
+}
+
+export function clearJiraWriteSecret(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(JIRA_WRITE_KEY);
+  } catch {
+    // best-effort
+  }
+}
+
+/** Authorization for Jira WRITES — the write secret only. */
+export function jiraWriteAuthHeader(): { Authorization: string } | undefined {
+  const secret = getJiraWriteSecret();
+  return secret ? { Authorization: `Bearer ${secret}` } : undefined;
+}

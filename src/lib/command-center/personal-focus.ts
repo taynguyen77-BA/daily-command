@@ -103,6 +103,8 @@ interface ResolvedEntity {
  *  new dataset always gets fresh indexes and an old one is garbage-collected with it. */
 interface EntityIndexes {
   workItemById: Map<string, WorkItem>;
+  /** Position of each work item in data.workItems (first occurrence) — keeps "filter order". */
+  positionById: Map<string, number>;
   workItemsByFixVersion: Map<string, WorkItem[]>;
   decisionById: Map<string, CommandCenterData["decisions"][number]>;
   dependencyById: Map<string, CommandCenterData["dependencies"][number]>;
@@ -122,7 +124,11 @@ function entityIndexes(data: CommandCenterData): EntityIndexes {
       for (const r of rows) if (!m.has(r.id)) m.set(r.id, r);
       return m;
     };
-    idx = { workItemById: firstById(data.workItems), workItemsByFixVersion, decisionById: firstById(data.decisions), dependencyById: firstById(data.dependencies), actionById: firstById(data.actions) };
+    const positionById = new Map<string, number>();
+    data.workItems.forEach((w, i) => {
+      if (!positionById.has(w.id)) positionById.set(w.id, i);
+    });
+    idx = { workItemById: firstById(data.workItems), positionById, workItemsByFixVersion, decisionById: firstById(data.decisions), dependencyById: firstById(data.dependencies), actionById: firstById(data.actions) };
     entityIndexCache.set(data, idx);
   }
   return idx;
@@ -147,17 +153,28 @@ export function resolveAttentionEntity(item: AttentionItem, data: CommandCenterD
   const ref = item.sourceRef;
   if (!ref) return { workItemIds: [] };
   const idx = entityIndexes(data);
+  // Work items with these ids, in data.workItems order — the same result as
+  // data.workItems.filter((w) => ids.includes(w.id)), without scanning every work item.
+  const relatedInOrder = (ids: string[]): WorkItem[] => {
+    const seen = new Set<number>();
+    for (const id of ids) {
+      const pos = idx.positionById.get(id);
+      if (pos !== undefined) seen.add(pos);
+    }
+    return Array.from(seen)
+      .sort((a, b) => a - b)
+      .map((i) => data.workItems[i])
+      .filter((w) => ids.includes(w.id));
+  };
 
   if (ref.type === "decision") {
     const decision = idx.decisionById.get(ref.id);
-    const related = decision?.relatedWorkItemIds?.length ? data.workItems.filter((w) => decision.relatedWorkItemIds!.includes(w.id)) : [];
+    const related = decision?.relatedWorkItemIds?.length ? relatedInOrder(decision.relatedWorkItemIds) : [];
     return { projectId: decision?.projectId ?? related[0]?.projectId, workItemIds: related.map((w) => w.id), decisionId: decision?.id, dueDate: decision?.reviewDate };
   }
   if (ref.type === "risk") {
     const risk = riskByTitle(allRisks).get(ref.id);
-    // Same membership and order as filtering data.workItems by sourceWorkItemIds.
-    const wanted = new Set(risk?.sourceWorkItemIds ?? []);
-    const related = risk ? data.workItems.filter((w) => wanted.has(w.id)) : [];
+    const related = risk ? relatedInOrder(risk.sourceWorkItemIds) : [];
     return { projectId: related[0]?.projectId, workItemIds: related.map((w) => w.id) };
   }
   if (ref.type === "dependency") {

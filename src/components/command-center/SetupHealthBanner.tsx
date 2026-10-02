@@ -34,6 +34,9 @@ import { isDevicePaired } from "@/lib/command-center/device-pairing";
 import { checkAiModelStatus } from "@/lib/command-center/ai/claude-provider";
 import { isOlderThanDays } from "@/lib/command-center/backup";
 import { useCrossDeviceSyncActive } from "./BackupReminder";
+import { latestSnapshotRunLocal, localHourOf } from "@/lib/command-center/report-schedule";
+import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
+import { getJiraWriteSecret } from "@/lib/command-center/device-pairing";
 import type { CommandCenterData, DataSourceType, PersonalIdentity } from "@/lib/command-center/types";
 
 /** C4 — additional, independently-loaded facts. Every field optional: undefined/null means
@@ -49,6 +52,11 @@ export interface SetupHealthExtras {
   /** E1 — last backup download and whether cross-device sync (configured + paired) is active
    *  (null = still loading). */
   backup?: { lastBackupAt?: string; crossDeviceActive: boolean | null; isDemo: boolean; now: Date };
+  /** G2 — Jira write-back switched on here; the server gate's status (null = loading /
+   *  unreachable) and whether this device holds the write pairing. */
+  jiraWrite?: { clientOn: boolean; server: { missing: string[] } | null; devicePaired: boolean };
+  /** G3 — the sync cron's UTC hours, Jira's offset (minutes) and the snapshot hour, when known. */
+  snapshotSchedule?: { cronHoursUtc: number[]; offsetMinutes?: number; snapshotHourLocal: number };
 }
 
 export interface SetupHealthRow {
@@ -119,6 +127,30 @@ export function computeSetupHealthRows(
     });
   }
 
+  // G2 — the client switch is on but the server would refuse every write.
+  const jw = extras.jiraWrite;
+  if (jw?.clientOn && jw.server) {
+    if (jw.server.missing.length > 0) {
+      rows.push({ id: "jira-write-server", text: `Jira write-back is on here, but the server gate is off — set ${jw.server.missing.join(", ")} on the server; until then nothing is written to Jira.` });
+    } else if (!jw.devicePaired) {
+      rows.push({ id: "jira-write-pairing", text: "Jira write-back is on, but this device isn't paired with JIRA_WRITE_SECRET — pair it in Data & Settings → Jira write-back, or writes will be refused." });
+    }
+  }
+
+  // G3 — the server's daily snapshot should run after the workday ends.
+  const sched = extras.snapshotSchedule;
+  if (sched) {
+    const offset = sched.offsetMinutes ?? 0;
+    const latest = latestSnapshotRunLocal(sched.cronHoursUtc, offset);
+    if (latest !== undefined && latest < Math.max(17, sched.snapshotHourLocal)) {
+      const utc = sched.cronHoursUtc.find((h) => localHourOf(h, offset) === latest)!;
+      rows.push({
+        id: "snapshot-hour",
+        text: `The server's daily report runs at ${String(latest).padStart(2, "0")}:00 local time (${String(utc).padStart(2, "0")}:00 UTC${sched.offsetMinutes === undefined ? ", JIRA_TIMEZONE_OFFSET_MINUTES not set" : ""}) — before 17:00, so afternoon Jira closes land in the next day's report. Move the cron in vercel.json (see README).`,
+      });
+    }
+  }
+
   if (notifyStatus && !notifyStatus.serverSideNotifyActive) {
     rows.push({
       id: "notify",
@@ -170,6 +202,35 @@ export function SetupHealthBanner() {
   }, [enabledOrEverPaired]);
 
   const crossDeviceActive = useCrossDeviceSyncActive();
+  // G2 — the server's write gate, only while the client switch is on.
+  const [jiraWriteServer, setJiraWriteServer] = useState<JiraWriteServerStatus | null>(null);
+  const writeOn = state.features.jiraWriteBack;
+  useEffect(() => {
+    if (!writeOn) return;
+    let cancelled = false;
+    void checkJiraWriteServerStatus().then((st) => {
+      if (!cancelled) setJiraWriteServer(st);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [writeOn]);
+  // G3 — when the server snapshot runs (only matters once server reports are in use).
+  const [schedule, setSchedule] = useState<SetupHealthExtras["snapshotSchedule"]>(undefined);
+  const serverReportsInUse = Object.values(state.dailyReports).some((r) => !!r.server);
+  useEffect(() => {
+    if (!serverReportsInUse) return;
+    let cancelled = false;
+    void fetch("/api/command-center/reports/schedule")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (!cancelled && j && Array.isArray(j.cronHoursUtc)) setSchedule(j);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [serverReportsInUse]);
 
   if (!state.loaded) return null;
 
@@ -178,6 +239,8 @@ export function SetupHealthBanner() {
     sprintFieldMapped: !!state.jiraSprintFieldId,
     ai,
     backup: { lastBackupAt: state.lastBackupAt, crossDeviceActive, isDemo: state.isDemo, now: new Date() },
+    jiraWrite: { clientOn: writeOn, server: jiraWriteServer, devicePaired: !!getJiraWriteSecret() },
+    snapshotSchedule: schedule,
   });
   if (rows.length === 0) return null;
 
