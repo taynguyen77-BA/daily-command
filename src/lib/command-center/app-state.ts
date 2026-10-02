@@ -14,6 +14,7 @@
 // never touches.
 
 import { z } from "zod";
+import { bearerMatches } from "./secure-compare";
 import type {
   Action,
   AttentionItemState,
@@ -120,7 +121,7 @@ export function checkAppStateAuth(authorizationHeader: string | null, appStateSe
   if (!appStateSecret) {
     return { ok: false, status: 503, error: "Cross-device sync is not configured on this server (APP_STATE_SECRET is unset)." };
   }
-  if (authorizationHeader !== `Bearer ${appStateSecret}`) {
+  if (!bearerMatches(authorizationHeader, appStateSecret)) {
     return { ok: false, status: 401, error: "Missing or invalid Authorization header. Pair this device in Data & Settings." };
   }
   return { ok: true };

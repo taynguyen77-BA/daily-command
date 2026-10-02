@@ -985,6 +985,9 @@ export interface DailyReportSnapshot {
   // reports generated before B3 and on past days regenerated later (reports/build fall back
   // to the events alone).
   standup?: import("./reports").StandupState;
+  // E4 — the server-side (cron) snapshot for this day, when one was written: Jira-derived
+  // sections only. Recorded next to — never instead of — the client's own events/standup.
+  server?: import("./server-report-merge").ServerDailyStandup;
 }
 
 /** V1.4 §32-33 — a single labeled Jira changelog field change. Never used to infer actual
@@ -1206,7 +1209,7 @@ export interface PersonalFocusResult {
 
 /** §18 — Focus Session's own ephemeral execution state. READY/CANCELLED are never
  *  persisted; the other four map 1:1 onto PersonalPlanItem.status transitions. */
-export type FocusSessionState = "READY" | "IN_PROGRESS" | "BLOCKED" | "COMPLETED" | "SKIPPED" | "CANCELLED";
+export type FocusSessionState = "READY" | "IN_PROGRESS" | "BLOCKED" | "COMPLETED" | "SKIPPED" | "DEFERRED" | "CANCELLED";
 
 /** §13 — deliberately minimal: a reference plus planning metadata, never a copy of the
  *  source object. Existing project state (via sourceType+sourceId) remains the source of
@@ -1712,6 +1715,8 @@ export interface DailyCommandCompletion {
 // completeTicketInDailyCommand each clear the other map's entry for the same ticketKey, so
 // "Completed + Skipped" is never a representable combination.
 export type SkipReason = "Team is handling it" | "Not my action" | "Waiting on another team" | "Not relevant right now" | "Other";
+/** E3 — the one Skip reason list (TaskRow and Focus Session both render it). */
+export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
 
 export interface DailyCommandSkip {
   ticketKey: string;
@@ -1764,6 +1769,17 @@ export interface FeatureToggles {
   followUpReminders: boolean;
   staleUseMyActivity: boolean;
   reportExport: boolean;
+  /** E1 — weekly "download a backup" reminder while cross-device sync is off. */
+  backupReminder: boolean;
+  /** F1 — guided Morning Mode on /my-work as the first-open-of-the-day landing. */
+  morningMode: boolean;
+  /** F2 — blocked-row age, "Ask" follow-ups and the blocker SLA. */
+  blockerFollowUp: boolean;
+  /** F4 — optional Jira write-back (comment/flag on Block, transition on Done). OFF by default;
+   *  also needs the project in the allow-list and a confirmation for every write. */
+  jiraWriteBack: boolean;
+  /** F5 — deterministic summary paragraph + Blocked aging / Needs decision from in reports. */
+  reportSummaries: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1774,7 +1790,50 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   followUpReminders: true,
   staleUseMyActivity: false,
   reportExport: true,
+  backupReminder: true,
+  morningMode: true,
+  blockerFollowUp: true,
+  jiraWriteBack: false,
+  reportSummaries: true,
 };
+
+/** F1 — one finished Morning Mode triage, per local day. */
+export interface MorningTriageRecord {
+  day: string;
+  startedAt: string;
+  finishedAt: string;
+  /** Tickets acted on in the triage + re-check steps. */
+  handled: number;
+}
+
+/** F4 — Jira write-back settings (Data & Settings). Never consulted unless
+ *  features.jiraWriteBack is on. */
+export interface JiraWriteBackSettings {
+  /** Project keys writes are allowed for. Empty = none. */
+  projects: string[];
+  /** Also set Jira's Flag on Block (needs flagFieldId). */
+  setFlag: boolean;
+  /** The "Flagged" custom field id on this Jira instance, e.g. customfield_10021. */
+  flagFieldId?: string;
+  /** Per project: the transition NAME to offer on Done (ids differ per workflow). */
+  doneTransitions: Record<string, string>;
+}
+
+export const DEFAULT_JIRA_WRITE_BACK_SETTINGS: JiraWriteBackSettings = { projects: [], setFlag: false, doneTransitions: {} };
+
+/** F4 — one Jira write attempt, kept as history (newest last). */
+export interface JiraWriteLogEntry {
+  id: string;
+  at: string;
+  ticketKey: string;
+  kind: "comment" | "flag" | "transition";
+  /** What was sent (comment text, "Flagged", transition name). */
+  detail: string;
+  ok: boolean;
+  error?: string;
+  /** The ticket action that triggered it. */
+  trigger: "block" | "done";
+}
 
 /** D3 — one day's roll-up of successful Jira syncs (kept 90 days). */
 export interface DailySyncSummary {
@@ -1843,7 +1902,14 @@ export interface TaskReactivation {
   reactivatedAt?: string;
 }
 
+/** E3 — the ONE Block reason vocabulary (quick-fill; any text is valid), rendered by TaskRow and
+ *  Focus Session alike through ReasonPickers.tsx. "Not enough time today" (Focus Session's old
+ *  list) is not a block — that is Defer. Records that already carry it are kept and shown
+ *  as-is (LEGACY_BLOCK_REASONS), never rewritten. */
 export const BLOCK_REASON_SUGGESTIONS = ["Waiting for a reply", "Depends on another ticket", "Waiting on environment/access", "Waiting on client decision"] as const;
+/** Reasons older versions offered for Block and no longer do. Kept only so their meaning stays
+ *  documented; parsing never rewrites them. */
+export const LEGACY_BLOCK_REASONS = ["Not enough time today", "Waiting on someone else", "Missing information", "Dependency not resolved"] as const;
 
 // V2.22 §3-4 — Pilot Trust Model + Pilot Observability. A lightweight, local-only feedback
 // record — three simple 0/1/2 questions, never a productivity score, never sent anywhere.

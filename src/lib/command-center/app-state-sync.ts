@@ -17,6 +17,7 @@ import type { SyncedAppState } from "./app-state";
 import { mergeMentionReplies } from "./mention-replies";
 import { emptyTombstones, maxIso, mergeDailyCommandState, mergeReviewAcks, type DailyCommandState } from "./execution-state-merge";
 import { pairedAuthHeader, isDevicePaired } from "./device-pairing";
+import type { ServerDailyStandup } from "./server-report-merge";
 import { deriveLegacyDailyCommandState, mergeTicketWorkStates, migrateLegacyIntoTicketStates } from "./ticket-work-state";
 
 const STATE_ENDPOINT = "/api/command-center/state";
@@ -369,6 +370,10 @@ export async function initAppStateSync(store: CommandCenterStore): Promise<void>
 
   if (!isDevicePaired()) return;
 
+  // E4 — days the cron recorded while the app was closed (best-effort, independent of the
+  // state round-trip below).
+  void pullServerDailyReports(store);
+
   const result = await getServerState();
   if (!result.ok) return; // best-effort — see comment above
 
@@ -409,6 +414,21 @@ export async function initAppStateSync(store: CommandCenterStore): Promise<void>
       }
       return;
     }
+  }
+}
+
+const SERVER_REPORTS_ENDPOINT = "/api/command-center/reports/server";
+
+/** E4 — fetches the cron-written daily standup snapshots and merges them into dailyReports.
+ *  Silent on any failure (unpaired, not configured, offline): reports just stay client-only. */
+export async function pullServerDailyReports(store: CommandCenterStore): Promise<void> {
+  try {
+    const res = await fetch(SERVER_REPORTS_ENDPOINT, { method: "GET", headers: pairedAuthHeader() });
+    if (!res.ok) return;
+    const json = (await res.json()) as { ok?: boolean; reports?: unknown };
+    if (json.ok && json.reports && typeof json.reports === "object") store.mergeServerDailyReports(json.reports as Record<string, ServerDailyStandup>);
+  } catch {
+    // best-effort
   }
 }
 

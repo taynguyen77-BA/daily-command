@@ -25,6 +25,10 @@ import { dueFollowUps } from "@/lib/command-center/follow-up-reminders";
 import { isMyActionItem } from "@/lib/command-center/personal-relation";
 import type { TriageCommand, TriageRow } from "@/lib/command-center/triage-keys";
 import { useTriageKeys } from "@/components/command-center/use-triage-keys";
+import { AskFollowUp } from "@/components/command-center/AskFollowUp";
+import { MorningMode } from "@/components/command-center/MorningMode";
+import { triageDoneLabel } from "@/lib/command-center/morning-mode";
+import { blockedFollowUpRows } from "@/lib/command-center/blocker-followup";
 
 const VIEW_SUBTITLE: Record<MyWorkView, string> = {
   today: "Your focus, today's plan, and every open ticket that is yours — ranked by its strongest signal.",
@@ -46,6 +50,8 @@ function doneCaption(row: MyWorkRow, now: Date): string | undefined {
 function MyWorkInner() {
   const searchParams = useSearchParams();
   const requested = searchParams?.get("view");
+  const morningRequested = searchParams?.get("mode") === "morning";
+  const [morning, setMorning] = useState(morningRequested);
   const [view, setView] = useState<MyWorkView>(isMyWorkView(requested) ? requested : "today");
   const { state, store, work, review, now, personalFocus, proactive, today, filteredData, scopedMentionEvents, dailyCommandMaps } = useMyWork();
   const myActionItemsOnly = state.myActionItemsOnly.myDay;
@@ -88,6 +94,9 @@ function MyWorkInner() {
   // D5 — blocked tickets whose "ping on" date has come.
   const followUps = useMemo(() => (state.features.followUpReminders ? dueFollowUps(dailyCommandMaps.dailyCommandBlocks, today, filteredData.workItems) : []), [state.features.followUpReminders, dailyCommandMaps, today, filteredData.workItems]);
 
+  // F2 — "Ask everyone": every blocked ticket's follow-up, one message per person.
+  const askAllRows = useMemo(() => (view === "blocked" && state.features.blockerFollowUp ? blockedFollowUpRows(state.ticketWorkStates, filteredData) : []), [view, state.features.blockerFollowUp, state.ticketWorkStates, filteredData]);
+
   const rows = work.views[view];
   // D2 — keyboard triage over the current view's rows, in page order.
   const triageRows: TriageRow[] = useMemo(
@@ -111,6 +120,19 @@ function MyWorkInner() {
   if (!state.loaded) {
     return <EmptyState title="No data yet" description="Sync Jira or load the demo dataset to see your work." onLoadDemo={() => store.loadDemoData()} />;
   }
+
+  // F1 — Morning Mode (feature on): the guided start of the day.
+  if (morning && state.features.morningMode) {
+    return (
+      <MorningMode
+        onExit={() => {
+          setMorning(false);
+          selectView("today");
+        }}
+      />
+    );
+  }
+  const triageToday = state.morningTriage[today];
 
   const hasIdentity = !!state.ownerName || !!state.personalIdentity?.accountId;
   const row = (r: MyWorkRow, i: number) => (
@@ -166,6 +188,16 @@ function MyWorkInner() {
         action={
           <>
             <TrustLabel kind="calculated" />
+            {state.features.morningMode &&
+              (triageToday ? (
+                <span className="whitespace-nowrap text-xs text-green" data-triage-done>
+                  ✓ {triageDoneLabel(triageToday)}
+                </span>
+              ) : (
+                <button onClick={() => setMorning(true)} className="btn btn-sm btn-secondary">
+                  Morning Mode
+                </button>
+              ))}
             <label className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-border px-2.5 py-1.5 text-xs text-text2 hover:border-border2">
               <input type="checkbox" checked={myActionItemsOnly} onChange={(e) => store.setMyActionItemsOnly("myDay", e.target.checked)} className="h-3.5 w-3.5 accent-accent" />
               My action items only
@@ -201,6 +233,20 @@ function MyWorkInner() {
         </p>
       )}
 
+      {view === "today" && work.overdueBlockers.length > 0 && (
+        // F2 — overdue blockers lead Today. Pointers only: the rows live in the Blocked view.
+        <section id="today-overdue-blockers" data-overdue-blockers>
+          <SectionHeading title={`Overdue blockers (${work.overdueBlockers.length})`} subtitle={`Blocked longer than your ${state.blockerSlaBusinessDays}-business-day SLA — chase these first.`} />
+          <Panel className="flex flex-wrap gap-2 p-4 text-sm">
+            {work.overdueBlockers.map((r) => (
+              <button key={r.ticketKey} onClick={() => selectView("blocked")} className="btn btn-sm btn-secondary">
+                {r.ticketKey} · {r.blockedAgeBusinessDays} business days{r.view.reason ? ` · ${r.view.reason}` : ""}
+              </button>
+            ))}
+          </Panel>
+        </section>
+      )}
+
       {view === "today" && personalFocus && (
         <>
           <YourDeliveryFocus personalFocus={personalFocus} compact />
@@ -225,6 +271,13 @@ function MyWorkInner() {
               </span>
             ))}
           </p>
+        </Panel>
+      )}
+
+      {view === "blocked" && state.features.blockerFollowUp && askAllRows.length > 0 && (
+        <Panel className="p-4" data-ask-everyone>
+          <p className="text-sm text-text2">One follow-up per person for every blocked ticket.</p>
+          <AskFollowUp rows={askAllRows} label="Ask everyone" />
         </Panel>
       )}
 

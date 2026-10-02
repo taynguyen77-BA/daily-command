@@ -36,3 +36,22 @@ export function mergeMentionReplies(a: Record<string, MentionReply>, b: Record<s
   for (const [k, v] of Object.entries(b)) if (!out[k] || v.repliedAt > out[k].repliedAt) out[k] = v;
   return out;
 }
+
+/** F3 — on sync: every mention I have since answered on Jira (my own comment on that issue is
+ *  newer than the mention) becomes a recorded reply, source "jira" — so it leaves "awaiting my
+ *  reply" on every device and stays answered even after the activity record rolls over. Only
+ *  NEW records are returned; a mention already marked (by hand or earlier) is never touched,
+ *  so a manual "Replied" is never overwritten. */
+export function detectRepliedMentions(
+  mentions: Pick<MentionEvent, "commentId" | "issueKey" | "mentionedAt">[],
+  myActivity: Record<string, MyTicketActivity>,
+  existing: Record<string, MentionReply>
+): Record<string, MentionReply> {
+  const found: Record<string, MentionReply> = {};
+  for (const m of mentions) {
+    if (existing[m.commentId]) continue;
+    const mine = myActivity[m.issueKey]?.lastCommentAt;
+    if (mine && mine > m.mentionedAt) found[m.commentId] = { commentId: m.commentId, issueKey: m.issueKey, repliedAt: mine, source: "jira" };
+  }
+  return found;
+}

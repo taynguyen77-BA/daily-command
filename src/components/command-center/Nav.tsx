@@ -9,6 +9,7 @@ import { initAutoJiraSync } from "@/lib/command-center/auto-sync";
 import { initAutoDailyReport } from "@/lib/command-center/auto-daily-report";
 import { initFollowUpReminders } from "@/lib/command-center/follow-up-runner";
 import { shouldRunMorningBrief } from "@/lib/command-center/morning-brief";
+import { MORNING_MODE_LANDING, shouldOpenMorningMode } from "@/lib/command-center/morning-mode";
 import { getTodayIso } from "@/lib/command-center/store";
 
 interface NavLink {
@@ -95,10 +96,17 @@ function useMorningBrief(pathname: string | null): boolean {
     if (ran.current || !state.loaded) return;
     ran.current = true;
     const today = getTodayIso();
-    if (!shouldRunMorningBrief(state.features.morningBrief, state.morningBriefLastRunDay, today) || pathname !== "/") return;
+    // F1 — Morning Mode takes over the first open of the day (it runs the sync itself, with
+    // progress) until today's triage is done; otherwise D1's one-click brief as before.
+    const morning = shouldOpenMorningMode({ enabled: state.features.morningMode, loaded: state.loaded, today, morningTriage: state.morningTriage });
+    if (!shouldRunMorningBrief(state.features.morningBrief || morning, state.morningBriefLastRunDay, today) || pathname !== "/") return;
     setActive(true);
     morningBriefRedirected = true; // the landing-page redirect below must not override this
     commandCenterStore.recordMorningBriefRun(today);
+    if (morning) {
+      router.replace(MORNING_MODE_LANDING);
+      return;
+    }
     if (state.dataSource === "jira" && state.jiraSync.lastSyncStatus !== "never") void commandCenterStore.syncJira({ trigger: "auto" });
     router.replace(MORNING_BRIEF_LANDING);
   }, [state, pathname, router]);

@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.25
+**Current version:** V2.34
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version-line reconciliation (yet again):** this line had drifted stale at V2.15 even though nine real passes (V2.16's IndexedDB persistence backend, V2.17's Daily/Weekly Reports and Delivery Artifacts hardening, V2.18 through V2.24's various sync/trust/attention-truth/automatic-Jira-sync fixes) had already shipped without ever updating it here — the same class of gap this README has now flagged and fixed three times (see the V2.10 and V2.13 sections below for the two prior occurrences). Corrected to V2.25 as part of this pass, which itself adds the "is this ticket done?" consistency audit, Jira-aware Daily/Weekly Reports, the Stale Assigned Ticket detector, and the Setup Health checklist described below.
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.34.0` ↔ `V2.34`) and the test suite fails if this line disagrees with it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -19,7 +19,7 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000). Without any environment variables set, the app works fully in **Demo** mode (fictional seed data) and **Mock AI** mode (deterministic template output, no external calls) — nothing below is required to try it.
 
 ```bash
-npm test          # deterministic-engine test suite (scripts/command-center-test.mts)
+npm test          # deterministic-engine test suite (scripts/tests/run.mts → scripts/tests/*.test.mts)
 npx tsc --noEmit   # typecheck
 npm run build      # production build
 ```
@@ -113,7 +113,7 @@ Everything else stays local, per device, un-synced by design — e.g. `snapshotH
 **Never put `APP_STATE_SECRET` in a `NEXT_PUBLIC_*` env var** — that would bundle it into every visitor's JS at build time. Instead, each browser is "paired" individually: open **Data & Settings → Cross-Device Sync**, paste the secret once, and it's stored only in that device's own `localStorage` (`device-pairing.ts`) — the same one-time-per-device setup as a password manager or 2FA app. The paired secret is also what a browser's own "Sync Now" button sends to `/api/command-center/jira/sync` (see the `CRON_SECRET` fix above) — it is never a third secret, just reused.
 
 **Client sync lifecycle:** on load, the app renders immediately from local state (unchanged, no blank-screen wait); in the background, a paired device pulls the server's copy and reconciles it against local state:
-- Server has no state yet → this device's local state becomes the baseline (protects an existing pre-V2.15 install's real local data — see the dedicated migration-safety test in `scripts/command-center-test.mts`).
+- Server has no state yet → this device's local state becomes the baseline (protects an existing pre-V2.15 install's real local data — see the dedicated migration-safety test in `scripts/tests/`).
 - Local looks never-meaningfully-used (no attention lifecycle activity, no decisions, no planning activity) → adopt the server's copy wholesale.
 - Both sides have real content and the server is newer → merge: record collections (decisions, actions, personal-plan items, memory events) union by id so a locally-added-but-not-yet-synced record is never dropped, even though the single-timestamp blob design (§ below) means simple preference blocks resolve to "whichever whole side is newer," not true per-field freshness.
 - Otherwise (this device is already at least as fresh as the server knows) → push local forward.
@@ -125,6 +125,24 @@ Every mutation to a synced field debounces a single `POST` a few seconds later (
 ### Configuring in Vercel
 
 Project Settings → Environment Variables → add the ones you need for the **Production** (and optionally **Preview**) environment, then redeploy. Never commit real values to the repo — `.env*.local` is already git-ignored.
+
+## Daily flow (V2.34) — each can be switched off in Data & Settings → Features
+
+- **Morning Mode** *(on by default)*. The first time you open the app each day it lands on a guided five-step flow in My Work: **1. Sync** (Jira, with a progress line; skipped when Jira isn't connected) → **2. Triage New**, one key per ticket: <kbd>D</kbd> done · <kbd>B</kbd> block · <kbd>S</kbd> skip · <kbd>F</kbd> defer to tomorrow · <kbd>Enter</kbd> keep for today (<kbd>J</kbd>/<kbd>K</kbd> move) → **3. Due re-checks** (skipped/blocked tickets whose re-check date has come, deferrals whose date arrived) → **4. Today's plan** (drag or ↑/↓ to order, against the Action Plan time budget, which is now remembered) → **5. Start first task**. Finishing shows "Triage done in Xm" and remembers it for the day; "Skip Morning Mode today" leaves without recording anything, and a Morning Mode button in My Work reopens it. Every key uses the same ticket actions as the TaskRow buttons. The Command Center has a **Compact** switch in its header (KPI strip + My Work summary + Release only), remembered.
+- **Blocker follow-ups** *(on)*. Blocked rows show how long they have been blocked in business days against a configurable **SLA** (Data & Settings → Blocker SLA, default 2 business days) and an **Ask** button: the Needs From Others follow-up, one message per person, to copy — or to send to the server's Slack channel after an explicit second confirmation. My Work → Blocked has **Ask everyone**. Blockers past the SLA lead the Blocked view, are listed first in Today, and are called out under the Daily Report title.
+- **Mention reply auto-detection** *(part of "Mention reply tracking", on)*. On every sync, a mention you've since answered in Jira (your own comment on that issue is newer than the mention) is recorded as replied, source `jira` — it leaves "awaiting my reply" on every device. A manual **Replied** still works and is never overwritten.
+- **Jira write-back** *(OFF by default)*. When switched on, and only for projects on the **allow-list** (Data & Settings → Jira write-back): after a **Block** the app offers a Jira comment "Blocked: &lt;reason&gt;" (and optionally the Flag, given the instance's Flagged field id); after a **Done** it offers a transition chosen from the transitions Jira reports for that ticket (a per-project default can be remembered). Every write is previewed in a dialog and happens only on **Write to Jira**; every attempt, successful or not, is kept in the write history. Never with the switch off, never for a project not on the list, never for a status Jira itself changed. Server side: `POST /api/command-center/jira/write` (same auth as every other route), the only place the real `HttpJiraActionProvider` is used — the disabled provider remains the default everywhere else.
+- **Report summaries** *(on)*. Daily and weekly reports open with one deterministic paragraph (counts, top blocker with its age, biggest open risk) and add **Blocked aging** (oldest first) and **Needs decision from** (open decisions by owner, decision-blocked tickets by who they wait on). No AI needed. **Polish with AI** (optional, uses the configured fast model) is accepted only if every number and ticket key is unchanged; otherwise the original stays and the reason is shown.
+- **Performance budget.** `scripts/tests/25-performance-budget.test.mts` builds My Work, Daily Review, Priorities, focus, the attention queue and the reports over a synthetic 3,000-work-item / 1,500-mention dataset and fails if any takes over 200 ms in Node (worst of 3 warm runs). To stay well inside it, id lookups in the focus/attention engines use per-dataset cached indexes and date parsing is cached (attention queue ~145 → ~105 ms, personal focus ~67 → ~35 ms on that dataset); a test checks the cached lookups give exactly the answers of the linear scans they replaced.
+
+## Final-review fixes (V2.33)
+
+- **Backup & storage (Data & Settings).** The app asks the browser for persistent storage on first load (`navigator.storage.persist()`, feature-detected) and shows the result ("Storage: persistent" / "may be cleared by the browser"). **Export backup** downloads the full local state (ticket statuses, plan, actions, attention, history, reports, sync log, settings) with `schemaVersion` + `exportedAt`. **Import backup** validates the file (a malformed one is rejected with the reason and changes nothing), runs the normal migrations (older backups come in upgraded), previews counts, then **Merge** (default — per-record newest-wins, the same merge cross-device sync uses) or **Replace** (explicit). **Reset all data** offers "Export backup first" and needs `RESET` typed. While cross-device sync isn't active, a weekly reminder offers a backup download (Features → "Weekly backup reminder", on by default) and Setup Health says "No backup in the last 7 days and no cross-device sync".
+- **Focus Session tells the truth.** Its actions return `{ ok }` / `{ ok: false, reason: "transition-rejected", current }`; the session re-reads storage first (another tab may have moved the ticket) and only shows Completed/Blocked/Skipped/Deferred when the store accepted it — otherwise "This ticket is already Done (changed … on …). Reopen it first?" with a Reopen button. A rejected Block writes no reason.
+- **One reason vocabulary.** Focus Session and every TaskRow render the same Block suggestions and Skip reasons (`ReasonPickers.tsx`). "Not enough time today" is gone from Block — Focus Session has **Defer** (+date, default tomorrow) for that, plus **Skip** (+reason). Old records that carry it are kept and shown as-is.
+- **Reports without opening the app.** With Vercel KV + `APP_STATE_SECRET` + `PERSONAL_JIRA_ACCOUNT_ID`, the scheduled cron also writes a server-side standup snapshot for each workday (new assigned, new mentions, closed in Jira, open assigned). A paired device pulls them (`GET /api/command-center/reports/server`) into its Daily Reports — whatever the app itself recorded always wins for in-app sections. A day with neither shows "No data recorded".
+- **Security.** Every secret check is constant-time (`secure-compare.ts`, `crypto.timingSafeEqual` over SHA-256 digests). `/api/command-center/jira/status` returns only `{ configured }` to an unauthenticated caller; the Jira host is returned only with the same auth as every other route (a paired device sends it).
+- **Tests** are split per domain under `scripts/tests/` (one runner, `scripts/tests/run.mts`); the split moved 2616 checks verbatim and in order.
 
 ## Daily helpers (V2.30) — each can be switched off in Data & Settings → Features
 
@@ -300,7 +318,7 @@ hook tree). `change-detection.ts` deliberately does NOT thread Daily Command Com
 describes a raw Jira-side status transition event, not a personal-execution exclusion filter, so
 only the two Jira-side completion signals (native Done, Work Relevance Policy) apply there.
 14 new regression tests (one pair — "index omitted reproduces old behavior" / "index passed fixes
-it" — per file, `scripts/command-center-test.mts`, `V2.25 <file>` group) confirm each engine now
+it" — per file, `scripts/tests/`, `V2.25 <file>` group) confirm each engine now
 agrees with the canonical gate on a work item whose native status isn't literally "Done" but whose
 real Jira status name is classified COMPLETED in the policy. `ai-context.ts`'s `buildAIContext`
 and `demo-data.ts` were deliberately left untouched — the former has no caller wiring
@@ -337,7 +355,7 @@ detected Jira completions are reflected immediately — see that method's own co
 gating this by day-change would defeat the point for the common multiple-syncs-per-day case).
 Close Day keeps its exact existing role — review and confirm, calling the same
 `generateDailyReport` — this pass only removes the requirement that it be the sole entry point.
-21 new tests (`scripts/command-center-test.mts`, `V2.25 jira-completion-detection`/`V2.25
+21 new tests (`scripts/tests/`, `V2.25 jira-completion-detection`/`V2.25
 daily-report label split`/`V2.25 Daily Report e2e`/`V2.25 Auto Daily Report gate` groups) cover
 the pure diff function (open→done, no-change, first-sync-has-no-history, already-done-not-
 re-reported, non-Jira items excluded, policy-COMPLETED-without-native-Done), the label-split
@@ -441,13 +459,13 @@ or "completion" concept was introduced anywhere in this pass — every fix reuse
 `isWorkItemOperationallyOpen`/`isWorkItemDoneOrExcluded` as the one canonical truth for "is this
 ticket done," exactly as the dev prompt required.
 
-**Current version:** V2.25.
+**Version at the end of the V2.25 pass:** V2.25.
 
 # V2.13 — Server-Side Real-Time Notify (Option B) + Five Bug Fixes
 
 Two independent pieces of work, both in this pass.
 
-**Server-Side Real-Time Notify:** see the [Server-Side Real-Time Notify](#server-side-real-time-notify-v213-optional) section above for the full picture. In short: a small, single-key server-side store (`src/lib/server/notify-store.ts`, `@vercel/kv`-backed) tracks a personal Jira account's assigned-issue-keys and already-notified comment IDs, so `src/lib/command-center/cron-notify.ts`'s `runServerSideNotifyCheck` (wired into `jira/sync/route.ts`'s GET handler, the one Vercel Cron/GitHub Actions actually calls) can detect a genuinely new assignment/mention and Slack it with no browser open — reusing V2.10's own `detectNewAssignments`/`buildMentionEvents` rather than a second implementation. The client (`use-command-center.ts`) checks a new `serverSideNotifyActive` status flag and defers entirely to the server path once it's active, preventing the two independent tracking systems (server KV vs. browser localStorage) from double-sending the same signal. `cron-notify.ts` itself is deliberately NOT `import "server-only"` (unlike the dev prompt's literal instruction) and takes an injected `fetchImpl`/`NotifyStateStore`, so the cold-start, double-notification-prevention, and connectivity-failure-never-corrupts-state guarantees are all covered by real, offline, dependency-injected tests (`scripts/command-center-test.mts`) rather than a manual trace — the credential/env-var-touching pieces (`notify-store.ts`'s real KV client, the sync route's wiring) stay server-only and are verified the same way the existing `jira-client.ts`/`jira/sync/route.ts` split already is (source-text assertions, never imported into the test process).
+**Server-Side Real-Time Notify:** see the [Server-Side Real-Time Notify](#server-side-real-time-notify-v213-optional) section above for the full picture. In short: a small, single-key server-side store (`src/lib/server/notify-store.ts`, `@vercel/kv`-backed) tracks a personal Jira account's assigned-issue-keys and already-notified comment IDs, so `src/lib/command-center/cron-notify.ts`'s `runServerSideNotifyCheck` (wired into `jira/sync/route.ts`'s GET handler, the one Vercel Cron/GitHub Actions actually calls) can detect a genuinely new assignment/mention and Slack it with no browser open — reusing V2.10's own `detectNewAssignments`/`buildMentionEvents` rather than a second implementation. The client (`use-command-center.ts`) checks a new `serverSideNotifyActive` status flag and defers entirely to the server path once it's active, preventing the two independent tracking systems (server KV vs. browser localStorage) from double-sending the same signal. `cron-notify.ts` itself is deliberately NOT `import "server-only"` (unlike the dev prompt's literal instruction) and takes an injected `fetchImpl`/`NotifyStateStore`, so the cold-start, double-notification-prevention, and connectivity-failure-never-corrupts-state guarantees are all covered by real, offline, dependency-injected tests (`scripts/tests/`) rather than a manual trace — the credential/env-var-touching pieces (`notify-store.ts`'s real KV client, the sync route's wiring) stay server-only and are verified the same way the existing `jira-client.ts`/`jira/sync/route.ts` split already is (source-text assertions, never imported into the test process).
 
 **Five bug fixes**, reported directly by the user:
 1. **Jira Work Relevance Policy "resets on deploy"** — investigated thoroughly; the policy is persisted in browser `localStorage` (`command-center:v1`, unchanged since it was introduced) with fully defensive parsing/migration, and no code path in this app ever clears or version-gates it. No code bug was found. The overwhelmingly likely real cause is environmental: Vercel gives every deployment (including Production ones without a stable custom domain) its own unique `*.vercel.app` URL in addition to the stable aliased production URL — visiting a fresh per-deployment URL after each deploy is a different browser origin, hence empty `localStorage`, which looks exactly like "reset on deploy" without actually being one. If you're seeing this, check which URL you're opening after each deploy; visiting the same stable Production URL every time should persist the policy correctly.

@@ -4,10 +4,24 @@
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, PriorityFactor, PriorityScoreResult, Severity, WorkItem } from "./types";
 
+// F6 — daysBetween runs for every item in several engines on every render; parsing the same few
+// hundred distinct dates over and over was the single biggest cost on a 3,000-item Jira. The
+// local-midnight timestamp of each date string is cached (bounded; same parse as before, so the
+// result is identical — including NaN for an unparseable date).
+const MIDNIGHT_CACHE_MAX = 5000;
+const midnightCache = new Map<string, number>();
+function localMidnightMs(iso: string): number {
+  let t = midnightCache.get(iso);
+  if (t === undefined) {
+    if (midnightCache.size >= MIDNIGHT_CACHE_MAX) midnightCache.clear();
+    t = new Date(iso + "T00:00:00").getTime();
+    midnightCache.set(iso, t);
+  }
+  return t;
+}
+
 export function daysBetween(fromIso: string, toIso: string): number {
-  const from = new Date(fromIso + "T00:00:00");
-  const to = new Date(toIso + "T00:00:00");
-  return Math.round((to.getTime() - from.getTime()) / 86_400_000);
+  return Math.round((localMidnightMs(toIso) - localMidnightMs(fromIso)) / 86_400_000);
 }
 
 export function classify(score: number): Severity {

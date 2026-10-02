@@ -7,6 +7,9 @@ import { LANDING_PAGES } from "@/lib/command-center/store";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
+import { BackupPanel } from "@/components/command-center/BackupPanel";
+import { JiraWriteBackPanel } from "@/components/command-center/JiraWriteBackPanel";
+import { downloadBackup } from "@/components/command-center/BackupReminder";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
 import { checkJiraConfigured, discoverJiraProjects } from "@/lib/command-center/datasource/jira-source";
@@ -664,10 +667,17 @@ const FEATURE_TOGGLE_LABELS: { key: keyof FeatureToggles; label: string; detail:
   { key: "followUpReminders", label: "Follow-up reminders", detail: "'Ping on <date>' when blocking; due follow-ups show in Daily Review and (if configured) Slack." },
   { key: "staleUseMyActivity", label: "Staleness from my own activity (off by default)", detail: "Measure 'no activity' from your last comment/transition where the sync could see it, instead of the ticket's 'updated' (which anyone's edit moves)." },
   { key: "reportExport", label: "Send reports to Slack / email draft", detail: "Adds 'Send to Slack…' (with confirmation) and 'Email draft' to Reports. Never sends on its own." },
+  { key: "backupReminder", label: "Weekly backup reminder", detail: "While cross-device sync is off, remind me once a week to download a backup (Backup & storage below). Never downloads on its own." },
+  { key: "morningMode", label: "Morning Mode", detail: "First open of the day lands on a guided 5-step flow in My Work: sync, triage New (D/B/S/F/Enter), due re-checks, confirm today's plan, start the first task." },
+  { key: "blockerFollowUp", label: "Blocker follow-ups", detail: "Blocked rows show their age in business days and an 'Ask' that drafts one follow-up per person (copy, or Slack after you confirm). Blockers over the SLA below lead Today and the Daily Report." },
+  { key: "reportSummaries", label: "Report summaries", detail: "Daily and weekly reports open with a one-paragraph summary (counts, top blocker, biggest risk) plus 'Blocked aging' and 'Needs decision from'. No AI needed; 'Polish with AI' is optional and never changes numbers or ticket keys." },
+  { key: "jiraWriteBack", label: "Jira write-back (off by default)", detail: "On Block, offer a Jira comment 'Blocked: <reason>' (and the Flag); on Done, offer a transition. Only for allow-listed projects below, always previewed and confirmed, every write logged." },
 ];
 export default function DataSettingsPage() {
   const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const [confirmingReset, setConfirmingReset] = useState(false);
+  // E1 — Reset requires typing RESET (and offers a backup download first).
+  const [resetConfirmText, setResetConfirmText] = useState("");
   const [claudeAvailable, setClaudeAvailable] = useState<boolean | null>(null);
   const [jiraStatus, setJiraStatus] = useState<{ configured: boolean; baseUrlHost?: string } | null>(null);
   // Local `syncing` only drives this page's own button label/elapsed timer; the real guard
@@ -1004,6 +1014,23 @@ export default function DataSettingsPage() {
         </div>
       </Panel>
 
+      <Panel className="p-5" data-blocker-sla>
+        <SectionHeading title="Blocker SLA" subtitle="A ticket blocked for more than this many business days is overdue: it leads Today in My Work and the Daily Report header (Blocker follow-ups feature)." />
+        <label className="flex items-center gap-2 text-sm text-text2">
+          <input
+            type="number"
+            min={1}
+            max={30}
+            value={state.blockerSlaBusinessDays}
+            onChange={(e) => e.target.value && store.setBlockerSla(Number(e.target.value))}
+            className="w-20 rounded-md border border-border bg-surface px-2 py-1 text-sm"
+          />
+          business days (default 2)
+        </label>
+      </Panel>
+
+      <JiraWriteBackPanel />
+
       <Panel className="p-5">
         <SectionHeading title="Stale Assigned Ticket thresholds" subtitle="Attention Queue flags a ticket assigned to you with no observable activity for this many business days (weekends never count as silence). A miss-ticket safety net, not a proven risk — tune it to how fast your projects actually move." />
         <div className="flex max-w-md flex-wrap items-end gap-4">
@@ -1065,32 +1092,60 @@ export default function DataSettingsPage() {
           >
             Load Demo Data
           </button>
-          {!confirmingReset ? (
+          {!confirmingReset && (
             <button
               onClick={() => setConfirmingReset(true)}
               className="btn btn-secondary"
             >
               Reset all data
             </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-text2">Erase everything in this browser?</span>
+          )}
+        </div>
+        {confirmingReset && (
+          <div className="mt-3 rounded-md border border-red/40 bg-red/10 p-3 text-sm" data-reset-confirm>
+            <p className="text-text">
+              This erases everything in this browser — ticket statuses, plan, reports, history and settings. It can&apos;t be undone
+              {state.lastBackupAt ? ` (last backup: ${new Date(state.lastBackupAt).toLocaleString()})` : " and you have never downloaded a backup"}.
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button onClick={() => downloadBackup(store)} className="btn btn-sm btn-primary">
+                Export backup first
+              </button>
+              <input
+                value={resetConfirmText}
+                onChange={(e) => setResetConfirmText(e.target.value)}
+                placeholder="Type RESET to confirm"
+                aria-label="Type RESET to confirm"
+                className="w-44 rounded-md border border-border bg-surface px-2 py-1 text-sm text-text placeholder:text-text3"
+              />
               <button
                 onClick={() => {
-                  store.resetAll();
-                  setConfirmingReset(false);
+                  if (resetConfirmText === "RESET") {
+                    store.resetAll();
+                    setConfirmingReset(false);
+                    setResetConfirmText("");
+                  }
                 }}
-                className="rounded-md bg-red px-3 py-1.5 text-sm font-medium text-white"
+                disabled={resetConfirmText !== "RESET"}
+                className="rounded-md bg-red px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
-                Yes, reset
+                Reset all data
               </button>
-              <button onClick={() => setConfirmingReset(false)} className="rounded-md border border-border px-3 py-1.5 text-sm text-text2">
+              <button
+                onClick={() => {
+                  setConfirmingReset(false);
+                  setResetConfirmText("");
+                }}
+                className="rounded-md border border-border px-3 py-1.5 text-sm text-text2"
+              >
                 Cancel
               </button>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </Panel>
+
+      <BackupPanel />
 
       <Panel className="p-5">
         <SectionHeading title="Data Source" subtitle="Demo, Local Import, or Jira — switching sources never corrupts existing data." />
@@ -1114,7 +1169,7 @@ export default function DataSettingsPage() {
           ) : (
             <div className="space-y-1 text-text2">
               <p>Configured: <span className="text-green">yes</span></p>
-              <p>Base URL: <span className="font-mono">{jiraStatus.baseUrlHost}</span></p>
+              <p>Base URL: {jiraStatus.baseUrlHost ? <span className="font-mono">{jiraStatus.baseUrlHost}</span> : <span className="text-text3">shown once this device is paired (Cross-Device Sync below)</span>}</p>
               <p>Authentication: Server-side (credentials never sent to this browser)</p>
               <p>Last sync: {state.jiraSync.lastSyncCompletedAt ? new Date(state.jiraSync.lastSyncCompletedAt).toLocaleString() : "never"}</p>
               <p>
@@ -1564,7 +1619,7 @@ export default function DataSettingsPage() {
           </Panel>
 
           <Panel className="p-5">
-            <SectionHeading title="Real Jira Data Protection" subtitle="Read-only remains the rule — no write-back. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
+            <SectionHeading title="Real Jira Data Protection" subtitle="Read-only by default — the optional Jira write-back (Features) is off unless you turn it on, and then only for allow-listed projects with a confirmation per write. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
             <div className="space-y-2">
               {dataProtectionChecklist.map((c) => (
                 <PilotChecklistRow key={c.id} item={c} />

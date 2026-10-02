@@ -113,9 +113,13 @@ import type {
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
 } from "./types";
-import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, emptyData } from "./types";
+import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, DEFAULT_JIRA_WRITE_BACK_SETTINGS, SKIP_REASONS, emptyData } from "./types";
+import type { JiraWriteBackSettings, JiraWriteLogEntry, MorningTriageRecord } from "./types";
+import type { TimeBudget } from "./action-plan";
 import { rollDailySyncSummary } from "./sync-history";
-import { mergeMyTicketActivity } from "./mention-replies";
+import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
+import { planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
+import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
 export type { MyActionItemsOnlyByPage };
@@ -320,6 +324,21 @@ export interface StoreState {
   followUpNotified: Record<string, string>;
   /** D1 — local day the one-click morning flow last ran. */
   morningBriefLastRunDay?: string;
+  /** E1 — when this device last exported a backup (local-only). */
+  lastBackupAt?: string;
+  /** E1 — when the weekly backup reminder was last put off ("Remind me next week"). */
+  backupReminderSnoozedAt?: string;
+  /** F1 — finished Morning Mode triages by local day (bounded). */
+  morningTriage: Record<string, MorningTriageRecord>;
+  /** F1 — Command Center compact mode (KPI strip + My Work summary + Release). */
+  commandCenterCompact: boolean;
+  /** F1 — the Action Plan time budget, shared with Morning Mode's plan step. */
+  timeBudgetMinutes?: TimeBudget;
+  /** F2 — a blocked ticket older than this many business days is overdue (default 2). */
+  blockerSlaBusinessDays: number;
+  /** F4 — Jira write-back settings and the history of every write attempt. */
+  jiraWriteBack: JiraWriteBackSettings;
+  jiraWriteLog: JiraWriteLogEntry[];
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -368,6 +387,11 @@ function initialState(): StoreState {
     mentionReplies: {},
     myTicketActivity: {},
     followUpNotified: {},
+    morningTriage: {},
+    commandCenterCompact: false,
+    blockerSlaBusinessDays: DEFAULT_BLOCKER_SLA_BUSINESS_DAYS,
+    jiraWriteBack: { ...DEFAULT_JIRA_WRITE_BACK_SETTINGS },
+    jiraWriteLog: [],
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -427,6 +451,19 @@ export interface CommandCenterStoreDeps {
    *  undefined → window + document. */
   stateFocusTargets?: Pick<EventTarget, "addEventListener">[];
 }
+
+/** E2 — a Focus Session action the store refused: the ticket's current status doesn't allow
+ *  the move (ticket-work-state.ts canTransition). `since`/`surface` describe the change that
+ *  put it there, for "already Done (changed <since> on <surface>)". */
+export interface FocusItemRejection {
+  ok: false;
+  reason: "transition-rejected";
+  current: TicketWorkStatus;
+  ticketKey: string;
+  since?: string;
+  surface?: TicketStatusSurface;
+}
+export type FocusItemResult = { ok: true } | FocusItemRejection | { ok: false; reason: "not-found" };
 
 const IDLE_JIRA_SYNC_ACTIVITY: JiraSyncActivity = { inProgress: false };
 
@@ -573,7 +610,7 @@ function asDailyCommandCompletions(v: unknown): Record<string, DailyCommandCompl
   return out;
 }
 
-const VALID_SKIP_REASONS = new Set<SkipReason>(["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"]);
+const VALID_SKIP_REASONS = new Set<SkipReason>(SKIP_REASONS);
 
 // V2.23 — same discipline as isDailyCommandCompletionShape above: a malformed entry (or a
 // corrupted map) is dropped rather than trusted; a missing/invalid entry just means that
@@ -775,6 +812,44 @@ function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
   return { attention: obj.attention === true, myDay: obj.myDay === true, priorities: obj.priorities === true };
 }
 
+
+// ===== V2.34 (F1/F2/F4) parsers =====
+export const DEFAULT_BLOCKER_SLA_BUSINESS_DAYS = 2;
+const MAX_MORNING_TRIAGE_DAYS = 120;
+const MAX_JIRA_WRITE_LOG = 200;
+const TIME_BUDGETS: TimeBudget[] = [15, 30, 60, 120, 480];
+
+function asMorningTriage(v: unknown): Record<string, MorningTriageRecord> {
+  const out: Record<string, MorningTriageRecord> = {};
+  for (const [day, r] of Object.entries(asPlainObject<Record<string, unknown>>(v, {}))) {
+    const x = r as Partial<MorningTriageRecord>;
+    if (typeof x?.startedAt === "string" && typeof x.finishedAt === "string" && typeof x.handled === "number" && x.day === day) out[day] = x as MorningTriageRecord;
+  }
+  return out;
+}
+
+function asBlockerSla(v: unknown): number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 30 ? v : DEFAULT_BLOCKER_SLA_BUSINESS_DAYS;
+}
+
+function asJiraWriteBackSettings(v: unknown): JiraWriteBackSettings {
+  const o = asPlainObject<Partial<JiraWriteBackSettings>>(v, {});
+  const projects = Array.isArray(o.projects) ? Array.from(new Set(o.projects.filter((p): p is string => typeof p === "string" && /^[A-Z][A-Z0-9_]{0,19}$/.test(p)))) : [];
+  const doneTransitions: Record<string, string> = {};
+  for (const [k, name] of Object.entries(asPlainObject<Record<string, unknown>>(o.doneTransitions, {}))) if (typeof name === "string" && name.trim()) doneTransitions[k] = name.trim();
+  return {
+    projects,
+    setFlag: o.setFlag === true,
+    ...(typeof o.flagFieldId === "string" && /^customfield_\d{1,9}$/.test(o.flagFieldId) ? { flagFieldId: o.flagFieldId } : {}),
+    doneTransitions,
+  };
+}
+
+function isJiraWriteLogEntry(v: unknown): v is JiraWriteLogEntry {
+  const e = v as Partial<JiraWriteLogEntry>;
+  return typeof e === "object" && e !== null && typeof e.id === "string" && typeof e.at === "string" && typeof e.ticketKey === "string" && typeof e.ok === "boolean" && ["comment", "flag", "transition"].includes(e.kind as string);
+}
+
 type TicketStateSlice = Pick<StoreState, "ticketWorkStates" | "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones">;
 
 /** Migration + projection in one: folds legacy Daily Command records (and ticket-linked plan
@@ -870,6 +945,14 @@ export function parseStoredState(raw: string): StoreState {
       myTicketActivity: asMyTicketActivity(parsed.myTicketActivity),
       followUpNotified: asStringRecord(parsed.followUpNotified),
       morningBriefLastRunDay: typeof parsed.morningBriefLastRunDay === "string" ? parsed.morningBriefLastRunDay : undefined,
+      lastBackupAt: typeof parsed.lastBackupAt === "string" ? parsed.lastBackupAt : undefined,
+      backupReminderSnoozedAt: typeof parsed.backupReminderSnoozedAt === "string" ? parsed.backupReminderSnoozedAt : undefined,
+      morningTriage: asMorningTriage(parsed.morningTriage),
+      commandCenterCompact: parsed.commandCenterCompact === true,
+      timeBudgetMinutes: TIME_BUDGETS.includes(parsed.timeBudgetMinutes as TimeBudget) ? (parsed.timeBudgetMinutes as TimeBudget) : undefined,
+      blockerSlaBusinessDays: asBlockerSla(parsed.blockerSlaBusinessDays),
+      jiraWriteBack: asJiraWriteBackSettings(parsed.jiraWriteBack),
+      jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
     };
@@ -878,11 +961,53 @@ export function parseStoredState(raw: string): StoreState {
   }
 }
 
+/** The synced slice applied onto a local state — ONLY the synced fields (see
+ *  applySyncedAppState). Pure; also used by importBackup's merge (E1). */
+export function applySyncedSlice(state: StoreState, synced: SyncedAppState): StoreState {
+  return {
+    ...state,
+    personalIdentity: synced.personalIdentity,
+    ownerName: synced.personalIdentity?.displayName,
+    jiraWorkRelevancePolicy: synced.jiraWorkRelevancePolicy,
+    attentionState: synced.attentionState,
+    data: { ...state.data, decisions: synced.decisions, actions: synced.actionPlanState.actions },
+    personalPlan: synced.actionPlanState.personalPlan,
+    memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
+    dailyReports: synced.dailyReports,
+    // A1 — every execution-state field is optional on a synced blob (pre-A1 writers never
+    // sent them): absent means "keep local", never "clear". The synced ticketWorkStates (or,
+    // from a pre-TicketWorkState writer, its legacy maps) are folded into the canonical
+    // state and the deprecated maps re-derived from it.
+    ...ticketStateFromLegacy(
+      synced.ticketWorkStates ? asTicketWorkStates(synced.ticketWorkStates) : state.ticketWorkStates,
+      {
+        dailyCommandCompletions: synced.dailyCommandCompletions ?? {},
+        dailyCommandSkips: synced.dailyCommandSkips ?? {},
+        dailyCommandBlocks: synced.dailyCommandBlocks ?? {},
+        dailyCommandTombstones: synced.dailyCommandTombstones ?? state.dailyCommandTombstones,
+      },
+      synced.actionPlanState.personalPlan,
+      undefined
+    ),
+    syncLog: synced.syncLog ?? state.syncLog,
+    dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? state.dailyReviewLastVisitAt,
+    dailyReviewAcks: synced.dailyReviewAcks ?? state.dailyReviewAcks,
+    dailyReviewBaselineAt: synced.dailyReviewBaselineAt ?? state.dailyReviewBaselineAt,
+    mentionReplies: synced.mentionReplies ? asMentionReplies(synced.mentionReplies) : state.mentionReplies,
+    showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
+    myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
+    jiraProjectScope: synced.uiPreferences.jiraProjectScope,
+  };
+}
+
 export class CommandCenterStore {
   private state: StoreState = initialState();
   private listeners = new Set<Listener>();
   private hydrated = false;
   private jiraSyncActivity: JiraSyncActivity = IDLE_JIRA_SYNC_ACTIVITY;
+  /** F4 — the write-back the confirmation dialog should offer next. In memory only: a reload
+   *  drops it (nothing is ever written without the dialog). */
+  private pendingJiraWrite: JiraWriteBackProposal | null = null;
 
   constructor(private readonly deps: CommandCenterStoreDeps = {}) {}
 
@@ -1199,6 +1324,22 @@ export class CommandCenterStore {
     this.set(initialState());
   }
 
+  /** E1 — adopt an imported backup's state (already merged or chosen by backup.ts —
+   *  mergeImportedState / replaceWithImportedState). Persisted like any other change. */
+  adoptImportedState(next: StoreState) {
+    this.set(next);
+  }
+
+  /** E1 — a backup file was just downloaded. */
+  markBackupExported(at: string = new Date().toISOString()) {
+    this.set({ ...this.state, lastBackupAt: at, backupReminderSnoozedAt: undefined });
+  }
+
+  /** E1 — "Remind me next week" on the backup reminder. */
+  snoozeBackupReminder(at: string = new Date().toISOString()) {
+    this.set({ ...this.state, backupReminderSnoozedAt: at });
+  }
+
   /** V1.2 §17 "No Hidden Memory" — memory must be deletable without wiping live data.
    *  V2.17 Task 2 — dailyReports is derived memory too (built from memoryEvents), so it's
    *  cleared alongside them; leaving old reports behind after "clear memory" would be exactly
@@ -1421,10 +1562,28 @@ export class CommandCenterStore {
       ...deriveLegacyDailyCommandState(result.states, nowIso, this.state.dailyCommandTombstones),
       memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS),
     });
+    // F4 — offer the Jira write-back for a user's Block/Done (planJiraWriteBack returns null
+    // when the feature is off or the project isn't allow-listed). Only proposed here.
+    if ((status === "BLOCKED" || status === "DONE") && opts.surface !== "jira-sync" && opts.surface !== "migration") {
+      const proposal = planJiraWriteBack({ features: this.state.features, settings: this.state.jiraWriteBack, ticketKey, trigger: status === "BLOCKED" ? "block" : "done", reason: record.reason });
+      if (proposal) {
+        this.pendingJiraWrite = proposal;
+        this.listeners.forEach((l) => l());
+      }
+    }
     // Keep an already-generated report for today current (events + standup), so the action
     // is in it even if memoryEvents later rolls past its cap before the next sync.
     if (this.state.dailyReports[event.date]) this.generateDailyReport(event.date, true);
     return true;
+  }
+
+  /** F4 — the pending write-back proposal (stable reference for useSyncExternalStore). */
+  getPendingJiraWrite = (): JiraWriteBackProposal | null => this.pendingJiraWrite;
+  getServerPendingJiraWrite = (): JiraWriteBackProposal | null => null;
+  clearPendingJiraWrite() {
+    if (!this.pendingJiraWrite) return;
+    this.pendingJiraWrite = null;
+    this.listeners.forEach((l) => l());
   }
 
   /** Whether a transition would be accepted (UI uses it to decide which buttons to show). */
@@ -1546,6 +1705,44 @@ export class CommandCenterStore {
     this.set({ ...this.state, features: { ...this.state.features, [feature]: on } });
   }
 
+  // ===== V2.34 — F1/F2/F4 settings =====
+
+  /** F1 — Command Center compact mode (header toggle). */
+  setCommandCenterCompact(on: boolean) {
+    this.set({ ...this.state, commandCenterCompact: on });
+  }
+
+  /** F1 — the Action Plan time budget, also Morning Mode's plan budget. */
+  setTimeBudget(minutes: TimeBudget) {
+    if (!TIME_BUDGETS.includes(minutes)) return;
+    this.set({ ...this.state, timeBudgetMinutes: minutes });
+  }
+
+  /** F1 — a finished Morning Mode triage for `day` (first finish of the day is kept). */
+  recordMorningTriage(record: MorningTriageRecord) {
+    if (this.state.morningTriage[record.day]) return;
+    const morningTriage = { ...this.state.morningTriage, [record.day]: record };
+    for (const old of Object.keys(morningTriage).sort().slice(0, Math.max(0, Object.keys(morningTriage).length - MAX_MORNING_TRIAGE_DAYS))) delete morningTriage[old];
+    this.set({ ...this.state, morningTriage });
+  }
+
+  /** F2 — business days a block may last before it is overdue (1–30). */
+  setBlockerSla(days: number) {
+    this.set({ ...this.state, blockerSlaBusinessDays: asBlockerSla(Math.round(days)) });
+  }
+
+  /** F4 — write-back settings (validated the same way as on load). */
+  setJiraWriteBackSettings(patch: Partial<JiraWriteBackSettings>) {
+    this.set({ ...this.state, jiraWriteBack: asJiraWriteBackSettings({ ...this.state.jiraWriteBack, ...patch }) });
+  }
+
+  /** F4 — every Jira write attempt is recorded, success or failure. */
+  recordJiraWrite(entry: Omit<JiraWriteLogEntry, "id" | "at"> & { at?: string }) {
+    const at = entry.at ?? new Date().toISOString();
+    const record: JiraWriteLogEntry = { ...entry, at, id: `jira-write-${at}-${entry.ticketKey}-${entry.kind}` };
+    this.set({ ...this.state, jiraWriteLog: [...this.state.jiraWriteLog, record].slice(-MAX_JIRA_WRITE_LOG) });
+  }
+
   /** D4 — "Replied": the mention leaves "awaiting my reply". `at` injectable for tests. */
   markMentionReplied(commentId: string, issueKey: string, at: string = new Date().toISOString()) {
     this.set({ ...this.state, mentionReplies: { ...this.state.mentionReplies, [commentId]: { commentId, issueKey, repliedAt: at, source: "manual" } } });
@@ -1601,6 +1798,7 @@ export class CommandCenterStore {
       today: toLocalIso(now),
       personalPlan: this.state.personalPlan,
       review: this.computeDailyReview(now),
+      ...(this.state.features.blockerFollowUp ? { blockerSlaBusinessDays: this.state.blockerSlaBusinessDays } : {}),
     });
   }
 
@@ -1641,41 +1839,7 @@ export class CommandCenterStore {
    *  `personalIdentity.displayName` via the same rule setPersonalIdentity() already enforces,
    *  rather than being set independently and risking the two diverging. */
   applySyncedAppState(synced: SyncedAppState) {
-    this.set({
-      ...this.state,
-      personalIdentity: synced.personalIdentity,
-      ownerName: synced.personalIdentity?.displayName,
-      jiraWorkRelevancePolicy: synced.jiraWorkRelevancePolicy,
-      attentionState: synced.attentionState,
-      data: { ...this.state.data, decisions: synced.decisions, actions: synced.actionPlanState.actions },
-      personalPlan: synced.actionPlanState.personalPlan,
-      memoryEvents: synced.memoryEvents.slice(-MAX_MEMORY_EVENTS),
-      dailyReports: synced.dailyReports,
-      // A1 — every execution-state field is optional on a synced blob (pre-A1 writers never
-      // sent them): absent means "keep local", never "clear". The synced ticketWorkStates (or,
-      // from a pre-TicketWorkState writer, its legacy maps) are folded into the canonical
-      // state and the deprecated maps re-derived from it.
-      ...ticketStateFromLegacy(
-        synced.ticketWorkStates ? asTicketWorkStates(synced.ticketWorkStates) : this.state.ticketWorkStates,
-        {
-          dailyCommandCompletions: synced.dailyCommandCompletions ?? {},
-          dailyCommandSkips: synced.dailyCommandSkips ?? {},
-          dailyCommandBlocks: synced.dailyCommandBlocks ?? {},
-          dailyCommandTombstones: synced.dailyCommandTombstones ?? this.state.dailyCommandTombstones,
-        },
-        synced.actionPlanState.personalPlan,
-        undefined
-      ),
-      syncLog: synced.syncLog ?? this.state.syncLog,
-      dailyReviewLastVisitAt: synced.dailyReviewLastVisitAt ?? this.state.dailyReviewLastVisitAt,
-      dailyReviewAcks: synced.dailyReviewAcks ?? this.state.dailyReviewAcks,
-      dailyReviewBaselineAt: synced.dailyReviewBaselineAt ?? this.state.dailyReviewBaselineAt,
-      mentionReplies: synced.mentionReplies ? asMentionReplies(synced.mentionReplies) : this.state.mentionReplies,
-      showAdvancedSettings: synced.uiPreferences.showAdvancedSettings,
-      myActionItemsOnly: synced.uiPreferences.myActionItemsOnly,
-      jiraProjectScope: synced.uiPreferences.jiraProjectScope,
-      lastAppStateSyncIso: synced.updatedAtIso,
-    });
+    this.set({ ...applySyncedSlice(this.state, synced), lastAppStateSyncIso: synced.updatedAtIso });
   }
 
   /** Records that this device's local synced slice is now known to match the server as of
@@ -2006,6 +2170,10 @@ export class CommandCenterStore {
     // A4 — a skipped/blocked ticket Jira has since closed (Done / COMPLETED) leaves the
     // Skipped/Blocked lists on its own and lands in Completed history, source "jira", keeping
     // the skip/block it replaced. Never the reverse: a Jira reopen does not un-complete it.
+    // F3 — mentions I've since answered in Jira are recorded as replied (source "jira").
+    const myTicketActivity = mergeMyTicketActivity(this.state.myTicketActivity, result.myActivity);
+    const autoReplies = this.state.features.mentionReplyTracking ? detectRepliedMentions(mergedMentionEvents, myTicketActivity, this.state.mentionReplies) : {};
+
     const jiraClosed = closePausedTicketsFinishedInJira(this.state.ticketWorkStates, merged.workItems, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), observedAt, getTodayIso());
 
     this.set({
@@ -2027,7 +2195,8 @@ export class CommandCenterStore {
       syncLog: [...this.state.syncLog, { startedAt, completedAt: observedAt, recordsCreated: created, recordsUpdated: updated, newTicketKeys }].slice(-MAX_SYNC_LOG),
       knownTicketFirstSeen: capKnownTickets(knownFirstSeen),
       dailyReviewBaselineAt,
-      myTicketActivity: mergeMyTicketActivity(this.state.myTicketActivity, result.myActivity),
+      myTicketActivity,
+      ...(Object.keys(autoReplies).length > 0 ? { mentionReplies: { ...this.state.mentionReplies, ...autoReplies } } : {}),
       dailySyncSummary: this.state.features.syncHistory
         ? rollDailySyncSummary(this.state.dailySyncSummary, getTodayIso(), {
             at: observedAt,
@@ -2526,17 +2695,19 @@ export class CommandCenterStore {
 
   /** Focus Session status change. A plan item about a ticket goes through setTicketStatus (so
    *  the ticket — and every list showing it — moves with it; the plan item follows as a linked
-   *  record); a rejected ticket transition (e.g. the ticket is already DONE) changes nothing.
-   *  A ticketless plan item keeps its own status. The FOCUS_* event carries the ticketKey so
-   *  reports merge it with the TICKET_* event into one line. */
-  private setFocusStatus(id: string, status: PersonalPlanItemStatus, kind: "FOCUS_STARTED" | "FOCUS_COMPLETED" | "FOCUS_BLOCKED" | "FOCUS_SKIPPED", today: string, ticketOpts: { reason?: string } = {}) {
+   *  record); a rejected ticket transition (e.g. the ticket is already DONE) changes nothing —
+   *  no ticket write, no plan-item write, no event — and is reported back (E2) so the Focus
+   *  Session never shows an outcome the store refused. A ticketless plan item keeps its own
+   *  status. The FOCUS_* event carries the ticketKey so reports merge it with the TICKET_*
+   *  event into one line. */
+  private setFocusStatus(id: string, status: PersonalPlanItemStatus, kind: "FOCUS_STARTED" | "FOCUS_COMPLETED" | "FOCUS_BLOCKED" | "FOCUS_SKIPPED", today: string, ticketOpts: { reason?: string } = {}): FocusItemResult {
     const item = this.state.personalPlan.find((p) => p.id === id);
-    if (!item) return;
+    if (!item) return { ok: false, reason: "not-found" };
     const ticketKey = ticketKeyForPlanItem(item, this.state.data);
     if (ticketKey) {
       const to: TicketWorkStatus = status === "completed" ? "DONE" : status === "blocked" ? "BLOCKED" : status === "skipped" ? "SKIPPED" : "IN_PROGRESS";
-      const current = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
-      if (!canTransition(current, to)) return;
+      const rejected = this.focusTransitionRejection(ticketKey, to);
+      if (rejected) return rejected;
       this.setTicketStatus(ticketKey, to, { surface: "focus-session", reason: ticketOpts.reason });
       // The plan item may be from an earlier day (not touched by the linked-records rule), so
       // make sure THIS one reflects the session.
@@ -2551,26 +2722,67 @@ export class CommandCenterStore {
     // which ticket" discipline as reportContextForDecision above — no ticketKey is attempted.
     const projectName = item.snapshot?.projectId ? this.state.data.projects.find((p) => p.id === item.snapshot!.projectId)?.name : undefined;
     this.appendMemoryEvent({ kind, title: `Focus ${status}: ${item.sourceType}:${item.sourceId}`, impact: `Planned for ${item.plannedDate}.`, evidence: [], projectId: item.snapshot?.projectId, projectName, ...(ticketKey ? { ticketKey } : {}) });
+    return { ok: true };
+  }
+
+  /** E2 — the rejection a Focus Session shows when the ticket can't make this move (the ticket
+   *  transition rules themselves live in ticket-work-state.ts and are not changed here). */
+  private focusTransitionRejection(ticketKey: string, to: TicketWorkStatus): FocusItemRejection | null {
+    const current = ticketStatusOf(this.state.ticketWorkStates, ticketKey);
+    if (canTransition(current, to)) return null;
+    const record = this.state.ticketWorkStates[ticketKey];
+    const last = record?.history[record.history.length - 1];
+    return { ok: false, reason: "transition-rejected", current, ticketKey, ...(record?.updatedAt ? { since: record.updatedAt } : {}), ...(last ? { surface: last.surface } : {}) };
   }
 
   /** §16, §18 — Focus Session lifecycle. These are personal execution states only — they
-   *  never alter Jira status, Risk status, or auto-advance Decision status (§18). */
-  startFocusItem(id: string, today: string) {
-    this.setFocusStatus(id, "in-progress", "FOCUS_STARTED", today);
-    this.bumpUsage(USAGE_KEYS.FOCUS_STARTED);
+   *  never alter Jira status, Risk status, or auto-advance Decision status (§18).
+   *  E2 — each returns whether the store accepted it; the Focus Session changes its own state
+   *  only on `{ ok: true }`. */
+  startFocusItem(id: string, today: string): FocusItemResult {
+    const result = this.setFocusStatus(id, "in-progress", "FOCUS_STARTED", today);
+    if (result.ok) this.bumpUsage(USAGE_KEYS.FOCUS_STARTED);
+    return result;
   }
-  completeFocusItem(id: string, today: string, note?: string) {
+  completeFocusItem(id: string, today: string, note?: string): FocusItemResult {
+    const rejected = this.focusItemRejection(id, "DONE");
+    if (rejected) return rejected;
     if (note) this.updatePersonalPlanItem(id, { note });
-    this.setFocusStatus(id, "completed", "FOCUS_COMPLETED", today);
+    return this.setFocusStatus(id, "completed", "FOCUS_COMPLETED", today);
   }
   /** V2.0 §7 — blockedReason/blockedNote are optional capture from the Focus Session
-   *  "Blocked" flow; never invented when the user skips the capture step. */
-  blockFocusItem(id: string, today: string, blockedReason?: string, blockedNote?: string) {
-    this.setFocusStatus(id, "blocked", "FOCUS_BLOCKED", today, { reason: [blockedReason, blockedNote].filter(Boolean).join(" — ") || undefined });
-    if (blockedReason || blockedNote) this.updatePersonalPlanItem(id, { blockedReason, blockedNote });
+   *  "Blocked" flow; never invented when the user skips the capture step, and never written
+   *  when the block itself was rejected (E2). */
+  blockFocusItem(id: string, today: string, blockedReason?: string, blockedNote?: string): FocusItemResult {
+    const result = this.setFocusStatus(id, "blocked", "FOCUS_BLOCKED", today, { reason: [blockedReason, blockedNote].filter(Boolean).join(" — ") || undefined });
+    if (result.ok && (blockedReason || blockedNote)) this.updatePersonalPlanItem(id, { blockedReason, blockedNote });
+    return result;
   }
-  skipFocusItem(id: string, today: string) {
-    this.setFocusStatus(id, "skipped", "FOCUS_SKIPPED", today);
+  /** E3 — `reason` is one of the same SKIP_REASONS TaskRow offers (optional). */
+  skipFocusItem(id: string, today: string, reason?: SkipReason): FocusItemResult {
+    return this.setFocusStatus(id, "skipped", "FOCUS_SKIPPED", today, { reason });
+  }
+  /** E3 — Focus Session "Defer": same as My Day's Defer (deferPersonalPlanItem) — a ticket goes
+   *  DEFERRED until `until` (default tomorrow) and comes back to Today on that date — but
+   *  reports a rejection instead of silently doing nothing. */
+  deferFocusItem(id: string, until?: string): FocusItemResult {
+    const rejected = this.focusItemRejection(id, "DEFERRED");
+    if (rejected) return rejected;
+    const item = this.state.personalPlan.find((p) => p.id === id);
+    if (!item) return { ok: false, reason: "not-found" };
+    const date = until ?? addDays(getTodayIso(), 1);
+    const ticketKey = ticketKeyForPlanItem(item, this.state.data);
+    if (ticketKey) this.deferTicket(ticketKey, date, undefined, "focus-session");
+    else this.updatePersonalPlanItem(id, { status: "deferred", deferredUntil: date });
+    return { ok: true };
+  }
+
+  /** The rejection for a plan item's ticket moving to `to`, or null (ticketless / allowed).
+   *  Public so the Focus Session can check before opening a flow (e.g. Decision Assistant). */
+  focusItemRejection(id: string, to: TicketWorkStatus): FocusItemRejection | null {
+    const item = this.state.personalPlan.find((p) => p.id === id);
+    const ticketKey = item ? ticketKeyForPlanItem(item, this.state.data) : undefined;
+    return ticketKey ? this.focusTransitionRejection(ticketKey, to) : null;
   }
 
   /** §22 — a single, low-frequency "the user actually reviewed today's focus" event,
@@ -2621,6 +2833,8 @@ export class CommandCenterStore {
       generatedAt: new Date().toISOString(),
       events: this.state.memoryEvents.filter((e) => e.date === dateIso).map((e) => ({ ...e })),
       ...(standup ? { standup } : {}),
+      // E4 — a server snapshot already merged for this day is kept across regeneration.
+      ...(existing?.server ? { server: existing.server } : {}),
     };
     const dailyReports: Record<string, DailyReportSnapshot> = { ...this.state.dailyReports, [dateIso]: snapshot };
     const overflow = Object.keys(dailyReports).length - MAX_DAILY_REPORTS;
@@ -2629,6 +2843,13 @@ export class CommandCenterStore {
     }
     this.set({ ...this.state, dailyReports });
     return snapshot;
+  }
+
+  /** E4 — folds the cron-written server snapshots into dailyReports (server-daily-report.ts
+   *  mergeServerDailyReports: client data wins for in-app sections). No write when unchanged. */
+  mergeServerDailyReports(server: Record<string, ServerDailyStandup>) {
+    const dailyReports = mergeServerDailyReports(this.state.dailyReports, server);
+    if (dailyReports !== this.state.dailyReports) this.set({ ...this.state, dailyReports });
   }
 
   // ===== V2.2 — Delivery Artifacts (§16) =====

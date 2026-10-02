@@ -1,6 +1,6 @@
 {
   "name": "ba-po-pm-command-center",
-  "version": "0.1.0",
+  "version": "2.34.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "tsx scripts/command-center-test.mts"
+    "test": "tsx scripts/tests/run.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",

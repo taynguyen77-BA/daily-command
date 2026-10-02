@@ -19,6 +19,7 @@ export const SHORT_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>([
   "analyzeActionOutcomes",
   "generateEndOfDaySummary",
   "generateDailyGuidance",
+  "polishReportSummary",
 ]);
 
 export interface AiModelEnv {

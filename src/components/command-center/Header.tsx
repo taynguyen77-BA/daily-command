@@ -1,7 +1,11 @@
 "use client";
 
+import { useEffect } from "react";
 import Link from "next/link";
 import { useCommandCenter } from "./use-command-center";
+import { BackupReminderBar } from "./BackupReminder";
+import { JiraWriteBackPrompt } from "./JiraWriteBackPrompt";
+import { ensurePersistentStorage } from "@/lib/command-center/storage-persistence";
 import { computeFreshness, FRESHNESS_LABEL } from "@/lib/command-center/freshness";
 import { JIRA_ERROR_HELP } from "@/lib/command-center/jira/error-help";
 
@@ -53,7 +57,7 @@ function DataSourceBadge() {
 
 /** Exported so the offline test suite can verify this arithmetic directly (Header itself
  *  can't be rendered there — its state comes from useSyncExternalStore's server snapshot, a
- *  Node/no-DOM environment always takes the SSR branch — see scripts/command-center-test.mts's
+ *  Node/no-DOM environment always takes the SSR branch — see scripts/tests/'s
  *  V2.16 section). */
 export function daysStale(lastSyncCompletedAtIso: string | undefined, nowMs: number = Date.now()): number | undefined {
   if (!lastSyncCompletedAtIso) return undefined;
@@ -102,6 +106,10 @@ function SyncFailedBanner() {
 }
 
 export function Header() {
+  // E1 — on first load, ask the browser to keep this origin's storage (shown in Data & Settings).
+  useEffect(() => {
+    void ensurePersistentStorage();
+  }, []);
   const today = new Date().toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
   return (
     <>
@@ -121,6 +129,8 @@ export function Header() {
         <DataSourceBadge />
       </header>
       <SyncFailedBanner />
+      <BackupReminderBar />
+      <JiraWriteBackPrompt />
     </>
   );
 }

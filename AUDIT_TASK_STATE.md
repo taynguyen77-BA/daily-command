@@ -120,7 +120,7 @@ and handled in `ticket-work-state.ts`.
 
 ### 2.2 Transition table
 
-There are two rules. Every pair is tested in `scripts/command-center-test.mts`, group
+There are two rules. Every pair is tested in `scripts/tests/`, group
 `[TicketWorkState]`.
 
 - From any status **other than DONE**, every target is allowed. Same-status writes update

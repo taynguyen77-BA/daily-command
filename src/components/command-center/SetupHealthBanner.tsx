@@ -32,6 +32,8 @@ import { checkSlackNotifyStatus, type SlackNotifyStatus } from "@/lib/command-ce
 import { checkAppStateSyncStatus } from "@/lib/command-center/app-state-sync";
 import { isDevicePaired } from "@/lib/command-center/device-pairing";
 import { checkAiModelStatus } from "@/lib/command-center/ai/claude-provider";
+import { isOlderThanDays } from "@/lib/command-center/backup";
+import { useCrossDeviceSyncActive } from "./BackupReminder";
 import type { CommandCenterData, DataSourceType, PersonalIdentity } from "@/lib/command-center/types";
 
 /** C4 — additional, independently-loaded facts. Every field optional: undefined/null means
@@ -44,6 +46,9 @@ export interface SetupHealthExtras {
   sprintFieldMapped?: boolean;
   /** The AI endpoint's status (null = still loading / unreachable). */
   ai?: { available: boolean; modelFromEnv?: boolean; fastModelFromEnv?: boolean; model?: string; fastModel?: string } | null;
+  /** E1 — last backup download and whether cross-device sync (configured + paired) is active
+   *  (null = still loading). */
+  backup?: { lastBackupAt?: string; crossDeviceActive: boolean | null; isDemo: boolean; now: Date };
 }
 
 export interface SetupHealthRow {
@@ -105,6 +110,15 @@ export function computeSetupHealthRows(
     rows.push({ id: "ai-model", text: `AI model not set explicitly: ${missing.join(", ")} — set it on the server to pin which model answers.` });
   }
 
+  // E1 — the only copy of this data is this browser's: say so once a week has passed.
+  const b = extras.backup;
+  if (b && b.crossDeviceActive === false && !b.isDemo && isOlderThanDays(b.lastBackupAt, b.now)) {
+    rows.push({
+      id: "backup",
+      text: `No backup in the last 7 days and no cross-device sync — ${b.lastBackupAt ? `last backup ${new Date(b.lastBackupAt).toLocaleDateString()}` : "you have never downloaded a backup"}; clearing this browser's data would lose your ticket statuses, reports and history. Export a backup in Data & Settings.`,
+    });
+  }
+
   if (notifyStatus && !notifyStatus.serverSideNotifyActive) {
     rows.push({
       id: "notify",
@@ -155,12 +169,15 @@ export function SetupHealthBanner() {
     };
   }, [enabledOrEverPaired]);
 
+  const crossDeviceActive = useCrossDeviceSyncActive();
+
   if (!state.loaded) return null;
 
   const rows = computeSetupHealthRows(state.personalIdentity, state.dataSource, filteredData, workRelevanceIndex, notifyStatus, {
     crossDevice: { enabledOrEverPaired, status: crossDeviceStatus },
     sprintFieldMapped: !!state.jiraSprintFieldId,
     ai,
+    backup: { lastBackupAt: state.lastBackupAt, crossDeviceActive, isDemo: state.isDemo, now: new Date() },
   });
   if (rows.length === 0) return null;
 

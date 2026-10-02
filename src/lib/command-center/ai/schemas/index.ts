@@ -149,6 +149,8 @@ export const aiTaskSchema = z.enum([
   "generateDailyGuidance",
   // V2.2 §8
   "generateCommunicationArtifact",
+  // V2.34 F5 — optional rewording of a deterministic report summary
+  "polishReportSummary",
 ]);
 export type AITask = z.infer<typeof aiTaskSchema>;
 

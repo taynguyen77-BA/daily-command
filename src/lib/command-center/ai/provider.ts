@@ -42,6 +42,7 @@ import { dailyGuidancePrompt } from "./prompts/daily-guidance";
 import { decisionConflictPrompt } from "./prompts/decision-conflict";
 import { decisionOptionsPrompt } from "./prompts/decision-options";
 import { endOfDayPrompt } from "./prompts/end-of-day";
+import { reportSummaryPolishPrompt } from "./prompts/report-summary-polish";
 import { outcomeInterpretationPrompt } from "./prompts/outcome-interpretation";
 import { priorityAnalysisPrompt } from "./prompts/priority-analysis";
 import { proactiveAssessmentPrompt } from "./prompts/proactive-assessment";
@@ -84,6 +85,8 @@ export interface AIProvider {
   // V2.2 §8 — COMMUNICATION_ARTIFACT. Drafts wording for a whole delivery-artifact section
   // (see communicate.ts) — strictly on-demand from the Artifact Editor, never automatic.
   generateCommunicationArtifact(type: ArtifactType, facts: string[], evidenceStrings: string[]): Promise<CommunicationArtifactResult>;
+  /** V2.34 F5 — rewording only; callers verify numbers and ticket keys are unchanged. */
+  polishReportSummary(summary: string): Promise<string>;
 }
 
 export interface CommunicationArtifactResult {
@@ -148,6 +151,12 @@ export class MockAIProvider implements AIProvider {
   async generateCommunication(item: WorkItem, audience: string, why: string): Promise<string> {
     void communicationPrompt(item, audience, why);
     return `Hi team, could you please help with ${item.key} — ${item.title}? ${why} Any update or ETA would help us keep this on track.`;
+  }
+
+  /** V2.34 F5 — the Mock never rewrites: the deterministic summary is returned unchanged. */
+  async polishReportSummary(summary: string): Promise<string> {
+    void reportSummaryPolishPrompt(summary);
+    return summary;
   }
 
   async generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[]): Promise<string> {

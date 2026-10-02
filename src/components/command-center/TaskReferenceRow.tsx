@@ -22,13 +22,17 @@ import React, { useState, useSyncExternalStore } from "react";
 import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
 import { formatExecutionRecord, resolveTicketExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
 import { formatRelativeDateTime } from "@/lib/command-center/relative-time";
-import { BLOCK_REASON_SUGGESTIONS, type FocusSignal, type SkipReason, type TaskReactivation, type TicketStatusSurface, type WorkItem } from "@/lib/command-center/types";
+import { SKIP_REASONS, type FocusSignal, type SkipReason, type TaskReactivation, type TicketStatusSurface, type WorkItem } from "@/lib/command-center/types";
+import { BlockReasonField, SkipReasonSelect } from "./ReasonPickers";
 import { FirstSeenBadge, TicketLink } from "./TicketLink";
 import { FollowUpDraft } from "./FollowUpDraft";
+import { AskFollowUp } from "./AskFollowUp";
+import { blockedAgeBusinessDays, isBlockerOverdue } from "@/lib/command-center/blocker-followup";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
 
-export const SKIP_REASONS: SkipReason[] = ["Team is handling it", "Not my action", "Waiting on another team", "Not relevant right now", "Other"];
+/** Re-exported for existing importers; the list itself lives in types.ts (E3). */
+export { SKIP_REASONS };
 
 export interface TaskRowActions {
   onComplete: () => void;
@@ -159,11 +163,13 @@ export function TaskReferenceRowView({
   ticketScoped = false,
   as = "li",
   followUpRows,
+  blocker,
   showPingOn = false,
   hideActions,
   signals,
   newReason,
   stacked = false,
+  initialPicker = null,
 }: {
   ticketKey: string;
   url?: string;
@@ -184,6 +190,9 @@ export function TaskReferenceRowView({
   as?: "li" | "div";
   /** C1 — blocked rows: the "Draft follow-up" message rows (who it waits on). */
   followUpRows?: NeedsFromOthersRow[];
+  /** F2 — blocked rows: age in business days against the SLA; when set, the follow-up is the
+   *  per-person "Ask" (copy / Slack after confirm) instead of the copy-only draft. */
+  blocker?: { ageBusinessDays: number; slaBusinessDays: number };
   /** D5 — offer "Ping on <date>" in the Block picker (Follow-up reminders feature). */
   showPingOn?: boolean;
   /** The ONLY way a surface hides actions (documented in AUDIT_TASK_STATE.md §2.6). */
@@ -194,11 +203,13 @@ export function TaskReferenceRowView({
   newReason?: string;
   /** Layout only: actions always sit under the ticket info (for rows inside narrow cards). */
   stacked?: boolean;
+  /** Which picker starts open (render tests compare its options with Focus Session's). */
+  initialPicker?: "skip" | "block" | "defer" | null;
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
   const hidden = new Set(hideActions ?? []);
-  const [picker, setPicker] = useState<"skip" | "block" | "defer" | null>(null);
+  const [picker, setPicker] = useState<"skip" | "block" | "defer" | null>(initialPicker);
   const [skipReason, setSkipReason] = useState<SkipReason | "">("");
   const [blockReason, setBlockReason] = useState("");
   const [revisitOn, setRevisitOn] = useState("");
@@ -255,7 +266,13 @@ export function TaskReferenceRowView({
         )}
         {newReason && <p className="text-xs text-accent2">New: {newReason}</p>}
         {caption && <p className="text-xs text-text3">{caption}</p>}
-        {k === "blocked" && followUpRows && <FollowUpDraft rows={followUpRows} />}
+        {k === "blocked" && blocker && (
+          <p data-blocker-age className={`text-xs ${isBlockerOverdue(blocker.ageBusinessDays, blocker.slaBusinessDays) ? "font-medium text-red" : "text-text3"}`}>
+            Blocked {blocker.ageBusinessDays} business day{blocker.ageBusinessDays === 1 ? "" : "s"}
+            {isBlockerOverdue(blocker.ageBusinessDays, blocker.slaBusinessDays) ? ` — over the ${blocker.slaBusinessDays}-day SLA` : ` (SLA ${blocker.slaBusinessDays})`}
+          </p>
+        )}
+        {k === "blocked" && followUpRows && (blocker ? <AskFollowUp rows={followUpRows} /> : <FollowUpDraft rows={followUpRows} />)}
       </div>
 
       {actions && k !== "done-in-jira" && (
@@ -317,19 +334,7 @@ export function TaskReferenceRowView({
           )}
           {picker === "skip" && (
             <>
-              <select
-                value={skipReason}
-                onChange={(e) => setSkipReason(e.target.value as SkipReason | "")}
-                aria-label="Skip reason (optional)"
-                className={FIELD}
-              >
-                <option value="">No reason</option>
-                {SKIP_REASONS.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
+              <SkipReasonSelect value={skipReason} onChange={setSkipReason} className={FIELD} />
               {revisitInput}
               <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); close(); }} className={BTN}>
                 {L.skip}
@@ -341,20 +346,7 @@ export function TaskReferenceRowView({
           )}
           {picker === "block" && (
             <>
-              <input
-                value={blockReason}
-                onChange={(e) => setBlockReason(e.target.value)}
-                list={`block-reasons-${ticketKey}`}
-                placeholder="Blocked on… (optional)"
-                aria-label="Block reason (optional)"
-                maxLength={200}
-                className={`w-44 ${FIELD}`}
-              />
-              <datalist id={`block-reasons-${ticketKey}`}>
-                {BLOCK_REASON_SUGGESTIONS.map((r) => (
-                  <option key={r} value={r} />
-                ))}
-              </datalist>
+              <BlockReasonField listId={`block-reasons-${ticketKey}`} value={blockReason} onChange={setBlockReason} className={`w-44 ${FIELD}`} />
               {revisitInput}
               {showPingOn && (
                 <input
@@ -467,6 +459,8 @@ export function TaskReferenceRow({
     followUpRows = needsFromOthersForBlockedTicket({ key, title: w?.title ?? workItem?.title ?? title, dueDate: w?.dueDate }, execution.reason, deps);
   }
   const jira = workItem ?? w;
+  const blockedAt = execution.kind === "blocked" ? state.ticketWorkStates[key]?.updatedAt : undefined;
+  const age = state.features.blockerFollowUp ? blockedAgeBusinessDays(blockedAt, todayLocalIso()) : undefined;
   return (
     <TaskReferenceRowView
       ticketKey={key}
@@ -476,6 +470,7 @@ export function TaskReferenceRow({
       firstSeenAt={jira?.firstSeenAt}
       execution={execution}
       followUpRows={followUpRows}
+      blocker={age !== undefined ? { ageBusinessDays: age, slaBusinessDays: state.blockerSlaBusinessDays } : undefined}
       showPingOn={state.features.followUpReminders}
       reactivation={reactivation}
       actions={readOnly ? undefined : storeActionsFor(key, surface)}

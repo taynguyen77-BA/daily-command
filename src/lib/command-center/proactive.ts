@@ -8,7 +8,7 @@ import { detectNewAssignments } from "./assignment-detection";
 import { getAssignedWorkItems } from "./assigned-work";
 import { buildAttentionQueue } from "./attention-queue";
 import { computeStaleAssignedTickets, DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS, type StaleAssignedTicketThresholds } from "./personal-staleness";
-import { resolveAttentionEntity } from "./personal-focus";
+import { resolveAttentionEntity, workItemByIdIn } from "./personal-focus";
 import { classifyPersonalRelation, type PersonalRelationIdentity } from "./personal-relation";
 import { computeClientAttentionMap } from "./client-attention-map";
 import { computeDecisionEffectiveness } from "./decision-effectiveness";
@@ -223,7 +223,7 @@ export function computeProactiveIntelligence(
     // forceResolved above — a different, lifecycle-based mechanism, not this exclusion). Not
     // extended to ASSIGNMENT — that stays gated exactly as before (V2.12 Task 1's territory).
     if (workRelevanceIndex && entity.workItemIds.length > 0 && item.category !== "MENTION") {
-      const relatedItems = entity.workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
+      const relatedItems = entity.workItemIds.map((id) => workItemByIdIn(data, id)).filter((w): w is WorkItem => !!w);
       const relevances = relatedItems.map((w) => resolveWorkRelevance(w, workRelevanceIndex));
       const stillLive = relevances.some((r) => r !== "COMPLETED" && r !== "EXCLUDED");
       if (relatedItems.length > 0 && !stillLive) continue;
@@ -241,7 +241,7 @@ export function computeProactiveIntelligence(
     // explicit "active Attention Queue" requirement.
     if (item.category !== "MENTION" && entity.workItemIds.length > 0 && dailyCommandSkippedWorkItemIds && entity.workItemIds.every((id) => dailyCommandSkippedWorkItemIds.has(id))) continue;
     if (entity.workItemIds.length === 1) {
-      const workItem = data.workItems.find((w) => w.id === entity.workItemIds[0]);
+      const workItem = workItemByIdIn(data, entity.workItemIds[0]);
       if (workItem) {
         item.ticketKey = workItem.key;
         item.ticketUrl = workItem.sourceUrl;

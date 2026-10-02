@@ -52,6 +52,8 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
   // V2.2 §8 — artifact drafts are keyed by evidenceVersion like every other cached call;
   // duration matches the other narrative-drafting tasks above.
   generateCommunicationArtifact: entry("generateCommunicationArtifact"),
+  // V2.34 F5 — on-demand "Polish with AI" on a report summary.
+  polishReportSummary: entry("polishReportSummary"),
 };
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {

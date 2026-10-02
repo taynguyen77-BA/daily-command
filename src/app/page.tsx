@@ -79,9 +79,29 @@ export default function CommandCenterPage() {
   const stalledLoops = proactive?.deliveryLoops.filter((l) => l.health === "STALLED" || l.health === "AT_RISK").slice(0, 4) ?? [];
   const decisionsNeedingReview = proactive?.decisionRadar.slice(0, 4) ?? [];
 
+  // F1 — compact mode: KPI strip + My Work summary + Release, toggled from this header.
+  const compactToggle = (
+    <label className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-border px-2.5 py-1.5 text-xs text-text2 hover:border-border2" data-compact-toggle>
+      <input type="checkbox" checked={state.commandCenterCompact} onChange={(e) => store.setCommandCenterCompact(e.target.checked)} className="h-3.5 w-3.5 accent-accent" />
+      Compact
+    </label>
+  );
+  if (state.commandCenterCompact) {
+    return (
+      <div className="space-y-6 pb-16" data-command-center-compact>
+        <SetupHealthBanner />
+        <SectionHeading level="page" title="Command Center" subtitle="Compact view — the numbers, your work, and release health." action={compactToggle} />
+        <KpiStrip kpis={derived.kpis} />
+        <MyWorkSummary />
+        <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-8 pb-16">
       <SetupHealthBanner />
+      <SectionHeading level="page" title="Command Center" action={compactToggle} />
 
       {state.isDemo && (
         <div className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent2">

@@ -14,6 +14,7 @@ import {
   formatTicketLine,
   mondayOf,
   renderDailyReport,
+  missingStandupNote,
   renderWeeklyReport,
   type ReportFormat,
   type ReportTicket,
@@ -21,6 +22,8 @@ import {
 } from "@/lib/command-center/reports";
 import { emailDraftUrl, slackReportText } from "@/lib/command-center/report-export";
 import { sendReportToSlack } from "@/lib/command-center/notify-client";
+import { OverdueBlockersCallout, ReportSummaryParagraph } from "@/components/command-center/ReportSummary";
+import type { NeedsDecisionGroup } from "@/lib/command-center/report-summary";
 
 const FORMATS: { format: ReportFormat; label: string }[] = [
   { format: "markdown", label: "Copy Markdown" },
@@ -62,6 +65,26 @@ function Section({ title, tickets, showAssignee, empty, onReplied }: { title: st
         {title} ({tickets.length})
       </h3>
       <TicketList tickets={tickets} showAssignee={showAssignee} empty={empty} onReplied={onReplied} />
+    </div>
+  );
+}
+
+/** F5 — "Needs decision from": one line per person. */
+function NeedsDecision({ groups }: { groups: NeedsDecisionGroup[] }) {
+  return (
+    <div data-needs-decision>
+      <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Needs decision from ({groups.length})</h3>
+      {groups.length === 0 ? (
+        <p className="text-sm text-text3">Nobody — no open decisions.</p>
+      ) : (
+        <ul className="list-disc pl-5 text-sm text-text2">
+          {groups.map((g) => (
+            <li key={g.person}>
+              <span className="text-text">{g.person}</span>: {g.items.join("; ")}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -112,7 +135,9 @@ function CopyButtons({ render }: { render: (format: ReportFormat) => string }) {
 }
 
 export default function ReportsPage() {
-  const { state, store, today } = useCommandCenter();
+  const { state, store, today, derived } = useCommandCenter();
+  // F5 — an accepted "Polish with AI" summary, per report (cleared when the report changes).
+  const [polished, setPolished] = useState<Record<string, string>>({});
   const [tab, setTab] = useState<"daily" | "weekly">("daily");
   const [date, setDate] = useState(today);
   const [weekAnchor, setWeekAnchor] = useState(today);
@@ -124,9 +149,17 @@ export default function ReportsPage() {
   const liveStandup = useMemo(() => (state.loaded ? store.buildLiveStandup() : undefined), [state, store]);
   const daily = useMemo(() => {
     const isToday = date === today;
-    const snapshot = isToday ? { date, generatedAt: new Date().toISOString(), events: state.memoryEvents.filter((e) => e.date === date) } : state.dailyReports[date];
-    return { snapshot, view: buildDailyReportView(snapshot, date, identity, isToday ? liveStandup : undefined) };
-  }, [date, today, state.memoryEvents, state.dailyReports, identity, liveStandup]);
+    const server = state.dailyReports[date]?.server;
+    const snapshot = isToday ? { date, generatedAt: new Date().toISOString(), events: state.memoryEvents.filter((e) => e.date === date), ...(server ? { server } : {}) } : state.dailyReports[date];
+    // F2 / F5 — report extras when those features are on. Risks: live for today, the day's
+    // snapshot for a past day; decisions are only known "as of now", so today only.
+    const pastRisks = state.snapshotHistory.filter((x) => x.date === date).at(-1)?.risks;
+    const options = {
+      ...(state.features.blockerFollowUp ? { blockerSlaBusinessDays: state.blockerSlaBusinessDays } : {}),
+      ...(state.features.reportSummaries ? { summaries: { risks: isToday ? derived.risks : pastRisks, ...(isToday ? { decisions: state.data.decisions } : {}) } } : {}),
+    };
+    return { snapshot, view: buildDailyReportView(snapshot, date, identity, isToday ? liveStandup : undefined, options) };
+  }, [date, today, state.memoryEvents, state.dailyReports, identity, liveStandup, state.features.blockerFollowUp, state.features.reportSummaries, state.blockerSlaBusinessDays, state.snapshotHistory, state.data.decisions, derived.risks]);
 
   const weekly = useMemo(
     () =>
@@ -138,16 +171,26 @@ export default function ReportsPage() {
         identity,
         today,
         ...(liveStandup ? { liveStandup: { date: today, state: liveStandup } } : {}),
+        ...(state.features.reportSummaries ? { summaries: { risks: derived.risks, decisions: state.data.decisions } } : {}),
       }),
-    [weekAnchor, state.weeklyReportMode, state.dailyReports, groupBy, identity, liveStandup, daily.snapshot, date, today]
+    [weekAnchor, state.weeklyReportMode, state.dailyReports, groupBy, identity, liveStandup, daily.snapshot, date, today, state.features.reportSummaries, derived.risks, state.data.decisions]
   );
 
   if (!state.loaded) {
     return <EmptyState title="No data yet" description="Sync Jira or load the demo dataset to start producing reports." onLoadDemo={() => store.loadDemoData()} />;
   }
 
-  const v = daily.view;
-  const w = weekly;
+  const dailyKey = `daily:${daily.view.date}:${daily.view.summary ?? ""}`;
+  const weeklyKey = `weekly:${weekly.weekStart}:${weekly.summary ?? ""}`;
+  const v = polished[dailyKey] ? { ...daily.view, summary: polished[dailyKey] } : daily.view;
+  const w = polished[weeklyKey] ? { ...weekly, summary: polished[weeklyKey] } : weekly;
+  const setPolish = (key: string) => (text: string | undefined) =>
+    setPolished((p) => {
+      const next = { ...p };
+      if (text) next[key] = text;
+      else delete next[key];
+      return next;
+    });
   return (
     <div className="space-y-6 pb-16">
       <SectionHeading level="page" title="Reports" subtitle="Standup-ready daily and weekly reports — ticket lists with Jira links, ready to paste into Slack or an update." />
@@ -173,11 +216,15 @@ export default function ReportsPage() {
             <CopyButtons render={(format) => renderDailyReport(v, format, { includeTeam })} />
             {state.features.reportExport && <ShareButtons subject={`Daily Report — ${v.date}`} render={(format) => renderDailyReport(v, format, { includeTeam })} />}
           </div>
-          {!daily.snapshot && date !== today ? (
-            <p className="text-sm text-text3">No Daily Report was generated for {date}.</p>
+          {v.noData ? (
+            <p className="text-sm text-text3" data-report-no-data>
+              No data recorded for {date} — the app wasn&apos;t opened that day and no server snapshot was taken.
+            </p>
           ) : (
             <>
-              {!v.standupAvailable && <p className="text-xs text-text3">No standup snapshot was saved for this day — in progress / new / mentions are not available; blocked and skipped come from that day&apos;s recorded actions.</p>}
+              <OverdueBlockersCallout tickets={v.overdueBlockers} sla={v.slaBusinessDays} />
+              <ReportSummaryParagraph summary={daily.view.summary} polished={polished[dailyKey]} onPolished={setPolish(dailyKey)} />
+              {!v.standupAvailable && <p className="text-xs text-text3">{missingStandupNote(v)}</p>}
               {!v.identityConfigured && <p className="text-xs text-orange">Set your identity in Data &amp; Settings to tell your own Jira completions from the team&apos;s.</p>}
               <Section title="Done" tickets={v.doneMine} />
               <Section title="In progress / planned today" tickets={v.inProgress} />
@@ -190,6 +237,9 @@ export default function ReportsPage() {
                 onReplied={date === today && state.features.mentionReplyTracking ? (t) => t.mention && t.key && store.markMentionReplied(t.mention.commentId, t.key) : undefined}
               />
               {v.removedFromScope.length > 0 && <Section title="Removed from scope" tickets={v.removedFromScope} showAssignee />}
+              {v.openAssigned && v.openAssigned.length > 0 && <Section title="Open assigned (from Jira)" tickets={v.openAssigned} />}
+              {v.blockedAging && <Section title="Blocked aging" tickets={v.blockedAging} empty="Nothing blocked." />}
+              {v.needsDecisionFrom && <NeedsDecision groups={v.needsDecisionFrom} />}
               {v.decisions.length > 0 && (
                 <div>
                   <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-text3">Decisions ({v.decisions.length})</h3>
@@ -231,6 +281,7 @@ export default function ReportsPage() {
             <CopyButtons render={(format) => renderWeeklyReport(w, format, { includeTeam })} />
             {state.features.reportExport && <ShareButtons subject={`Weekly Report — ${w.weekStart} to ${w.weekEnd}`} render={(format) => renderWeeklyReport(w, format, { includeTeam })} />}
           </div>
+          <ReportSummaryParagraph summary={weekly.summary} polished={polished[weeklyKey]} onPolished={setPolish(weeklyKey)} />
           <p className="text-xs text-text3">
             Done {w.totals.doneMine} · New {w.totals.newReceived} · Blocked {w.totals.blocked} · Skipped {w.totals.skipped} · Decisions {w.totals.decisions}
             {includeTeam ? ` · Team done ${w.totals.teamDone}` : ""} · {w.reportedDays.length} day(s) with a report
@@ -253,6 +304,8 @@ export default function ReportsPage() {
           </div>
           <Section title={`Carried over${w.stateAsOf ? ` (as of ${w.stateAsOf})` : ""}`} tickets={w.carriedOver} />
           <Section title="Blockers" tickets={w.blockers} />
+          {w.blockedAging && <Section title="Blocked aging" tickets={w.blockedAging} empty="Nothing blocked." />}
+          {w.needsDecisionFrom && <NeedsDecision groups={w.needsDecisionFrom} />}
           <Section title="Skipped" tickets={w.skipped} />
           <Section title="New received this week" tickets={w.newReceived} />
           <div>
