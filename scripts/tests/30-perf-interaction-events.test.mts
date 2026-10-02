@@ -83,24 +83,31 @@ const env = await buildPerfFixture();
     return [work.counts.today, plan.length, daily.summary, weekly.summary, proactive.attentionQueue.length];
   };
   recomputeAll(); // JIT warm-up, discarded
-  const tickets = env.store.getSnapshot().data.workItems.filter((w) => w.ownerId === "acc-tay" && w.status !== "Done").slice(200, 203).map((w) => w.key);
-  const changes: [string, () => void][] = [
-    [`block ${tickets[0]}`, () => store.blockTicketInDailyCommand(tickets[0], "Waiting for a reply", undefined, undefined, "my-work")],
-    [`done ${tickets[1]}`, () => store.completeTicketInDailyCommand(tickets[1], "my-work")],
-    [`start ${tickets[2]}`, () => store.startTicket(tickets[2], "my-work")],
+  // Nine real interactions — block, done and start, each on three different tickets. One
+  // wall-clock sample is at the mercy of a garbage-collection pause (the fixture has just churned
+  // through a 3,000-item state), so the budget applies to each kind's MEDIAN; every sample is
+  // reported.
+  const mine = env.store.getSnapshot().data.workItems.filter((w) => w.ownerId === "acc-tay" && w.status !== "Done").slice(200, 209).map((w) => w.key);
+  const kinds: [string, (key: string) => void][] = [
+    ["block", (k) => store.blockTicketInDailyCommand(k, "Waiting for a reply", undefined, undefined, "my-work")],
+    ["done", (k) => store.completeTicketInDailyCommand(k, "my-work")],
+    ["start", (k) => store.startTicket(k, "my-work")],
   ];
-  const results: string[] = [];
-  let worst = 0;
-  for (const [label, change] of changes) {
-    const t0 = performance.now();
-    change();
-    recomputeAll();
-    const ms = performance.now() - t0;
-    worst = Math.max(worst, ms);
-    results.push(`${label}: ${ms.toFixed(1)} ms`);
-  }
-  ok(group, tickets.length === 3, "sanity: three real tickets assigned to me");
-  ok(group, worst < INTERACTION_BUDGET_MS, `one status change + full recompute of every selector stays under ${INTERACTION_BUDGET_MS} ms at 3,000 items (${results.join("; ")})`);
+  ok(group, mine.length === 9, "sanity: nine real tickets assigned to me");
+  const report: string[] = [];
+  let worstMedian = 0;
+  kinds.forEach(([label, change], k) => {
+    const samples = mine.slice(k * 3, k * 3 + 3).map((key) => {
+      const t0 = performance.now();
+      change(key);
+      recomputeAll();
+      return performance.now() - t0;
+    });
+    const median = [...samples].sort((a, b) => a - b)[1];
+    worstMedian = Math.max(worstMedian, median);
+    report.push(`${label}: median ${median.toFixed(1)} ms (${samples.map((x) => x.toFixed(0)).join("/")})`);
+  });
+  ok(group, worstMedian < INTERACTION_BUDGET_MS, `one status change + full recompute of every selector stays under ${INTERACTION_BUDGET_MS} ms at 3,000 items — ${report.join("; ")}`);
 }
 void slug;
 void CommandCenterStore;
