@@ -38,7 +38,6 @@ import type {
   AttentionSeverity,
   CommandCenterData,
   ContextSwitchWarning,
-  Decision,
   DeliveryLoop,
   FocusCategory,
   FocusOverload,

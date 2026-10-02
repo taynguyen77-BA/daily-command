@@ -28,6 +28,12 @@ const FILES = [
   "./17-focus-session-outcomes.test.mts",
   "./18-server-daily-reports.test.mts",
   "./19-security-and-docs.test.mts",
+  "./20-morning-mode.test.mts",
+  "./21-blocker-followup.test.mts",
+  "./22-mention-reply-detection.test.mts",
+  "./23-jira-write-back.test.mts",
+  "./24-report-summaries.test.mts",
+  "./25-performance-budget.test.mts",
 ];
 
 for (const file of FILES) await import(file);

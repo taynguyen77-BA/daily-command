@@ -8,9 +8,10 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useMyWork } from "./use-my-work";
 import { Panel, SectionHeading } from "./ui";
-import { addDays } from "@/lib/command-center/date-utils";
 import { TIME_BUDGET_LABELS, type TimeBudget } from "@/lib/command-center/action-plan";
 import {
+  applyMorningTriage,
+  applyRecheck,
   MORNING_KEYS,
   MORNING_STEPS,
   dueRechecks,
@@ -21,12 +22,13 @@ import {
   triageDoneLabel,
   type DueRecheck,
   type MorningStep,
+  type MorningTriageAction,
 } from "@/lib/command-center/morning-mode";
 
 const BUDGETS: TimeBudget[] = [15, 30, 60, 120, 480];
 const DEFAULT_BUDGET: TimeBudget = 30; // same default as the Action Plan page
 
-type Handled = "done" | "block" | "skip" | "defer" | "keep";
+type Handled = MorningTriageAction;
 const HANDLED_LABEL: Record<Handled, string> = { done: "Done", block: "Blocked", skip: "Skipped", defer: "Deferred to tomorrow", keep: "Kept for today" };
 
 export function MorningMode({ onExit }: { onExit: () => void }) {
@@ -65,11 +67,7 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
   const titleOf = (key: string) => filteredData.workItems.find((w) => w.key === key)?.title;
 
   function act(kind: Handled, ticketKey: string) {
-    if (kind === "done") store.completeTicketInDailyCommand(ticketKey, "my-work");
-    else if (kind === "block") store.blockTicketInDailyCommand(ticketKey, undefined, undefined, undefined, "my-work");
-    else if (kind === "skip") store.skipTicketInDailyCommand(ticketKey, undefined, undefined, "my-work");
-    else if (kind === "defer") store.deferTicket(ticketKey, addDays(today, 1), undefined, "my-work");
-    store.markDailyReviewSeen([ticketKey]); // handled → no longer "New"
+    applyMorningTriage(store, kind, ticketKey, today);
     if (!handled[ticketKey]) setHandledCount((n) => n + 1);
     setHandled((h) => ({ ...h, [ticketKey]: kind }));
     const nextOpen = triageKeys.findIndex((k, i) => i > triageKeys.indexOf(ticketKey) && !handled[k] && k !== ticketKey);
@@ -99,8 +97,7 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
   function recheck(r: DueRecheck, kind: "reactivate" | "unblock" | "keep") {
-    if (kind === "reactivate") store.reactivateSkippedTicket(r.ticketKey, "my-work");
-    if (kind === "unblock") store.unblockTicketInDailyCommand(r.ticketKey, "my-work");
+    applyRecheck(store, r, kind);
     if (!recheckDone[r.ticketKey]) setHandledCount((n) => n + 1);
     setRecheckDone((d) => ({ ...d, [r.ticketKey]: kind === "keep" ? `Still ${r.status.toLowerCase()}` : kind === "unblock" ? "Unblocked" : "Back to Today" }));
   }
@@ -108,7 +105,8 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
   // ----- Step 4: today's plan against the Action Plan budget -----
   const budget = state.timeBudgetMinutes ?? DEFAULT_BUDGET;
   const plan = useMemo(
-    () => state.personalPlan.filter((p) => p.plannedDate === today && p.status !== "completed" && p.status !== "skipped").sort((a, b) => a.position - b.position),
+    // Only what is still to do today: not done, skipped, blocked or deferred to another day.
+    () => state.personalPlan.filter((p) => p.plannedDate === today && (p.status === "planned" || p.status === "in-progress")).sort((a, b) => a.position - b.position),
     [state.personalPlan, today]
   );
   const planBudget = planAgainstBudget(plan.map((p) => ({ id: p.id, estimatedMinutes: p.estimatedMinutes })), budget);

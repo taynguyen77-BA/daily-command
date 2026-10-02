@@ -12,6 +12,8 @@
 // Pure: the component (MorningMode.tsx) owns focus/state and calls the store.
 
 import type { MorningTriageRecord, TicketWorkState } from "./types";
+import type { CommandCenterStore } from "./store";
+import { addDays } from "./date-utils";
 
 export type MorningStep = "sync" | "triage" | "rechecks" | "plan" | "start";
 
@@ -67,6 +69,21 @@ export function morningKeyCommand(key: string, rowKeys: string[], selected: numb
   return { kind: "none" };
 }
 
+export type MorningTriageAction = "done" | "block" | "skip" | "defer" | "keep";
+
+type TriageStore = Pick<CommandCenterStore, "completeTicketInDailyCommand" | "blockTicketInDailyCommand" | "skipTicketInDailyCommand" | "deferTicket" | "markDailyReviewSeen">;
+
+/** Applies one triage key to the store — the same named actions TaskRow uses (so the ticket
+ *  shows the same status everywhere). Every action also acknowledges the row, so it leaves
+ *  New; "keep" ONLY acknowledges it (it stays TODO, on Today). F = defer to tomorrow. */
+export function applyMorningTriage(store: TriageStore, action: MorningTriageAction, ticketKey: string, today: string): void {
+  if (action === "done") store.completeTicketInDailyCommand(ticketKey, "my-work");
+  else if (action === "block") store.blockTicketInDailyCommand(ticketKey, undefined, undefined, undefined, "my-work");
+  else if (action === "skip") store.skipTicketInDailyCommand(ticketKey, undefined, undefined, "my-work");
+  else if (action === "defer") store.deferTicket(ticketKey, addDays(today, 1), undefined, "my-work");
+  store.markDailyReviewSeen([ticketKey]);
+}
+
 // ===== Step 3 — due re-checks ===========================================================
 
 export interface DueRecheck {
@@ -86,6 +103,14 @@ export function dueRechecks(states: Record<string, TicketWorkState>, today: stri
     }
   }
   return out.sort((a, b) => a.until.localeCompare(b.until) || a.ticketKey.localeCompare(b.ticketKey));
+}
+
+type RecheckStore = Pick<CommandCenterStore, "reactivateSkippedTicket" | "unblockTicketInDailyCommand">;
+
+/** A due re-check's choice: back to Today (skipped/deferred), unblock, or keep as it is. */
+export function applyRecheck(store: RecheckStore, r: DueRecheck, choice: "reactivate" | "unblock" | "keep"): void {
+  if (choice === "reactivate" && (r.status === "SKIPPED" || r.status === "DEFERRED")) store.reactivateSkippedTicket(r.ticketKey, "my-work");
+  if (choice === "unblock" && r.status === "BLOCKED") store.unblockTicketInDailyCommand(r.ticketKey, "my-work");
 }
 
 // ===== Step 4 — plan against the time budget ============================================

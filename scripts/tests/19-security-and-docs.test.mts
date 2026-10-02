@@ -73,3 +73,15 @@ function walk(dir: string): string[] {
   ok(group, JSON.stringify([...listed].sort()) === JSON.stringify(onDisk), `the runner lists every *.test.mts file exactly once (${onDisk.length} files)`);
   ok(group, !fs.existsSync(path.join(process.cwd(), "scripts/command-center-test.mts")) && /"test": "tsx scripts\/tests\/run\.mts"/.test(read("package.json")), "npm test runs the single runner; the old monolith is gone");
 }
+
+// ----- V2.34 — every daily-flow feature has its README entry -----
+{
+  const group = "V2.34 README entries";
+  const readme = read("README.md");
+  const start = readme.indexOf("## Daily flow (V2.34)");
+  const section = start >= 0 ? readme.slice(start, readme.indexOf("\n## ", start + 5)) : "";
+  for (const [feature, title] of [["F1", "**Morning Mode**"], ["F2", "**Blocker follow-ups**"], ["F3", "**Mention reply auto-detection**"], ["F4", "**Jira write-back**"], ["F5", "**Report summaries**"], ["F6", "**Performance budget.**"]] as const) {
+    ok(group, section.includes(`- ${title}`), `${feature}: README has a "${title.replace(/\*/g, "")}" entry under "Daily flow (V2.34)"`);
+  }
+  ok(group, /\*\(OFF by default\)\*/.test(section), "the README states Jira write-back is off by default");
+}

@@ -2,11 +2,12 @@
 // performance-budget test asserts on. Each selector is the same call the page makes.
 
 import { CommandCenterStore, getTodayIso, selectDailyCommandMaps } from "../../src/lib/command-center/store";
+import { buildDailyReview } from "../../src/lib/command-center/daily-review";
 import { createMemoryStateStorage } from "../../src/lib/command-center/state-persistence";
 import { addDays } from "../../src/lib/command-center/date-utils";
 import { deriveData } from "../../src/lib/command-center/selectors";
 import { computeProactiveIntelligence } from "../../src/lib/command-center/proactive";
-import { computePersonalFocus, dedupeCandidatesByTicket } from "../../src/lib/command-center/personal-focus";
+import { computePersonalFocus } from "../../src/lib/command-center/personal-focus";
 import { buildMyWork } from "../../src/lib/command-center/my-work";
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import { buildDailyReportView, buildWeeklyReportView, mondayOf } from "../../src/lib/command-center/reports";
@@ -84,7 +85,9 @@ export async function buildPerfFixture() {
   });
   for (let d = 1; d <= 10; d++) store.generateDailyReport(addDays(today, -d), true);
   store.generateDailyReport(today, true);
-  return { store, today };
+  // The store keeps at most 500 mention events (MAX_MENTION_EVENTS); the selectors below are
+  // fed all 1,500 directly so the budget covers the full synthetic load.
+  return { store, today, mentions };
 }
 
 const time = (fn: () => unknown): number => {
@@ -95,30 +98,45 @@ const time = (fn: () => unknown): number => {
 
 /** The worst of 3 warm runs per selector (first, cold run discarded). */
 export async function timeSelectors(env: Awaited<ReturnType<typeof buildPerfFixture>>): Promise<Record<string, number>> {
-  const { store, today } = env;
+  const { store, today, mentions } = env;
   const s = store.getSnapshot();
   const idx = buildWorkRelevanceIndex(s.jiraWorkRelevancePolicy);
   const identity = { displayName: "Tay", accountId: "acc-tay" };
   const derivedOnce = deriveData(s.data, null, today, idx);
-  const proactive = computeProactiveIntelligence(s.data, derivedOnce, s.snapshotHistory, null, s.attentionState, "jira", today, idx, s.mentionEvents, "acc-tay", "Tay");
+  const proactive = computeProactiveIntelligence(s.data, derivedOnce, s.snapshotHistory, null, s.attentionState, "jira", today, idx, mentions, "acc-tay", "Tay");
+  // Daily Review exactly as store.computeDailyReview builds it, but over all 1,500 mentions.
+  const review = () =>
+    buildDailyReview({
+      workItems: s.data.workItems,
+      identity,
+      workRelevanceIndex: idx,
+      ...selectDailyCommandMaps(s, today),
+      memoryEvents: s.memoryEvents,
+      mentionEvents: mentions,
+      attentionState: s.attentionState,
+      syncLog: s.syncLog,
+      baselineAt: s.dailyReviewBaselineAt,
+      lastVisitAt: s.dailyReviewLastVisitAt,
+      reviewAcks: s.dailyReviewAcks,
+      now: new Date(),
+    });
+  const reviewOnce = review();
   const runs: Record<string, () => unknown> = {
     "Priorities (deriveData)": () => deriveData(s.data, null, today, idx),
     "Attention queue (proactive)": () => {
       const derived = deriveData(s.data, null, today, idx);
-      return computeProactiveIntelligence(s.data, derived, s.snapshotHistory, null, s.attentionState, "jira", today, idx, s.mentionEvents, "acc-tay", "Tay");
+      return computeProactiveIntelligence(s.data, derived, s.snapshotHistory, null, s.attentionState, "jira", today, idx, mentions, "acc-tay", "Tay");
     },
-    "Personal focus (My Work Today)": () => computePersonalFocus(s.data, proactive, "Tay", today, "acc-tay", idx, derivedOnce.risks, s.mentionEvents),
-    "Daily Review": () => store.computeDailyReview(),
+    "Personal focus (My Work Today)": () => computePersonalFocus(s.data, proactive, "Tay", today, "acc-tay", idx, derivedOnce.risks, mentions),
+    "Daily Review": () => review(),
     "My Work": () => {
-      const review = store.computeDailyReview();
+      const review = reviewOnce;
       return buildMyWork({ workItems: s.data.workItems, identity, workRelevanceIndex: idx, ticketWorkStates: s.ticketWorkStates, today, personalPlan: s.personalPlan, review, blockerSlaBusinessDays: 2 });
     },
     "Standup (live report state)": () => store.buildLiveStandup(),
     "Daily Report view": () => buildDailyReportView(s.dailyReports[today], today, identity, store.buildLiveStandup(), { blockerSlaBusinessDays: 2, summaries: { risks: s.data.risks, decisions: s.data.decisions } }),
     "Weekly Report view": () => buildWeeklyReportView({ weekStart: mondayOf(today), dailyReports: s.dailyReports, identity, today, summaries: { risks: s.data.risks, decisions: s.data.decisions } }),
   };
-  void dedupeCandidatesByTicket;
-  void selectDailyCommandMaps;
   const out: Record<string, number> = {};
   for (const [name, fn] of Object.entries(runs)) {
     fn();
