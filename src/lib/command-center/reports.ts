@@ -12,6 +12,8 @@
 // Never fabricates: a missing title/link/project is left out of the line, never "undefined".
 
 import type {
+  Decision,
+  Risk,
   TicketWorkState,
   AttentionItemState,
   CommandCenterData,
@@ -37,6 +39,7 @@ import { isWorkItemDoneOrExcluded, type WorkRelevanceIndex } from "./jira/work-r
 import { slug } from "./attention-queue";
 import { isMentionReplied } from "./mention-replies";
 import { isServerDailyStandup } from "./server-report-merge";
+import { biggestRisk, blockedAging, dailySummary, needsDecisionFrom, weeklySummary, type NeedsDecisionGroup } from "./report-summary";
 
 // ===== Shared shapes ===================================================================
 
@@ -260,6 +263,26 @@ export interface DailyReportView {
   serverSnapshot?: { generatedAt: string; coldStart?: boolean };
   /** E4 — neither the app nor the server recorded anything for this day. */
   noData?: boolean;
+  /** F2 — blocked tickets past the blocker SLA (oldest first): the report header calls them out. */
+  overdueBlockers?: ReportTicket[];
+  slaBusinessDays?: number;
+  /** F5 — the deterministic opening paragraph + its two sections. */
+  summary?: string;
+  blockedAging?: ReportTicket[];
+  needsDecisionFrom?: NeedsDecisionGroup[];
+}
+
+/** Report extras (all optional — absent means "feature off / not known"). */
+export interface ReportOptions {
+  /** F2 — the blocker SLA in business days (Blocked follow-ups feature on). */
+  blockerSlaBusinessDays?: number;
+  /** F5 — summaries on, with the risk/decision facts for the day. */
+  summaries?: { risks?: Pick<Risk, "title" | "level" | "status">[]; decisions?: Pick<Decision, "title" | "status" | "owner">[] };
+}
+
+function overdueOf(blocked: ReportTicket[], sla: number | undefined): ReportTicket[] | undefined {
+  if (sla === undefined) return undefined;
+  return blockedAging(blocked).filter((t) => t.ageBusinessDays !== undefined && t.ageBusinessDays > sla);
 }
 
 const IN_APP_DONE = new Set<MemoryEvent["kind"]>(["TICKET_COMPLETED", "ACTION_COMPLETED", "FOCUS_COMPLETED"]);
@@ -349,7 +372,7 @@ function pausedFromEvents(events: MemoryEvent[]): { blocked: ReportTicket[]; ski
 /** One day's report. `standup` overrides the snapshot's own (pass the live state for today).
  *  E4 — a server snapshot (snapshot.server, written by the cron while the app was closed) fills
  *  the Jira-derived sections the app didn't record; whatever the app recorded always wins. */
-export function buildDailyReportView(snapshot: DailyReportSnapshot | undefined, date: string, identity: PersonalRelationIdentity, standup?: StandupState): DailyReportView {
+export function buildDailyReportView(snapshot: DailyReportSnapshot | undefined, date: string, identity: PersonalRelationIdentity, standup?: StandupState, options: ReportOptions = {}): DailyReportView {
   const events = snapshot?.events ?? [];
   const state = standup ?? (isStandupState(snapshot?.standup) ? snapshot!.standup : undefined);
   const server = isServerDailyStandup(snapshot?.server) ? snapshot!.server : undefined;
@@ -358,7 +381,7 @@ export function buildDailyReportView(snapshot: DailyReportSnapshot | undefined, 
   const closedByServer = (server?.closedInJira ?? []).filter((t) => !t.key || !mineKeys.has(t.key));
   const paused = state ? { blocked: state.blocked, skipped: state.skipped } : pausedFromEvents(events);
   const usedServer = !!server && (!state || closedByServer.length > 0);
-  return {
+  const view: DailyReportView = {
     date,
     ...(snapshot?.generatedAt ? { generatedAt: snapshot.generatedAt } : {}),
     doneMine: [...mine, ...closedByServer],
@@ -375,6 +398,29 @@ export function buildDailyReportView(snapshot: DailyReportSnapshot | undefined, 
     openAssigned: !state && server ? server.openAssigned : [],
     ...(usedServer ? { serverSnapshot: { generatedAt: server!.generatedAt, ...(server!.coldStart ? { coldStart: true } : {}) } } : {}),
     noData: !snapshot && !standup,
+  };
+  return withReportExtras(view, options);
+}
+
+/** F2 / F5 — adds the overdue-blocker header and the summary sections when those are on. */
+function withReportExtras(view: DailyReportView, options: ReportOptions): DailyReportView {
+  if (view.noData) return view;
+  const overdue = overdueOf(view.blocked, options.blockerSlaBusinessDays);
+  const out: DailyReportView = { ...view, ...(overdue ? { overdueBlockers: overdue, slaBusinessDays: options.blockerSlaBusinessDays } : {}) };
+  if (!options.summaries) return out;
+  return {
+    ...out,
+    summary: dailySummary({
+      doneMine: view.doneMine.length,
+      inProgress: view.inProgress.length,
+      blocked: view.blocked,
+      newToday: view.newToday.length,
+      mentionsAwaitingReply: view.mentionsAwaitingReply.length,
+      ...(overdue ? { overdueBlockers: overdue.length } : {}),
+      risk: biggestRisk(options.summaries.risks),
+    }),
+    blockedAging: blockedAging(view.blocked),
+    needsDecisionFrom: needsDecisionFrom(options.summaries.decisions, view.blocked),
   };
 }
 
@@ -457,6 +503,7 @@ export function renderDailyReport(report: DailyReportView, format: ReportFormat,
   const lines: string[] = [heading(`Daily Report — ${report.date}`, 1, format), ""];
   // E4 — nothing recorded at all: say so instead of a page of empty sections.
   if (report.noData) return [...lines, format === "text" ? `(${NO_DATA_RECORDED})` : `_${NO_DATA_RECORDED}_`].join("\n");
+  renderReportHeader(lines, report, format);
   section(lines, "Done", report.doneMine, format);
   section(lines, "In progress / planned today", report.inProgress, format);
   section(lines, "Blocked", report.blocked, format);
@@ -468,12 +515,41 @@ export function renderDailyReport(report: DailyReportView, format: ReportFormat,
     lines.push(heading(`Decisions (${report.decisions.length})`, 2, format));
     lines.push(...report.decisions.map((d) => `${bullet(format)} ${format === "slack" ? escapeSlack(d) : format === "markdown" ? escapeMarkdown(d) : d}`), "");
   }
+  renderSummarySections(lines, report, format);
   if (report.openAssigned && report.openAssigned.length > 0) section(lines, "Open assigned (from Jira)", report.openAssigned, format);
   if (options.includeTeam !== false) section(lines, "Team: done", report.teamDone, format, { showAssignee: true });
   const note = missingStandupNote(report);
   if (note) lines.push(format === "text" ? `(${note})` : `_${note}_`, "");
   while (lines[lines.length - 1] === "") lines.pop();
   return lines.join("\n");
+}
+
+
+// ===== F2 / F5 — header and summary sections ==========================================
+
+function plainText(text: string, format: ReportFormat): string {
+  return format === "slack" ? escapeSlack(text) : format === "markdown" ? escapeMarkdown(text) : text;
+}
+
+/** Overdue-blocker callout + the summary paragraph, right under the title. */
+function renderReportHeader(lines: string[], report: Pick<DailyReportView, "overdueBlockers" | "slaBusinessDays" | "summary">, format: ReportFormat) {
+  if (report.overdueBlockers && report.overdueBlockers.length > 0) {
+    const list = report.overdueBlockers.map((t) => `${t.key ?? t.title ?? "?"} (${t.ageBusinessDays}d)`).join(", ");
+    const text = `⚠ ${report.overdueBlockers.length} blocker${report.overdueBlockers.length === 1 ? "" : "s"} over the ${report.slaBusinessDays}-business-day SLA: ${list}`;
+    lines.push(format === "markdown" ? `**${plainText(text, format)}**` : format === "slack" ? `*${plainText(text, format)}*` : text, "");
+  }
+  if (report.summary) lines.push(plainText(report.summary, format), "");
+}
+
+function renderSummarySections(lines: string[], report: Pick<DailyReportView, "blockedAging" | "needsDecisionFrom">, format: ReportFormat) {
+  if (report.blockedAging) section(lines, "Blocked aging", report.blockedAging, format, { empty: "Nothing blocked." });
+  if (report.needsDecisionFrom) {
+    const b = bullet(format);
+    lines.push(heading(`Needs decision from (${report.needsDecisionFrom.length})`, 2, format));
+    if (report.needsDecisionFrom.length === 0) lines.push(`${b} Nobody — no open decisions.`);
+    for (const g of report.needsDecisionFrom) lines.push(`${b} ${plainText(`${g.person}: ${g.items.join("; ")}`, format)}`);
+    lines.push("");
+  }
 }
 
 // ===== Weekly report ===================================================================
@@ -515,6 +591,10 @@ export interface WeeklyReportView {
   nextWeek: ReportTicket[];
   /** The day whose standup state the "as of" sections come from (undefined = none). */
   stateAsOf?: string;
+  /** F5 — summary paragraph + sections (summaries on). */
+  summary?: string;
+  blockedAging?: ReportTicket[];
+  needsDecisionFrom?: NeedsDecisionGroup[];
 }
 
 export interface WeeklyReportInput {
@@ -527,6 +607,8 @@ export interface WeeklyReportInput {
   liveStandup?: { date: string; state: StandupState };
   /** Local YYYY-MM-DD; days after it are not gaps yet. Defaults to the real today. */
   today?: string;
+  /** F5 — summaries on, with the risks / decisions to summarize. */
+  summaries?: ReportOptions["summaries"];
 }
 
 function isWeekend(isoDate: string): boolean {
@@ -585,7 +667,7 @@ export function buildWeeklyReportView(input: WeeklyReportInput): WeeklyReportVie
     : [];
   const openAssigned = latest ? (input.liveStandup?.date === latest.date ? input.liveStandup.state : input.dailyReports[latest.date]?.standup)?.openAssigned ?? [] : [];
 
-  return {
+  const view: WeeklyReportView = {
     weekStart,
     weekEnd,
     mode,
@@ -610,10 +692,26 @@ export function buildWeeklyReportView(input: WeeklyReportInput): WeeklyReportVie
     nextWeek: dedupe([...openAssigned, ...revisitNextWeek]),
     ...(latest ? { stateAsOf: latest.date } : {}),
   };
+  if (!input.summaries) return view;
+  return {
+    ...view,
+    summary: weeklySummary({
+      doneMine: view.totals.doneMine,
+      newReceived: view.totals.newReceived,
+      blockers: view.blockers,
+      skipped: view.totals.skipped,
+      decisions: view.totals.decisions,
+      reportedDays: view.reportedDays.length,
+      risk: biggestRisk(input.summaries.risks),
+    }),
+    blockedAging: blockedAging(view.blockers),
+    needsDecisionFrom: needsDecisionFrom(input.summaries.decisions, view.blockers),
+  };
 }
 
 export function renderWeeklyReport(report: WeeklyReportView, format: ReportFormat, options: RenderOptions = {}): string {
   const lines: string[] = [heading(`Weekly Report — ${report.weekStart} to ${report.weekEnd}`, 1, format), ""];
+  renderReportHeader(lines, report, format);
   const b = bullet(format);
   const t = report.totals;
   lines.push(heading("Totals", 2, format));
@@ -635,6 +733,7 @@ export function renderWeeklyReport(report: WeeklyReportView, format: ReportForma
   section(lines, "New received this week", report.newReceived, format);
   lines.push(heading(`Decisions (${report.decisions.length})`, 2, format));
   lines.push(...(report.decisions.length === 0 ? [`${b} None.`] : report.decisions.map((d) => `${b} ${format === "slack" ? escapeSlack(d) : format === "markdown" ? escapeMarkdown(d) : d}`)), "");
+  renderSummarySections(lines, report, format);
   section(lines, "Next week (open assigned + scheduled re-checks)", report.nextWeek, format);
   if (options.includeTeam !== false) section(lines, "Team: done this week", report.teamDone, format, { showAssignee: true });
   while (lines[lines.length - 1] === "") lines.pop();

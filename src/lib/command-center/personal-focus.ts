@@ -98,32 +98,81 @@ interface ResolvedEntity {
  *  related work item was ever resolved, which meant a RISK-category candidate/attention item
  *  could never get a ticket link (§4) AND could never be gated by the Work Relevance Policy
  *  (§1) — the underlying WorkItem was invisible to this function, gate-or-link included. */
+/** F6 — id/title indexes over one dataset, built once per `data` object (and risk list) and
+ *  reused by every attention item. Before this, each item did linear finds over all work items
+ *  — ~1,900 items × 3,000 work items on a large Jira. Keyed by object identity (WeakMap), so a
+ *  new dataset always gets fresh indexes and an old one is garbage-collected with it. */
+interface EntityIndexes {
+  workItemById: Map<string, WorkItem>;
+  workItemsByFixVersion: Map<string, WorkItem[]>;
+  decisionById: Map<string, CommandCenterData["decisions"][number]>;
+  dependencyById: Map<string, CommandCenterData["dependencies"][number]>;
+  actionById: Map<string, CommandCenterData["actions"][number]>;
+}
+const entityIndexCache = new WeakMap<CommandCenterData, EntityIndexes>();
+const riskByTitleCache = new WeakMap<Risk[], Map<string, Risk>>();
+
+function entityIndexes(data: CommandCenterData): EntityIndexes {
+  let idx = entityIndexCache.get(data);
+  if (!idx) {
+    const workItemsByFixVersion = new Map<string, WorkItem[]>();
+    for (const w of data.workItems) if (w.fixVersion) workItemsByFixVersion.set(w.fixVersion, [...(workItemsByFixVersion.get(w.fixVersion) ?? []), w]);
+    // First match wins, exactly like the Array.find each lookup replaces.
+    const firstById = <T extends { id: string }>(rows: T[]) => {
+      const m = new Map<string, T>();
+      for (const r of rows) if (!m.has(r.id)) m.set(r.id, r);
+      return m;
+    };
+    idx = { workItemById: firstById(data.workItems), workItemsByFixVersion, decisionById: firstById(data.decisions), dependencyById: firstById(data.dependencies), actionById: firstById(data.actions) };
+    entityIndexCache.set(data, idx);
+  }
+  return idx;
+}
+
+/** F6 — the work item with this id (first match, like Array.find), via the cached index. */
+export function workItemByIdIn(data: CommandCenterData, id: string): WorkItem | undefined {
+  return entityIndexes(data).workItemById.get(id);
+}
+
+function riskByTitle(risks: Risk[]): Map<string, Risk> {
+  let m = riskByTitleCache.get(risks);
+  if (!m) {
+    m = new Map();
+    for (const r of risks) if (!m.has(r.title)) m.set(r.title, r);
+    riskByTitleCache.set(risks, m);
+  }
+  return m;
+}
+
 export function resolveAttentionEntity(item: AttentionItem, data: CommandCenterData, allRisks: Risk[] = data.risks): ResolvedEntity {
   const ref = item.sourceRef;
   if (!ref) return { workItemIds: [] };
+  const idx = entityIndexes(data);
 
   if (ref.type === "decision") {
-    const decision = data.decisions.find((d) => d.id === ref.id);
+    const decision = idx.decisionById.get(ref.id);
     const related = decision?.relatedWorkItemIds?.length ? data.workItems.filter((w) => decision.relatedWorkItemIds!.includes(w.id)) : [];
     return { projectId: decision?.projectId ?? related[0]?.projectId, workItemIds: related.map((w) => w.id), decisionId: decision?.id, dueDate: decision?.reviewDate };
   }
   if (ref.type === "risk") {
-    const risk = allRisks.find((r) => r.title === ref.id);
-    const related = risk ? data.workItems.filter((w) => risk.sourceWorkItemIds.includes(w.id)) : [];
+    const risk = riskByTitle(allRisks).get(ref.id);
+    // Same membership and order as filtering data.workItems by sourceWorkItemIds.
+    const wanted = new Set(risk?.sourceWorkItemIds ?? []);
+    const related = risk ? data.workItems.filter((w) => wanted.has(w.id)) : [];
     return { projectId: related[0]?.projectId, workItemIds: related.map((w) => w.id) };
   }
   if (ref.type === "dependency") {
-    const dep = data.dependencies.find((d) => d.id === ref.id);
-    const workItem = dep ? data.workItems.find((w) => w.id === dep.workItemId) : undefined;
+    const dep = idx.dependencyById.get(ref.id);
+    const workItem = dep ? idx.workItemById.get(dep.workItemId) : undefined;
     return { projectId: workItem?.projectId, workItemIds: workItem ? [workItem.id] : [] };
   }
   if (ref.type === "action") {
-    const action = data.actions.find((a) => a.id === ref.id);
-    const workItem = action?.relatedWorkItemId ? data.workItems.find((w) => w.id === action.relatedWorkItemId) : undefined;
+    const action = idx.actionById.get(ref.id);
+    const workItem = action?.relatedWorkItemId ? idx.workItemById.get(action.relatedWorkItemId) : undefined;
     return { projectId: workItem?.projectId, workItemIds: workItem ? [workItem.id] : [], actionId: action?.id, dueDate: action?.dueDate };
   }
   if (ref.type === "release") {
-    const items = data.workItems.filter((w) => w.fixVersion === ref.id);
+    const items = idx.workItemsByFixVersion.get(ref.id) ?? [];
     return { projectId: items[0]?.projectId, workItemIds: items.map((w) => w.id) };
   }
   if (ref.type === "workItem") {
@@ -131,7 +180,7 @@ export function resolveAttentionEntity(item: AttentionItem, data: CommandCenterD
     // comment/reassignment happened on, so they still get real project/due-date context
     // through this same resolution path even though their ownership is decided elsewhere
     // (see candidateFromAttentionItem's ownershipExplicit override below).
-    const workItem = data.workItems.find((w) => w.id === ref.id);
+    const workItem = idx.workItemById.get(ref.id);
     return { projectId: workItem?.projectId, workItemIds: workItem ? [workItem.id] : [], dueDate: workItem?.dueDate };
   }
   return { workItemIds: [] };
@@ -159,11 +208,11 @@ function resolveOwner(entity: ResolvedEntity, data: CommandCenterData): OwnerRes
   const owners = new Set<string>();
   const ownerIds = new Set<string>();
   if (entity.actionId) {
-    const action = data.actions.find((a) => a.id === entity.actionId);
+    const action = entityIndexes(data).actionById.get(entity.actionId);
     if (action?.owner) owners.add(action.owner);
   }
   for (const wid of entity.workItemIds) {
-    const workItem = data.workItems.find((w) => w.id === wid);
+    const workItem = entityIndexes(data).workItemById.get(wid);
     if (workItem?.owner) owners.add(workItem.owner);
     if (workItem?.ownerId) ownerIds.add(workItem.ownerId);
   }
@@ -201,7 +250,7 @@ function resolveDueDate(entity: ResolvedEntity, data: CommandCenterData): string
   const dates: string[] = [];
   if (entity.dueDate) dates.push(entity.dueDate);
   for (const wid of entity.workItemIds) {
-    const due = data.workItems.find((w) => w.id === wid)?.dueDate;
+    const due = entityIndexes(data).workItemById.get(wid)?.dueDate;
     if (due) dates.push(due);
   }
   return dates.length > 0 ? dates.sort()[0] : undefined;
@@ -368,7 +417,7 @@ function candidateFromAttentionItem(
   const projectId = entity.projectId;
   const projectNameResolved = projectId ? lookupProjectName(data, projectId) : undefined;
 
-  const workItem = entity.workItemIds.length > 0 ? data.workItems.find((w) => w.id === entity.workItemIds[0]) : undefined;
+  const workItem = entity.workItemIds.length > 0 ? entityIndexes(data).workItemById.get(entity.workItemIds[0]) : undefined;
   const isBlocked = item.category === "ACTION" && workItem?.blocked === true;
   const naturalCategory = isBlocked ? "BLOCKED" : classify(score, item.severity, ownershipExplicit);
   // V2.13 §4 (bug fix) — only exposed when exactly one work item is related; a decision or
@@ -456,7 +505,7 @@ function evaluateWorkRelevanceGate(
   if (dailyCommandCompletedWorkItemIds && workItemIds.length > 0 && workItemIds.every((id) => dailyCommandCompletedWorkItemIds.has(id))) return "EXCLUDE";
   if (dailyCommandSkippedWorkItemIds && workItemIds.length > 0 && workItemIds.every((id) => dailyCommandSkippedWorkItemIds.has(id))) return "EXCLUDE";
   if (!workRelevanceIndex || workItemIds.length === 0) return "PASS";
-  const items = workItemIds.map((id) => data.workItems.find((w) => w.id === id)).filter((w): w is WorkItem => !!w);
+  const items = workItemIds.map((id) => entityIndexes(data).workItemById.get(id)).filter((w): w is WorkItem => !!w);
   if (items.length === 0) return "PASS";
   const relevances = items.map((item) => resolveWorkRelevance(item, workRelevanceIndex));
   if (relevances.some((r) => isPersonalWorkEligible(r))) return "PASS";
@@ -498,10 +547,10 @@ function candidateFromLoop(
   if (attentionDecisionIds.has(loop.id)) return null;
   if (loop.health !== "STALLED" && loop.health !== "AT_RISK") return null;
 
-  const decision = data.decisions.find((d: Decision) => d.id === loop.id);
+  const decision = entityIndexes(data).decisionById.get(loop.id);
   const relatedActions = data.actions.filter((a: Action) => a.relatedDecisionId === loop.id || (decision?.relatedActionIds ?? []).includes(a.id));
   const primaryAction = relatedActions[0];
-  const workItem = primaryAction?.relatedWorkItemId ? data.workItems.find((w) => w.id === primaryAction.relatedWorkItemId) : undefined;
+  const workItem = primaryAction?.relatedWorkItemId ? entityIndexes(data).workItemById.get(primaryAction.relatedWorkItemId) : undefined;
   const projectId = decision?.projectId ?? workItem?.projectId;
 
   // V2.13 §1 — same Work Relevance gate as candidateFromAttentionItem above, applied to the

@@ -13,6 +13,7 @@ import type { PersonalRelationIdentity } from "./personal-relation";
 import type { AttentionItem, FocusSignal, PersonalFocusCandidate, PersonalPlanItem, TaskReactivation, TicketWorkState, WorkItem } from "./types";
 import { addDays } from "./date-utils";
 import { getTicketView, type TicketView } from "./ticket-work-state";
+import { blockedAgeBusinessDays, isBlockerOverdue } from "./blocker-followup";
 
 export type MyWorkView = "today" | "new" | "in-progress" | "blocked" | "skipped" | "done";
 
@@ -45,6 +46,10 @@ export interface MyWorkRow {
   recheckDue: boolean;
   /** Daily Review "Completed recently" caption source. */
   doneSources?: ("jira" | "daily-command")[];
+  /** F2 — business days blocked (BLOCKED rows only). */
+  blockedAgeBusinessDays?: number;
+  /** F2 — blocked longer than the SLA. */
+  overdueBlocker?: boolean;
 }
 
 export interface MyWorkInput {
@@ -61,6 +66,9 @@ export interface MyWorkInput {
   /** Open attention signals — adds chips the focus engine doesn't carry (e.g. Stale, which is
    *  Attention-only by design), so a ticket row lists every signal on it. */
   attentionItems?: AttentionItem[];
+  /** F2 — when set, blocked tickets older than this many business days are "overdue": they lead
+   *  the Blocked view and are listed (as pointers) at the top of Today. */
+  blockerSlaBusinessDays?: number;
 }
 
 const ATTENTION_SIGNAL_LABEL: Record<string, string> = { MENTION: "Mention", STALE: "Stale", RISK: "Risk", ASSIGNMENT: "Assigned", DEPENDENCY: "Dependency", DECISION: "Decision", ACTION: "Action", COMMUNICATION: "Communication", DRIFT: "Drift" };
@@ -72,6 +80,8 @@ export interface MyWork {
   badge: number;
   /** Focus candidates with no single ticket (loops, portfolio signals) — shown in Today. */
   ticketlessFocus: PersonalFocusCandidate[];
+  /** F2 — overdue blockers (oldest first); the rows themselves stay in the Blocked view. */
+  overdueBlockers: MyWorkRow[];
 }
 
 export function buildMyWork(input: MyWorkInput): MyWork {
@@ -126,8 +136,12 @@ export function buildMyWork(input: MyWorkInput): MyWork {
     // act), or a deferral coming back today.
     const due = ((view.status === "SKIPPED" || view.status === "BLOCKED") && !!view.until && view.until <= today) || (view.status === "DEFERRED" && view.until === today);
     if (due) recheckDue++;
+    const age = view.status === "BLOCKED" ? blockedAgeBusinessDays(ticketWorkStates[key]?.updatedAt, today) : undefined;
+    const overdue = input.blockerSlaBusinessDays !== undefined && isBlockerOverdue(age, input.blockerSlaBusinessDays);
     const row: MyWorkRow = {
       ticketKey: key,
+      ...(age !== undefined ? { blockedAgeBusinessDays: age } : {}),
+      ...(overdue ? { overdueBlocker: true } : {}),
       ...(w ? { workItem: w } : {}),
       view,
       sources: Array.from(src),
@@ -150,7 +164,7 @@ export function buildMyWork(input: MyWorkInput): MyWork {
   views.today.sort((a, b) => b.score - a.score || Number(b.sources.includes("plan")) - Number(a.sources.includes("plan")) || a.ticketKey.localeCompare(b.ticketKey));
   views.new.sort((a, b) => a.ticketKey.localeCompare(b.ticketKey));
   views["in-progress"].sort(bySince);
-  views.blocked.sort((a, b) => Number(b.recheckDue) - Number(a.recheckDue) || bySince(a, b));
+  views.blocked.sort((a, b) => Number(!!b.overdueBlocker) - Number(!!a.overdueBlocker) || (b.overdueBlocker ? (b.blockedAgeBusinessDays ?? 0) - (a.blockedAgeBusinessDays ?? 0) : 0) || Number(b.recheckDue) - Number(a.recheckDue) || bySince(a, b));
   views.skipped.sort((a, b) => Number(b.recheckDue) - Number(a.recheckDue) || bySince(a, b));
   views.done.sort(bySince);
   if (review) {
@@ -160,7 +174,7 @@ export function buildMyWork(input: MyWorkInput): MyWork {
   }
 
   const counts = Object.fromEntries(Object.entries(views).map(([k, v]) => [k, v.length])) as Record<MyWorkView, number>;
-  return { views, counts, badge: counts.new + recheckDue, ticketlessFocus: (input.focusCandidates ?? []).filter((c) => !c.ticketKey) };
+  return { views, counts, badge: counts.new + recheckDue, ticketlessFocus: (input.focusCandidates ?? []).filter((c) => !c.ticketKey), overdueBlockers: views.blocked.filter((r) => r.overdueBlocker) };
 }
 
 /** Which view a ticket is in (or null when it isn't on My Work) — for the consistency tests. */

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { EmptyState, Panel, SectionHeading } from "@/components/command-center/ui";
 import { PlanCandidateRow } from "@/components/command-center/PlanCandidateRow";
@@ -10,7 +10,9 @@ const BUDGETS: TimeBudget[] = [15, 30, 60, 120, 480];
 
 export default function ActionPlanPage() {
   const { state, today, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, store } = useCommandCenter();
-  const [budget, setBudget] = useState<TimeBudget>(30);
+  // F1 — persisted, shared with Morning Mode's plan step.
+  const budget: TimeBudget = state.timeBudgetMinutes ?? 30;
+  const setBudget = (b: TimeBudget) => store.setTimeBudget(b);
 
   const plan = useMemo(
     () => (state.loaded ? buildPlan(filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds) : []),

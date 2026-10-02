@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import Link from "next/link";
 import { useCommandCenter } from "./use-command-center";
 import { BackupReminderBar } from "./BackupReminder";
+import { JiraWriteBackPrompt } from "./JiraWriteBackPrompt";
 import { ensurePersistentStorage } from "@/lib/command-center/storage-persistence";
 import { computeFreshness, FRESHNESS_LABEL } from "@/lib/command-center/freshness";
 import { JIRA_ERROR_HELP } from "@/lib/command-center/jira/error-help";
@@ -129,6 +130,7 @@ export function Header() {
       </header>
       <SyncFailedBanner />
       <BackupReminderBar />
+      <JiraWriteBackPrompt />
     </>
   );
 }

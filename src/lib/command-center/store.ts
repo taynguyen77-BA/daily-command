@@ -113,10 +113,13 @@ import type {
   WorkRelevance,
   WorkRelevancePolicyMigrationNotice,
 } from "./types";
-import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, SKIP_REASONS, emptyData } from "./types";
+import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, DEFAULT_JIRA_WRITE_BACK_SETTINGS, SKIP_REASONS, emptyData } from "./types";
+import type { JiraWriteBackSettings, JiraWriteLogEntry, MorningTriageRecord } from "./types";
+import type { TimeBudget } from "./action-plan";
 import { rollDailySyncSummary } from "./sync-history";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
-import { mergeMyTicketActivity } from "./mention-replies";
+import { planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
+import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
 export type { MyActionItemsOnlyByPage };
@@ -325,6 +328,17 @@ export interface StoreState {
   lastBackupAt?: string;
   /** E1 — when the weekly backup reminder was last put off ("Remind me next week"). */
   backupReminderSnoozedAt?: string;
+  /** F1 — finished Morning Mode triages by local day (bounded). */
+  morningTriage: Record<string, MorningTriageRecord>;
+  /** F1 — Command Center compact mode (KPI strip + My Work summary + Release). */
+  commandCenterCompact: boolean;
+  /** F1 — the Action Plan time budget, shared with Morning Mode's plan step. */
+  timeBudgetMinutes?: TimeBudget;
+  /** F2 — a blocked ticket older than this many business days is overdue (default 2). */
+  blockerSlaBusinessDays: number;
+  /** F4 — Jira write-back settings and the history of every write attempt. */
+  jiraWriteBack: JiraWriteBackSettings;
+  jiraWriteLog: JiraWriteLogEntry[];
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -373,6 +387,11 @@ function initialState(): StoreState {
     mentionReplies: {},
     myTicketActivity: {},
     followUpNotified: {},
+    morningTriage: {},
+    commandCenterCompact: false,
+    blockerSlaBusinessDays: DEFAULT_BLOCKER_SLA_BUSINESS_DAYS,
+    jiraWriteBack: { ...DEFAULT_JIRA_WRITE_BACK_SETTINGS },
+    jiraWriteLog: [],
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -793,6 +812,44 @@ function asMyActionItemsOnly(v: unknown): MyActionItemsOnlyByPage {
   return { attention: obj.attention === true, myDay: obj.myDay === true, priorities: obj.priorities === true };
 }
 
+
+// ===== V2.34 (F1/F2/F4) parsers =====
+export const DEFAULT_BLOCKER_SLA_BUSINESS_DAYS = 2;
+const MAX_MORNING_TRIAGE_DAYS = 120;
+const MAX_JIRA_WRITE_LOG = 200;
+const TIME_BUDGETS: TimeBudget[] = [15, 30, 60, 120, 480];
+
+function asMorningTriage(v: unknown): Record<string, MorningTriageRecord> {
+  const out: Record<string, MorningTriageRecord> = {};
+  for (const [day, r] of Object.entries(asPlainObject<Record<string, unknown>>(v, {}))) {
+    const x = r as Partial<MorningTriageRecord>;
+    if (typeof x?.startedAt === "string" && typeof x.finishedAt === "string" && typeof x.handled === "number" && x.day === day) out[day] = x as MorningTriageRecord;
+  }
+  return out;
+}
+
+function asBlockerSla(v: unknown): number {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 30 ? v : DEFAULT_BLOCKER_SLA_BUSINESS_DAYS;
+}
+
+function asJiraWriteBackSettings(v: unknown): JiraWriteBackSettings {
+  const o = asPlainObject<Partial<JiraWriteBackSettings>>(v, {});
+  const projects = Array.isArray(o.projects) ? Array.from(new Set(o.projects.filter((p): p is string => typeof p === "string" && /^[A-Z][A-Z0-9_]{0,19}$/.test(p)))) : [];
+  const doneTransitions: Record<string, string> = {};
+  for (const [k, name] of Object.entries(asPlainObject<Record<string, unknown>>(o.doneTransitions, {}))) if (typeof name === "string" && name.trim()) doneTransitions[k] = name.trim();
+  return {
+    projects,
+    setFlag: o.setFlag === true,
+    ...(typeof o.flagFieldId === "string" && /^customfield_\d{1,9}$/.test(o.flagFieldId) ? { flagFieldId: o.flagFieldId } : {}),
+    doneTransitions,
+  };
+}
+
+function isJiraWriteLogEntry(v: unknown): v is JiraWriteLogEntry {
+  const e = v as Partial<JiraWriteLogEntry>;
+  return typeof e === "object" && e !== null && typeof e.id === "string" && typeof e.at === "string" && typeof e.ticketKey === "string" && typeof e.ok === "boolean" && ["comment", "flag", "transition"].includes(e.kind as string);
+}
+
 type TicketStateSlice = Pick<StoreState, "ticketWorkStates" | "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones">;
 
 /** Migration + projection in one: folds legacy Daily Command records (and ticket-linked plan
@@ -890,6 +947,12 @@ export function parseStoredState(raw: string): StoreState {
       morningBriefLastRunDay: typeof parsed.morningBriefLastRunDay === "string" ? parsed.morningBriefLastRunDay : undefined,
       lastBackupAt: typeof parsed.lastBackupAt === "string" ? parsed.lastBackupAt : undefined,
       backupReminderSnoozedAt: typeof parsed.backupReminderSnoozedAt === "string" ? parsed.backupReminderSnoozedAt : undefined,
+      morningTriage: asMorningTriage(parsed.morningTriage),
+      commandCenterCompact: parsed.commandCenterCompact === true,
+      timeBudgetMinutes: TIME_BUDGETS.includes(parsed.timeBudgetMinutes as TimeBudget) ? (parsed.timeBudgetMinutes as TimeBudget) : undefined,
+      blockerSlaBusinessDays: asBlockerSla(parsed.blockerSlaBusinessDays),
+      jiraWriteBack: asJiraWriteBackSettings(parsed.jiraWriteBack),
+      jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
     };
@@ -942,6 +1005,9 @@ export class CommandCenterStore {
   private listeners = new Set<Listener>();
   private hydrated = false;
   private jiraSyncActivity: JiraSyncActivity = IDLE_JIRA_SYNC_ACTIVITY;
+  /** F4 — the write-back the confirmation dialog should offer next. In memory only: a reload
+   *  drops it (nothing is ever written without the dialog). */
+  private pendingJiraWrite: JiraWriteBackProposal | null = null;
 
   constructor(private readonly deps: CommandCenterStoreDeps = {}) {}
 
@@ -1496,10 +1562,28 @@ export class CommandCenterStore {
       ...deriveLegacyDailyCommandState(result.states, nowIso, this.state.dailyCommandTombstones),
       memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS),
     });
+    // F4 — offer the Jira write-back for a user's Block/Done (planJiraWriteBack returns null
+    // when the feature is off or the project isn't allow-listed). Only proposed here.
+    if ((status === "BLOCKED" || status === "DONE") && opts.surface !== "jira-sync" && opts.surface !== "migration") {
+      const proposal = planJiraWriteBack({ features: this.state.features, settings: this.state.jiraWriteBack, ticketKey, trigger: status === "BLOCKED" ? "block" : "done", reason: record.reason });
+      if (proposal) {
+        this.pendingJiraWrite = proposal;
+        this.listeners.forEach((l) => l());
+      }
+    }
     // Keep an already-generated report for today current (events + standup), so the action
     // is in it even if memoryEvents later rolls past its cap before the next sync.
     if (this.state.dailyReports[event.date]) this.generateDailyReport(event.date, true);
     return true;
+  }
+
+  /** F4 — the pending write-back proposal (stable reference for useSyncExternalStore). */
+  getPendingJiraWrite = (): JiraWriteBackProposal | null => this.pendingJiraWrite;
+  getServerPendingJiraWrite = (): JiraWriteBackProposal | null => null;
+  clearPendingJiraWrite() {
+    if (!this.pendingJiraWrite) return;
+    this.pendingJiraWrite = null;
+    this.listeners.forEach((l) => l());
   }
 
   /** Whether a transition would be accepted (UI uses it to decide which buttons to show). */
@@ -1621,6 +1705,44 @@ export class CommandCenterStore {
     this.set({ ...this.state, features: { ...this.state.features, [feature]: on } });
   }
 
+  // ===== V2.34 — F1/F2/F4 settings =====
+
+  /** F1 — Command Center compact mode (header toggle). */
+  setCommandCenterCompact(on: boolean) {
+    this.set({ ...this.state, commandCenterCompact: on });
+  }
+
+  /** F1 — the Action Plan time budget, also Morning Mode's plan budget. */
+  setTimeBudget(minutes: TimeBudget) {
+    if (!TIME_BUDGETS.includes(minutes)) return;
+    this.set({ ...this.state, timeBudgetMinutes: minutes });
+  }
+
+  /** F1 — a finished Morning Mode triage for `day` (first finish of the day is kept). */
+  recordMorningTriage(record: MorningTriageRecord) {
+    if (this.state.morningTriage[record.day]) return;
+    const morningTriage = { ...this.state.morningTriage, [record.day]: record };
+    for (const old of Object.keys(morningTriage).sort().slice(0, Math.max(0, Object.keys(morningTriage).length - MAX_MORNING_TRIAGE_DAYS))) delete morningTriage[old];
+    this.set({ ...this.state, morningTriage });
+  }
+
+  /** F2 — business days a block may last before it is overdue (1–30). */
+  setBlockerSla(days: number) {
+    this.set({ ...this.state, blockerSlaBusinessDays: asBlockerSla(Math.round(days)) });
+  }
+
+  /** F4 — write-back settings (validated the same way as on load). */
+  setJiraWriteBackSettings(patch: Partial<JiraWriteBackSettings>) {
+    this.set({ ...this.state, jiraWriteBack: asJiraWriteBackSettings({ ...this.state.jiraWriteBack, ...patch }) });
+  }
+
+  /** F4 — every Jira write attempt is recorded, success or failure. */
+  recordJiraWrite(entry: Omit<JiraWriteLogEntry, "id" | "at"> & { at?: string }) {
+    const at = entry.at ?? new Date().toISOString();
+    const record: JiraWriteLogEntry = { ...entry, at, id: `jira-write-${at}-${entry.ticketKey}-${entry.kind}` };
+    this.set({ ...this.state, jiraWriteLog: [...this.state.jiraWriteLog, record].slice(-MAX_JIRA_WRITE_LOG) });
+  }
+
   /** D4 — "Replied": the mention leaves "awaiting my reply". `at` injectable for tests. */
   markMentionReplied(commentId: string, issueKey: string, at: string = new Date().toISOString()) {
     this.set({ ...this.state, mentionReplies: { ...this.state.mentionReplies, [commentId]: { commentId, issueKey, repliedAt: at, source: "manual" } } });
@@ -1676,6 +1798,7 @@ export class CommandCenterStore {
       today: toLocalIso(now),
       personalPlan: this.state.personalPlan,
       review: this.computeDailyReview(now),
+      ...(this.state.features.blockerFollowUp ? { blockerSlaBusinessDays: this.state.blockerSlaBusinessDays } : {}),
     });
   }
 
@@ -2047,6 +2170,10 @@ export class CommandCenterStore {
     // A4 — a skipped/blocked ticket Jira has since closed (Done / COMPLETED) leaves the
     // Skipped/Blocked lists on its own and lands in Completed history, source "jira", keeping
     // the skip/block it replaced. Never the reverse: a Jira reopen does not un-complete it.
+    // F3 — mentions I've since answered in Jira are recorded as replied (source "jira").
+    const myTicketActivity = mergeMyTicketActivity(this.state.myTicketActivity, result.myActivity);
+    const autoReplies = this.state.features.mentionReplyTracking ? detectRepliedMentions(mergedMentionEvents, myTicketActivity, this.state.mentionReplies) : {};
+
     const jiraClosed = closePausedTicketsFinishedInJira(this.state.ticketWorkStates, merged.workItems, buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy), observedAt, getTodayIso());
 
     this.set({
@@ -2068,7 +2195,8 @@ export class CommandCenterStore {
       syncLog: [...this.state.syncLog, { startedAt, completedAt: observedAt, recordsCreated: created, recordsUpdated: updated, newTicketKeys }].slice(-MAX_SYNC_LOG),
       knownTicketFirstSeen: capKnownTickets(knownFirstSeen),
       dailyReviewBaselineAt,
-      myTicketActivity: mergeMyTicketActivity(this.state.myTicketActivity, result.myActivity),
+      myTicketActivity,
+      ...(Object.keys(autoReplies).length > 0 ? { mentionReplies: { ...this.state.mentionReplies, ...autoReplies } } : {}),
       dailySyncSummary: this.state.features.syncHistory
         ? rollDailySyncSummary(this.state.dailySyncSummary, getTodayIso(), {
             at: observedAt,

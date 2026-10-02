@@ -48,8 +48,9 @@ export function useMyWork(): { work: MyWork; review: DailyReview; now: Date } & 
         personalPlan: state.personalPlan,
         review,
         attentionItems: proactive?.attentionQueue,
+        ...(state.features.blockerFollowUp ? { blockerSlaBusinessDays: state.blockerSlaBusinessDays } : {}),
       }),
-    [filteredData.workItems, identity, workRelevanceIndex, state.ticketWorkStates, today, personalFocus?.candidates, state.personalPlan, review, proactive?.attentionQueue]
+    [filteredData.workItems, identity, workRelevanceIndex, state.ticketWorkStates, today, personalFocus?.candidates, state.personalPlan, review, proactive?.attentionQueue, state.features.blockerFollowUp, state.blockerSlaBusinessDays]
   );
 
   return { ...cc, work, review, now };

@@ -1771,6 +1771,15 @@ export interface FeatureToggles {
   reportExport: boolean;
   /** E1 — weekly "download a backup" reminder while cross-device sync is off. */
   backupReminder: boolean;
+  /** F1 — guided Morning Mode on /my-work as the first-open-of-the-day landing. */
+  morningMode: boolean;
+  /** F2 — blocked-row age, "Ask" follow-ups and the blocker SLA. */
+  blockerFollowUp: boolean;
+  /** F4 — optional Jira write-back (comment/flag on Block, transition on Done). OFF by default;
+   *  also needs the project in the allow-list and a confirmation for every write. */
+  jiraWriteBack: boolean;
+  /** F5 — deterministic summary paragraph + Blocked aging / Needs decision from in reports. */
+  reportSummaries: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1782,7 +1791,49 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   staleUseMyActivity: false,
   reportExport: true,
   backupReminder: true,
+  morningMode: true,
+  blockerFollowUp: true,
+  jiraWriteBack: false,
+  reportSummaries: true,
 };
+
+/** F1 — one finished Morning Mode triage, per local day. */
+export interface MorningTriageRecord {
+  day: string;
+  startedAt: string;
+  finishedAt: string;
+  /** Tickets acted on in the triage + re-check steps. */
+  handled: number;
+}
+
+/** F4 — Jira write-back settings (Data & Settings). Never consulted unless
+ *  features.jiraWriteBack is on. */
+export interface JiraWriteBackSettings {
+  /** Project keys writes are allowed for. Empty = none. */
+  projects: string[];
+  /** Also set Jira's Flag on Block (needs flagFieldId). */
+  setFlag: boolean;
+  /** The "Flagged" custom field id on this Jira instance, e.g. customfield_10021. */
+  flagFieldId?: string;
+  /** Per project: the transition NAME to offer on Done (ids differ per workflow). */
+  doneTransitions: Record<string, string>;
+}
+
+export const DEFAULT_JIRA_WRITE_BACK_SETTINGS: JiraWriteBackSettings = { projects: [], setFlag: false, doneTransitions: {} };
+
+/** F4 — one Jira write attempt, kept as history (newest last). */
+export interface JiraWriteLogEntry {
+  id: string;
+  at: string;
+  ticketKey: string;
+  kind: "comment" | "flag" | "transition";
+  /** What was sent (comment text, "Flagged", transition name). */
+  detail: string;
+  ok: boolean;
+  error?: string;
+  /** The ticket action that triggered it. */
+  trigger: "block" | "done";
+}
 
 /** D3 — one day's roll-up of successful Jira syncs (kept 90 days). */
 export interface DailySyncSummary {

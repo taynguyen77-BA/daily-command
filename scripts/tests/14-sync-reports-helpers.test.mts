@@ -949,7 +949,8 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
   const tay = { accountId: "acc-tay", displayName: "Tay" };
 
   // ---- toggles ----
-  ok(group, Object.entries(DEFAULT_FEATURE_TOGGLES).every(([k, v]) => v === (k !== "staleUseMyActivity")), "every feature defaults ON except 'staleness from my own activity'");
+  // F4 (V2.34) — Jira write-back is OFF by default by design (it writes to Jira).
+  ok(group, Object.entries(DEFAULT_FEATURE_TOGGLES).every(([k, v]) => v === (k !== "staleUseMyActivity" && k !== "jiraWriteBack")), "every feature defaults ON except 'staleness from my own activity' (and Jira write-back)");
   const parsedToggles = parseStoredState(JSON.stringify({ features: { morningBrief: false, keyboardTriage: "yes", bogus: true } })).features;
   ok(group, parsedToggles.morningBrief === false && parsedToggles.keyboardTriage === true && !("bogus" in parsedToggles) && parseStoredState("{}").features.reportExport === true, "stored toggles parse defensively; pre-D state gets the defaults");
   const settingsSrc = src("src/app/data-settings/page.tsx");

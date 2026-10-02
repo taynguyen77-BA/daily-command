@@ -8,6 +8,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { BackupPanel } from "@/components/command-center/BackupPanel";
+import { JiraWriteBackPanel } from "@/components/command-center/JiraWriteBackPanel";
 import { downloadBackup } from "@/components/command-center/BackupReminder";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
@@ -667,6 +668,10 @@ const FEATURE_TOGGLE_LABELS: { key: keyof FeatureToggles; label: string; detail:
   { key: "staleUseMyActivity", label: "Staleness from my own activity (off by default)", detail: "Measure 'no activity' from your last comment/transition where the sync could see it, instead of the ticket's 'updated' (which anyone's edit moves)." },
   { key: "reportExport", label: "Send reports to Slack / email draft", detail: "Adds 'Send to Slack…' (with confirmation) and 'Email draft' to Reports. Never sends on its own." },
   { key: "backupReminder", label: "Weekly backup reminder", detail: "While cross-device sync is off, remind me once a week to download a backup (Backup & storage below). Never downloads on its own." },
+  { key: "morningMode", label: "Morning Mode", detail: "First open of the day lands on a guided 5-step flow in My Work: sync, triage New (D/B/S/F/Enter), due re-checks, confirm today's plan, start the first task." },
+  { key: "blockerFollowUp", label: "Blocker follow-ups", detail: "Blocked rows show their age in business days and an 'Ask' that drafts one follow-up per person (copy, or Slack after you confirm). Blockers over the SLA below lead Today and the Daily Report." },
+  { key: "reportSummaries", label: "Report summaries", detail: "Daily and weekly reports open with a one-paragraph summary (counts, top blocker, biggest risk) plus 'Blocked aging' and 'Needs decision from'. No AI needed; 'Polish with AI' is optional and never changes numbers or ticket keys." },
+  { key: "jiraWriteBack", label: "Jira write-back (off by default)", detail: "On Block, offer a Jira comment 'Blocked: <reason>' (and the Flag); on Done, offer a transition. Only for allow-listed projects below, always previewed and confirmed, every write logged." },
 ];
 export default function DataSettingsPage() {
   const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
@@ -1008,6 +1013,23 @@ export default function DataSettingsPage() {
           </label>
         </div>
       </Panel>
+
+      <Panel className="p-5" data-blocker-sla>
+        <SectionHeading title="Blocker SLA" subtitle="A ticket blocked for more than this many business days is overdue: it leads Today in My Work and the Daily Report header (Blocker follow-ups feature)." />
+        <label className="flex items-center gap-2 text-sm text-text2">
+          <input
+            type="number"
+            min={1}
+            max={30}
+            value={state.blockerSlaBusinessDays}
+            onChange={(e) => e.target.value && store.setBlockerSla(Number(e.target.value))}
+            className="w-20 rounded-md border border-border bg-surface px-2 py-1 text-sm"
+          />
+          business days (default 2)
+        </label>
+      </Panel>
+
+      <JiraWriteBackPanel />
 
       <Panel className="p-5">
         <SectionHeading title="Stale Assigned Ticket thresholds" subtitle="Attention Queue flags a ticket assigned to you with no observable activity for this many business days (weekends never count as silence). A miss-ticket safety net, not a proven risk — tune it to how fast your projects actually move." />
@@ -1597,7 +1619,7 @@ export default function DataSettingsPage() {
           </Panel>
 
           <Panel className="p-5">
-            <SectionHeading title="Real Jira Data Protection" subtitle="Read-only remains the rule — no write-back. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
+            <SectionHeading title="Real Jira Data Protection" subtitle="Read-only by default — the optional Jira write-back (Features) is off unless you turn it on, and then only for allow-listed projects with a confirmation per write. These checks confirm credentials/raw payloads stay isolated and drift stays visible." />
             <div className="space-y-2">
               {dataProtectionChecklist.map((c) => (
                 <PilotChecklistRow key={c.id} item={c} />

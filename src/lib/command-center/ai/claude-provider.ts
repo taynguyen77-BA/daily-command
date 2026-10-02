@@ -40,6 +40,7 @@ import { dailyGuidancePrompt } from "./prompts/daily-guidance";
 import { decisionConflictPrompt } from "./prompts/decision-conflict";
 import { decisionOptionsPrompt } from "./prompts/decision-options";
 import { endOfDayPrompt } from "./prompts/end-of-day";
+import { reportSummaryPolishPrompt } from "./prompts/report-summary-polish";
 import { outcomeInterpretationPrompt } from "./prompts/outcome-interpretation";
 import { priorityAnalysisPrompt } from "./prompts/priority-analysis";
 import { proactiveAssessmentPrompt } from "./prompts/proactive-assessment";
@@ -238,6 +239,11 @@ export class ClaudeProvider implements AIProvider {
   async generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[]): Promise<string> {
     const r = await this.callText("generateEndOfDaySummary", endOfDayPrompt(completed, deferred, blocked, newRisks));
     return r.ok ? r.data.text : this.mock.generateEndOfDaySummary(completed, deferred, blocked, newRisks);
+  }
+
+  async polishReportSummary(summary: string): Promise<string> {
+    const r = await this.callText("polishReportSummary", reportSummaryPolishPrompt(summary));
+    return r.ok ? r.data.text : this.mock.polishReportSummary(summary);
   }
 
   async interpretTrend(trend: HealthTrend, currentConfidence: number): Promise<TrendInterpretation> {
