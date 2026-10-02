@@ -67,6 +67,20 @@ export function localDateFor(now: Date, timezoneOffsetMinutes: number = 0): stri
   return new Date(now.getTime() + timezoneOffsetMinutes * 60_000).toISOString().slice(0, 10);
 }
 
+/** G3 — the local hour from which a run may write the day's snapshot (REPORT_SNAPSHOT_HOUR_LOCAL,
+ *  0–23, default 17): an earlier run (e.g. a morning cron for the Morning Brief) syncs and
+ *  notifies but never freezes a day that isn't over yet. */
+export const DEFAULT_REPORT_SNAPSHOT_HOUR_LOCAL = 17;
+export function reportSnapshotHourLocal(env: Record<string, string | undefined>): number {
+  const n = Number(env.REPORT_SNAPSHOT_HOUR_LOCAL);
+  return Number.isInteger(n) && n >= 0 && n <= 23 && env.REPORT_SNAPSHOT_HOUR_LOCAL?.trim() !== "" ? n : DEFAULT_REPORT_SNAPSHOT_HOUR_LOCAL;
+}
+
+/** The user's local hour (0–23) at `now`, given Jira's UTC offset in minutes. */
+export function localHourFor(now: Date, timezoneOffsetMinutes: number = 0): number {
+  return new Date(now.getTime() + timezoneOffsetMinutes * 60_000).getUTCHours();
+}
+
 export function isWorkday(isoDate: string): boolean {
   const day = new Date(isoDate + "T00:00:00Z").getUTCDay();
   return day !== 0 && day !== 6;
@@ -91,7 +105,7 @@ function unionByKey(a: ReportTicket[], b: ReportTicket[]): ReportTicket[] {
 export interface ServerDailySnapshotResult {
   date: string;
   written: boolean;
-  skipped?: "weekend";
+  skipped?: "weekend" | "too-early";
   error?: string;
 }
 
@@ -100,11 +114,13 @@ export async function runServerDailySnapshot(
   config: JiraConnectionConfig,
   accountId: string,
   store: ServerReportStore,
-  options: { now: Date; timezoneOffsetMinutes?: number }
+  options: { now: Date; timezoneOffsetMinutes?: number; snapshotHourLocal?: number }
 ): Promise<ServerDailySnapshotResult> {
   const date = localDateFor(options.now, options.timezoneOffsetMinutes);
   // Weekends are skipped entirely (baseline included), so Monday's diff covers the weekend.
   if (!isWorkday(date)) return { date, written: false, skipped: "weekend" };
+  // G3 — only at/after the end of the local workday (nothing is written, baseline untouched).
+  if (options.snapshotHourLocal !== undefined && localHourFor(options.now, options.timezoneOffsetMinutes) < options.snapshotHourLocal) return { date, written: false, skipped: "too-early" };
 
   const previous = await store.get();
   const baseline = previous?.baseline ?? null;

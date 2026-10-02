@@ -119,14 +119,20 @@ import { TODAY, makeItem } from "./helpers.mts";
   const beforeAny = buildCandidates(dataNoAction, TODAY);
   ok("Action plan bugfix", beforeAny.some((c) => c.item?.id === "bugfix-1" && c.id === "plan-bugfix-1"), "sanity check: a fresh, untouched high-scoring item is auto-suggested as a bare-item candidate");
 
+  // G1 (V2.35) — a ticket-backed action follows its TICKET's state: the original bug (acting on a
+  // candidate made it reappear as untouched) is now prevented by the ticket state the action
+  // sets — Complete marks the ticket DONE; Defer/Snooze/Block are ticket buttons (old
+  // action-level ones are migrated onto the ticket on load). Checked with that ticket state.
+  const doneIds = new Set(["bugfix-1"]);
+  const pausedIds = new Set(["bugfix-1"]);
   for (const status of ["completed", "deferred", "snoozed", "blocked"] as const) {
     const action = { id: `bugfix-action-${status}`, title: "Do the thing", why: "test", relatedWorkItemId: "bugfix-1", status, estimateMinutes: 15, createdAt: TODAY, ...(status === "completed" ? { completedAt: TODAY } : {}) };
     const dataAfter = { ...emptyData(), workItems: [highScoreItem], actions: [action] };
-    const after = buildCandidates(dataAfter, TODAY);
+    const after = status === "completed" ? buildCandidates(dataAfter, TODAY, undefined, doneIds) : buildCandidates(dataAfter, TODAY, undefined, undefined, pausedIds);
     ok(
       "Action plan bugfix",
       !after.some((c) => c.id === "plan-bugfix-1"),
-      `a ${status} Action's WorkItem is never re-synthesized as a fresh bare-item candidate (would silently look untouched again)`
+      `a ${status === "completed" ? "completed Action whose ticket is DONE" : `${status} ticket`} is never re-synthesized as a fresh bare-item candidate (would silently look untouched again)`
     );
   }
 

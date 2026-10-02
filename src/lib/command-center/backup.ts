@@ -54,9 +54,9 @@ export function serializeBackup(backup: BackupFile): string {
   return JSON.stringify(backup, null, 2);
 }
 
-/** `command-center-backup-2026-10-02.json` */
-export function backupFileName(exportedAt: string): string {
-  return `command-center-backup-${exportedAt.slice(0, 10)}.json`;
+/** `command-center-backup-2026-10-02.json` (`…-encrypted.json` with a passphrase). */
+export function backupFileName(exportedAt: string, encrypted = false): string {
+  return `command-center-backup-${exportedAt.slice(0, 10)}${encrypted ? "-encrypted" : ""}.json`;
 }
 
 export function backupCounts(state: StoreState): BackupCounts {

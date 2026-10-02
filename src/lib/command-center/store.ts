@@ -117,6 +117,7 @@ import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, DEFAULT_JIRA_WRITE_BACK_S
 import type { JiraWriteBackSettings, JiraWriteLogEntry, MorningTriageRecord } from "./types";
 import type { TimeBudget } from "./action-plan";
 import { rollDailySyncSummary } from "./sync-history";
+import { migrateTicketBackedActionStatuses } from "./action-migration";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
 import { planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
@@ -873,6 +874,28 @@ export function selectDailyCommandMaps(state: Pick<StoreState, "ticketWorkStates
 }
 
 export function parseStoredState(raw: string): StoreState {
+  return withMigratedActionStatuses(parseStoredStateRaw(raw));
+}
+
+/** G1 — action-level Defer/Snooze/Blocked on ticket-backed actions move onto the ticket (see
+ *  action-migration.ts). Run on every load and on applied synced state; idempotent. */
+function withMigratedActionStatuses(state: StoreState): StoreState {
+  let m: ReturnType<typeof migrateTicketBackedActionStatuses>;
+  try {
+    m = migrateTicketBackedActionStatuses(state.data.actions, state.data.workItems, state.ticketWorkStates, getTodayIso(), new Date().toISOString());
+  } catch {
+    return state; // never let a migration break loading
+  }
+  if (m.migrated === 0) return state;
+  return {
+    ...state,
+    data: { ...state.data, actions: m.actions },
+    ticketWorkStates: m.ticketWorkStates,
+    ...deriveLegacyDailyCommandState(m.ticketWorkStates, undefined, state.dailyCommandTombstones),
+  };
+}
+
+function parseStoredStateRaw(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
     const snapshotHistory = parsed.snapshotHistory ?? (parsed.previousSnapshot ? [parsed.previousSnapshot] : []);
@@ -964,6 +987,10 @@ export function parseStoredState(raw: string): StoreState {
 /** The synced slice applied onto a local state — ONLY the synced fields (see
  *  applySyncedAppState). Pure; also used by importBackup's merge (E1). */
 export function applySyncedSlice(state: StoreState, synced: SyncedAppState): StoreState {
+  return withMigratedActionStatuses(applySyncedSliceRaw(state, synced));
+}
+
+function applySyncedSliceRaw(state: StoreState, synced: SyncedAppState): StoreState {
   return {
     ...state,
     personalIdentity: synced.personalIdentity,
@@ -1474,7 +1501,7 @@ export class CommandCenterStore {
    *  reason; no Follow-up Action is ever created here); TODO → plan items dated today or later
    *  go back to planned. A plan item from a past day that is already finished is history and is
    *  never rewritten. */
-  private linkedRecordsFor(ticketKey: string, record: TicketWorkState, today: string): Pick<StoreState, "personalPlan" | "data" | "attentionState"> {
+  private linkedRecordsFor(ticketKey: string, record: TicketWorkState, today: string): Pick<StoreState, "personalPlan" | "data" | "attentionState"> & { completedActionIds: string[] } {
     const data = this.state.data;
     const status = record.status;
     const workItemIds = new Set(data.workItems.filter((w) => w.key === ticketKey).map((w) => w.id));
@@ -1507,6 +1534,7 @@ export class CommandCenterStore {
 
     let actions = data.actions;
     let attentionState = this.state.attentionState;
+    let completedActionIds: string[] = [];
     const from = record.history[record.history.length - 1]?.from;
     if (status === "TODO" && from === "DONE") {
       // Reopen: the ticket's most recently completed linked action comes back too (it is how
@@ -1524,6 +1552,7 @@ export class CommandCenterStore {
         return { ...a, status: "completed" as const, completedAt: a.completedAt ?? today };
       });
       if (done.size === 0) actions = data.actions;
+      completedActionIds = Array.from(done);
       const ticketSlug = slug(ticketKey);
       const belongs = (id: string) =>
         id.startsWith(`MENTION:${ticketSlug}:`) ||
@@ -1539,6 +1568,7 @@ export class CommandCenterStore {
       personalPlan: planChanged ? personalPlan : this.state.personalPlan,
       data: actions === data.actions ? data : { ...data, actions },
       attentionState,
+      completedActionIds,
     };
   }
 
@@ -1555,12 +1585,16 @@ export class CommandCenterStore {
     if (!result.changed) return false;
     const record = result.states[ticketKey];
     const event = this.ticketEvent(ticketEventKind(result.from, status), ticketKey, record.reason);
+    const { completedActionIds, ...linked } = this.linkedRecordsFor(ticketKey, record, today);
+    // G5 — an action the ticket's DONE completes is recorded once, here (ACTION_COMPLETED), so
+    // a caller must not complete it again (Focus Session checks before calling completeAction).
+    const actionEvents = completedActionIds.map((id) => this.actionCompletedEvent(linked.data.actions.find((a) => a.id === id)));
     this.set({
       ...this.state,
-      ...this.linkedRecordsFor(ticketKey, record, today),
+      ...linked,
       ticketWorkStates: result.states,
       ...deriveLegacyDailyCommandState(result.states, nowIso, this.state.dailyCommandTombstones),
-      memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS),
+      memoryEvents: [...this.state.memoryEvents, event, ...actionEvents].slice(-MAX_MEMORY_EVENTS),
     });
     // F4 — offer the Jira write-back for a user's Block/Done (planJiraWriteBack returns null
     // when the feature is off or the project isn't allow-listed). Only proposed here.
@@ -2261,7 +2295,8 @@ export class CommandCenterStore {
   }
 
   private updateAction(id: string, patch: Partial<Action>) {
-    const actions = this.state.data.actions.map((a) => (a.id === id ? { ...a, ...patch } : a));
+    const now = new Date().toISOString();
+    const actions = this.state.data.actions.map((a) => (a.id === id ? { ...a, ...patch, ...(patch.status && patch.status !== a.status ? { statusChangedAt: now } : {}) } : a));
     this.set({ ...this.state, data: { ...this.state.data, actions } });
   }
 
@@ -2302,9 +2337,17 @@ export class CommandCenterStore {
   }
 
   completeAction(id: string) {
+    // G5 — completing an already-completed action records nothing new (one ACTION_COMPLETED).
+    if (this.state.data.actions.find((a) => a.id === id)?.status === "completed") return;
     this.updateAction(id, { status: "completed", completedAt: getTodayIso() });
     const action = this.state.data.actions.find((a) => a.id === id);
-    this.appendMemoryEvent({
+    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, this.actionCompletedEvent(action, id)].slice(-MAX_MEMORY_EVENTS) });
+    this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
+  }
+
+  /** The ACTION_COMPLETED memory event (shared by completeAction and the ticket-DONE linkage). */
+  private actionCompletedEvent(action: Action | undefined, id = action?.id ?? "?"): MemoryEvent {
+    return this.buildMemoryEvent({
       kind: "ACTION_COMPLETED",
       title: `Action completed: ${action?.title ?? id}`,
       impact: "Awaiting outcome confirmation.",
@@ -2312,19 +2355,24 @@ export class CommandCenterStore {
       projectId: this.projectIdForAction(action),
       ...this.reportContextForWorkItem(action?.relatedWorkItemId),
     });
-    this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
   }
-  deferAction(id: string) {
-    this.updateAction(id, { status: "deferred" });
+  // G1 — action-level Defer / Snooze / Blocked are for TICKETLESS actions only (a ticket-backed
+  // action follows its ticket's TicketWorkState). Each wakes up on its own: an action whose
+  // deferredUntil / snoozedUntil has come is open again (action-plan.ts isActionActive).
+  /** Defer until `until` (local YYYY-MM-DD, default tomorrow). */
+  deferAction(id: string, until?: string) {
+    this.updateAction(id, { status: "deferred", deferredUntil: until ?? addDays(getTodayIso(), 1) });
   }
+  /** Snooze until `untilIso` (date or datetime, default tomorrow). */
   snoozeAction(id: string, untilIso?: string) {
-    this.updateAction(id, { status: "snoozed", snoozedUntil: untilIso });
+    this.updateAction(id, { status: "snoozed", snoozedUntil: untilIso ?? addDays(getTodayIso(), 1) });
   }
-  markActionBlocked(id: string) {
-    this.updateAction(id, { status: "blocked" });
+  markActionBlocked(id: string, reason?: string) {
+    this.updateAction(id, { status: "blocked", ...(reason?.trim() ? { blockedReason: reason.trim().slice(0, MAX_BLOCK_REASON_LENGTH) } : {}) });
   }
+  /** Back to open — clears the wake-up date and block reason. */
   reopenAction(id: string) {
-    this.updateAction(id, { status: "open" });
+    this.updateAction(id, { status: "open", deferredUntil: undefined, snoozedUntil: undefined, blockedReason: undefined });
   }
   addNoteToAction(id: string, note: string) {
     this.updateAction(id, { note });
@@ -2368,7 +2416,12 @@ export class CommandCenterStore {
   }
 
   addAction(action: Omit<Action, "id" | "createdAt" | "status">) {
-    const newAction: Action = { ...action, id: `action-${Date.now()}`, createdAt: getTodayIso(), status: "open" };
+    // G1 — unique even when two actions are created in the same millisecond (the plain
+    // `action-${Date.now()}` id collided, and every later update then hit both records).
+    const taken = new Set(this.state.data.actions.map((a) => a.id));
+    let id = `action-${Date.now()}`;
+    for (let n = 2; taken.has(id); n++) id = `action-${Date.now()}-${n}`;
+    const newAction: Action = { ...action, id, createdAt: getTodayIso(), status: "open" };
     this.set({ ...this.state, data: { ...this.state.data, actions: [...this.state.data.actions, newAction] } });
     return newAction.id;
   }
@@ -2468,8 +2521,22 @@ export class CommandCenterStore {
    *  immediately (decisions/actions are never snapshotted, so this is the only correct
    *  place to observe these transitions; see memory-events.ts for the closeDay/sync path). */
   private appendMemoryEvent(event: Omit<MemoryEvent, "id" | "date">) {
-    const entry: MemoryEvent = { id: `memory-event-${event.kind}-${Date.now()}`, date: getTodayIso(), ...event };
-    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, entry].slice(-MAX_MEMORY_EVENTS) });
+    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, this.buildMemoryEvent(event)].slice(-MAX_MEMORY_EVENTS) });
+  }
+
+  /** G5 — a memory event with an id unique even within one millisecond (ids were
+   *  `memory-event-<kind>-<ms>`, so two same-kind events in one tick collided — and events are
+   *  merged across devices BY ID, which silently dropped one). */
+  private memoryEventMs = 0;
+  private memoryEventSeq = 0;
+  private buildMemoryEvent(event: Omit<MemoryEvent, "id" | "date">): MemoryEvent {
+    const ms = Date.now();
+    this.memoryEventSeq = ms === this.memoryEventMs ? this.memoryEventSeq + 1 : 0;
+    this.memoryEventMs = ms;
+    let id = `memory-event-${event.kind}-${ms}${this.memoryEventSeq ? `-${this.memoryEventSeq}` : ""}`;
+    // Another tab/device may have used the plain id in the same millisecond.
+    while (this.state.memoryEvents.some((e) => e.id === id)) id = `memory-event-${event.kind}-${ms}-${++this.memoryEventSeq}`;
+    return { id, date: getTodayIso(), ...event };
   }
 
   /** V2.25 — the exact ticket-key -> WorkItem-id resolution use-command-center.ts's own

@@ -168,6 +168,13 @@ export interface Action {
   createdAt: string;
   completedAt?: string;
   snoozedUntil?: string;
+  /** G1 — a deferred ticketless action comes back (is open again) on this local date. */
+  deferredUntil?: string;
+  /** G1 — why a ticketless action is blocked. */
+  blockedReason?: string;
+  /** G1 — when `status` last changed (ISO). Lets the ticket-state migration tell which of an
+   *  action status and a TicketWorkState is newer. Absent on older records. */
+  statusChangedAt?: string;
   outcome?: string; // V1.2 §9 — optional, recorded when the action is completed
   // V1.5 §17-19 — Action Loop additions. All optional/additive.
   expectedOutcome?: string;

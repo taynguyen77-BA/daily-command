@@ -24,6 +24,7 @@ import { resolveTicketExecutionState } from "../../src/lib/command-center/task-e
 import { buildMyWork, myWorkViewOf, type MyWorkView } from "../../src/lib/command-center/my-work";
 import { dedupeCandidatesByTicket } from "../../src/lib/command-center/personal-focus";
 import { effectivePlanStatus } from "../../src/components/command-center/MyDayAgenda";
+import { actionsNotInTodaysPlan } from "../../src/lib/command-center/action-plan";
 import { selectDailyCommandMaps } from "../../src/lib/command-center/store";
 import type { TicketStatusSurface, TicketWorkState, TicketWorkStatus } from "../../src/lib/command-center/types";
 import { ok, skip } from "./harness.mts";
@@ -134,6 +135,11 @@ import { TODAY, fakeProactive, jiraItem, makeAttentionItem, makeStoreState, v226
       priorities,
       yourDeliveryFocus: view.personalFocus!.candidates.some((c) => c.ticketKey === key) ? "active" : "not-listed",
       actionPlan: buildPlan(view.filteredData, today, 480, view.workRelevanceIndex, view.dailyCommandCompletedWorkItemIds, view.dailyCommandPausedWorkItemIds).some((p) => p.item?.key === key) ? "active" : "not-listed",
+      // G1 — an open action planned for this ticket follows the TICKET's state on Action Plan,
+      // the same buckets as My Work (a synthetic action, so no other surface is affected).
+      actionPlanAction: buildPlan({ ...view.filteredData, actions: [...view.filteredData.actions, { id: `syn-${key}`, title: `Planned ${key}`, why: "x", relatedWorkItemId: item.id, status: "open", estimateMinutes: 15, createdAt: today }] }, today, 480, view.workRelevanceIndex, view.dailyCommandCompletedWorkItemIds, view.dailyCommandPausedWorkItemIds).some((p) => p.id === `syn-${key}`) ? "active" : "not-listed",
+      // …and a ticket-backed action is never parked in "Not in today's plan" (that's ticketless only).
+      actionPlanNotInPlan: actionsNotInTodaysPlan(st.data.actions, today).some((n) => n.action.relatedWorkItemId === item.id) ? "listed" : "not-listed",
       attentionResolved: Object.entries(st.attentionState).filter(([id]) => id.startsWith(`MENTION:${slug(key)}:`)).every(([, s]) => s.lifecycle === "RESOLVED") ? "resolved" : "open",
     };
   }
@@ -144,7 +150,9 @@ import { TODAY, fakeProactive, jiraItem, makeAttentionItem, makeStoreState, v226
         if (got !== (active(expected) ? "active" : expected)) wrong.push(`${surface}=${got}`);
       } else if (surface === "priorities") {
         if (got !== (expected === "BLOCKED" || expected === "SKIPPED_DEFERRED" ? expected : "active-or-done")) wrong.push(`${surface}=${got}`);
-      } else if (surface === "yourDeliveryFocus" || surface === "actionPlan") {
+      } else if (surface === "actionPlanNotInPlan") {
+        if (got !== "not-listed") wrong.push(`${surface}=${got}`);
+      } else if (surface === "yourDeliveryFocus" || surface === "actionPlan" || surface === "actionPlanAction") {
         if (got !== (active(expected) ? "active" : "not-listed")) wrong.push(`${surface}=${got}`);
       } else if (surface === "attentionResolved") {
         if (expected === "DONE" && got !== "resolved") wrong.push(`${surface}=${got}`);

@@ -88,7 +88,9 @@ export function focusSessionHandlers(ctx: FocusSessionContext, ui: FocusSessionU
     }
     if (!settle(store.completeFocusItem(planItemId, today), "COMPLETED")) return false;
     if (candidate.actionId) {
-      store.completeAction(candidate.actionId);
+      // G5 — the ticket's DONE may already have completed this action (and recorded it once);
+      // only complete it here when it is still open.
+      if (store.getSnapshot().data.actions.find((a) => a.id === candidate.actionId)?.status !== "completed") store.completeAction(candidate.actionId);
       ui.setShowOutcomeCapture(true);
     } else if (candidate.attentionItemId) {
       store.resolveAttentionItem(candidate.attentionItemId);

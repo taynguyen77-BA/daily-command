@@ -34,6 +34,11 @@ const FILES = [
   "./23-jira-write-back.test.mts",
   "./24-report-summaries.test.mts",
   "./25-performance-budget.test.mts",
+  "./26-action-plan-one-vocabulary.test.mts",
+  "./27-jira-write-gate.test.mts",
+  "./28-snapshot-timing.test.mts",
+  "./29-backup-encryption.test.mts",
+  "./30-perf-interaction-events.test.mts",
 ];
 
 for (const file of FILES) await import(file);

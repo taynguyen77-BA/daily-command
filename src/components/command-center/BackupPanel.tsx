@@ -8,7 +8,9 @@
 import { useEffect, useState } from "react";
 import { Panel, SectionHeading } from "./ui";
 import { useCommandCenter } from "./use-command-center";
-import { downloadBackup, useCrossDeviceSyncActive } from "./BackupReminder";
+import { useCrossDeviceSyncActive } from "./BackupReminder";
+import { ExportBackupDialog } from "./ExportBackupDialog";
+import { decryptBackupText, isEncryptedBackup } from "@/lib/command-center/backup-crypto";
 import { backupCounts, mergeImportedState, parseBackup, replaceWithImportedState, type BackupCounts, type ParsedBackup } from "@/lib/command-center/backup";
 import { ensurePersistentStorage, storagePersistenceLabel, type StoragePersistence } from "@/lib/command-center/storage-persistence";
 
@@ -32,6 +34,10 @@ export function BackupPanel() {
   const [mode, setMode] = useState<"merge" | "replace">("merge");
   const [importError, setImportError] = useState<string | null>(null);
   const [imported, setImported] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  // G4 — an encrypted file waits here for its passphrase.
+  const [locked, setLocked] = useState<{ fileName: string; raw: string } | null>(null);
+  const [passphrase, setPassphrase] = useState("");
 
   useEffect(() => {
     void ensurePersistentStorage().then(setPersistence);
@@ -41,6 +47,7 @@ export function BackupPanel() {
     setImportError(null);
     setImported(null);
     setPending(null);
+    setLocked(null);
     if (!file) return;
     let text: string;
     try {
@@ -49,13 +56,36 @@ export function BackupPanel() {
       setImportError("The file couldn't be read. Nothing was imported.");
       return;
     }
+    if (isEncryptedBackup(text)) {
+      setPassphrase("");
+      setLocked({ fileName: file.name, raw: text });
+      return;
+    }
+    acceptText(text, file.name);
+  }
+
+  function acceptText(text: string, fileName: string) {
     const parsed = parseBackup(text);
     if (!parsed.ok) {
       setImportError(parsed.error);
       return;
     }
     setMode("merge");
-    setPending({ ...parsed, fileName: file.name });
+    setPending({ ...parsed, fileName });
+  }
+
+  async function unlock() {
+    if (!locked) return;
+    const r = await decryptBackupText(locked.raw, passphrase);
+    if (!r.ok) {
+      setImportError(r.error);
+      return;
+    }
+    setImportError(null);
+    setPassphrase("");
+    const name = locked.fileName;
+    setLocked(null);
+    acceptText(r.text, name);
   }
 
   function confirmImport() {
@@ -69,7 +99,7 @@ export function BackupPanel() {
   const local = backupCounts(state);
 
   return (
-    <Panel className="p-5" data-backup-panel>
+    <Panel className="p-5" data-backup-panel id="backup">
       <SectionHeading
         title="Backup & storage"
         subtitle="Everything here lives in this browser. Download a backup now and then — and before resetting — so clearing site data or switching laptops never loses your ticket statuses, reports and history."
@@ -84,8 +114,8 @@ export function BackupPanel() {
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button onClick={() => downloadBackup(store)} className="btn btn-primary">
-          Export backup
+        <button onClick={() => setExporting((v) => !v)} className="btn btn-primary" aria-expanded={exporting}>
+          Export backup…
         </button>
         <label className="btn btn-secondary cursor-pointer">
           Import backup…
@@ -100,6 +130,23 @@ export function BackupPanel() {
           />
         </label>
       </div>
+
+      {exporting && <ExportBackupDialog onDone={() => setExporting(false)} onCancel={() => setExporting(false)} />}
+
+      {locked && (
+        <div data-import-passphrase className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface2 p-3 text-sm">
+          <span className="text-text">
+            <span className="font-mono">{locked.fileName}</span> is encrypted.
+          </span>
+          <input type="password" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void unlock()} placeholder="Passphrase" aria-label="Backup passphrase" className="w-48 rounded-md border border-border bg-surface px-2 py-1 text-xs" />
+          <button onClick={() => void unlock()} disabled={!passphrase} className="btn btn-sm btn-primary disabled:opacity-50">
+            Unlock
+          </button>
+          <button onClick={() => setLocked(null)} className="btn btn-sm btn-ghost">
+            Cancel
+          </button>
+        </div>
+      )}
 
       {importError && (
         <p role="alert" className="mt-3 text-sm text-red">

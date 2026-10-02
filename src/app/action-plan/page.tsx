@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { EmptyState, Panel, SectionHeading } from "@/components/command-center/ui";
 import { PlanCandidateRow } from "@/components/command-center/PlanCandidateRow";
-import { buildPlan, TIME_BUDGET_LABELS, type TimeBudget } from "@/lib/command-center/action-plan";
+import { actionsNotInTodaysPlan, buildPlan, TIME_BUDGET_LABELS, type TimeBudget } from "@/lib/command-center/action-plan";
 
 const BUDGETS: TimeBudget[] = [15, 30, 60, 120, 480];
 
@@ -18,6 +18,9 @@ export default function ActionPlanPage() {
     () => (state.loaded ? buildPlan(filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds) : []),
     [state.loaded, filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds]
   );
+
+  // G1 — ticketless actions set aside (deferred / snoozed until a later date, or blocked).
+  const notInPlan = useMemo(() => (state.loaded ? actionsNotInTodaysPlan(filteredData.actions, today) : []), [state.loaded, filteredData.actions, today]);
 
   if (!state.loaded) {
     return (
@@ -68,6 +71,27 @@ export default function ActionPlanPage() {
             <PlanCandidateRow key={c.id} candidate={c} />
           ))}
         </div>
+      )}
+
+      {notInPlan.length > 0 && (
+        <section data-not-in-plan>
+          <SectionHeading title={`Not in today's plan (${notInPlan.length})`} subtitle="Actions you set aside. Deferred and snoozed ones come back on their date by themselves; blocked ones stay here until you reopen them." />
+          <Panel className="p-4">
+            <ul>
+              {notInPlan.map((n) => (
+                <li key={n.action.id} data-not-in-plan-action={n.action.id} className="flex flex-wrap items-center gap-2 border-b border-border py-2 text-sm last:border-b-0">
+                  <span className="min-w-0 flex-1 text-text">{n.action.title}</span>
+                  <span className="text-xs text-text3">
+                    {n.status === "blocked" ? `Blocked${n.reason ? ` — ${n.reason}` : ""}` : `${n.status === "deferred" ? "Deferred" : "Snoozed"}${n.until ? ` until ${n.until}` : ""}`}
+                  </span>
+                  <button onClick={() => store.reopenAction(n.action.id)} className="btn btn-sm btn-secondary">
+                    Reopen
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </Panel>
+        </section>
       )}
     </div>
   );
