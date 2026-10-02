@@ -14,8 +14,9 @@ import { projectActionImpact } from "@/lib/command-center/impact-projection";
 import { buildWhyShouldICare } from "@/lib/command-center/why-should-i-care";
 import { repeatedlyIneffective } from "@/lib/command-center/action-effectiveness";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
+import { addDays } from "@/lib/command-center/date-utils";
 
-const ACTION_TITLE = "Updates only this planned action — the ticket's own state is set with the \u201c… ticket\u201d buttons.";
+const ACTION_TITLE = "Applies to this action only. It comes back to the plan on the date you pick (default tomorrow); Blocked stays out until you reopen it.";
 const COMPLETE_ACTION_TITLE = "Completes this planned action — and, when it is about a ticket, marks the ticket done everywhere.";
 
 // V1.5 §18, §52 — "Did It Work?" outcome capture, the second signature interaction.
@@ -25,6 +26,15 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
   const { state, store, proactive, today } = useCommandCenter();
   const [note, setNote] = useState(candidate.action?.note ?? "");
   const [showNote, setShowNote] = useState(false);
+  // G1 — ticketless actions only: the Defer / Snooze / Blocked capture.
+  const [picker, setPicker] = useState<"defer" | "snooze" | "blocked" | null>(null);
+  const [untilDraft, setUntilDraft] = useState("");
+  const [reasonDraft, setReasonDraft] = useState("");
+  const closePicker = () => {
+    setPicker(null);
+    setUntilDraft("");
+    setReasonDraft("");
+  };
   // V1.5 — buildPlan() re-synthesizes a fresh, action-less candidate for a still-open work
   // item on every render (the underlying WorkItem doesn't become Done just because a
   // logged Action was completed), so `candidate.action` alone can't be trusted to reflect
@@ -119,25 +129,71 @@ export function PlanCandidateRow({ candidate }: { candidate: PlanCandidate }) {
         />
       )}
 
-      {/* Action-level controls: they update this planned Action only. The ticket's own
-          Daily Command state is the "… ticket" buttons above (TaskReferenceRow ticketScoped). */}
-      <p className="eyebrow mt-3">This planned action</p>
-      <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs">
-        <button onClick={() => completeActionAndTicket()} title={COMPLETE_ACTION_TITLE} className="btn btn-sm btn-secondary">
-          Complete action
-        </button>
-        <button onClick={() => store.deferAction(ensureActionId())} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
-          Defer action
-        </button>
-        <button onClick={() => store.snoozeAction(ensureActionId())} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
-          Snooze action
-        </button>
-        <button onClick={() => store.markActionBlocked(ensureActionId())} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
-          Mark action blocked
-        </button>
-        <button onClick={() => setShowNote((v) => !v)} className="btn btn-sm btn-secondary">
-          {showNote ? "Hide note" : "Add note"}
-        </button>
+      {/* G1 — one status vocabulary. A ticket-backed candidate's status IS its ticket's: the
+          ticket buttons above (TaskReferenceRow) are the only Defer / Block / Skip controls.
+          Only a ticketless action has its own Defer (+date) / Snooze (+until) / Blocked
+          (+reason), and those wake up on their date. */}
+      <p className="eyebrow mt-3">{candidate.item ? "This planned action" : "This action"}</p>
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-xs" data-action-controls={candidate.item ? "ticket-backed" : "ticketless"}>
+        {picker === null && (
+          <>
+            <button onClick={() => completeActionAndTicket()} title={COMPLETE_ACTION_TITLE} className="btn btn-sm btn-secondary">
+              Complete action
+            </button>
+            {!candidate.item && (
+              <>
+                <button onClick={() => setPicker("defer")} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
+                  Defer…
+                </button>
+                <button onClick={() => setPicker("snooze")} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
+                  Snooze…
+                </button>
+                <button onClick={() => setPicker("blocked")} title={ACTION_TITLE} className="btn btn-sm btn-secondary">
+                  Blocked…
+                </button>
+              </>
+            )}
+            <button onClick={() => setShowNote((v) => !v)} className="btn btn-sm btn-secondary">
+              {showNote ? "Hide note" : "Add note"}
+            </button>
+          </>
+        )}
+        {(picker === "defer" || picker === "snooze") && (
+          <>
+            <input type="date" value={untilDraft} onChange={(e) => setUntilDraft(e.target.value)} aria-label={picker === "defer" ? "Defer until" : "Snooze until"} className="rounded-md border border-border2 bg-surface px-2 py-1 text-xs" />
+            <button
+              onClick={() => {
+                const until = untilDraft || addDays(today, 1);
+                if (picker === "defer") store.deferAction(ensureActionId(), until);
+                else store.snoozeAction(ensureActionId(), until);
+                closePicker();
+              }}
+              className="btn btn-sm btn-secondary"
+            >
+              {picker === "defer" ? "Defer" : "Snooze"}
+            </button>
+            <button onClick={closePicker} className="btn btn-sm btn-ghost">
+              Cancel
+            </button>
+          </>
+        )}
+        {picker === "blocked" && (
+          <>
+            <input value={reasonDraft} onChange={(e) => setReasonDraft(e.target.value)} placeholder="Blocked on… (optional)" aria-label="Blocked reason" maxLength={200} className="w-48 rounded-md border border-border2 bg-surface px-2 py-1 text-xs" />
+            <button
+              onClick={() => {
+                store.markActionBlocked(ensureActionId(), reasonDraft || undefined);
+                closePicker();
+              }}
+              className="btn btn-sm btn-secondary"
+            >
+              Mark blocked
+            </button>
+            <button onClick={closePicker} className="btn btn-sm btn-ghost">
+              Cancel
+            </button>
+          </>
+        )}
       </div>
 
       <WhyShouldICareDrawer content={impactContent} triggerLabel="If nothing changes" />

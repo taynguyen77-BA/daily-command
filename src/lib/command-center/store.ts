@@ -117,6 +117,7 @@ import { DATA_SCHEMA_VERSION, DEFAULT_FEATURE_TOGGLES, DEFAULT_JIRA_WRITE_BACK_S
 import type { JiraWriteBackSettings, JiraWriteLogEntry, MorningTriageRecord } from "./types";
 import type { TimeBudget } from "./action-plan";
 import { rollDailySyncSummary } from "./sync-history";
+import { migrateTicketBackedActionStatuses } from "./action-migration";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
 import { planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
@@ -873,6 +874,28 @@ export function selectDailyCommandMaps(state: Pick<StoreState, "ticketWorkStates
 }
 
 export function parseStoredState(raw: string): StoreState {
+  return withMigratedActionStatuses(parseStoredStateRaw(raw));
+}
+
+/** G1 — action-level Defer/Snooze/Blocked on ticket-backed actions move onto the ticket (see
+ *  action-migration.ts). Run on every load and on applied synced state; idempotent. */
+function withMigratedActionStatuses(state: StoreState): StoreState {
+  let m: ReturnType<typeof migrateTicketBackedActionStatuses>;
+  try {
+    m = migrateTicketBackedActionStatuses(state.data.actions, state.data.workItems, state.ticketWorkStates, getTodayIso(), new Date().toISOString());
+  } catch {
+    return state; // never let a migration break loading
+  }
+  if (m.migrated === 0) return state;
+  return {
+    ...state,
+    data: { ...state.data, actions: m.actions },
+    ticketWorkStates: m.ticketWorkStates,
+    ...deriveLegacyDailyCommandState(m.ticketWorkStates, undefined, state.dailyCommandTombstones),
+  };
+}
+
+function parseStoredStateRaw(raw: string): StoreState {
   try {
     const parsed = JSON.parse(raw) as Partial<StoreState> & { previousSnapshot?: DailySnapshot | null };
     const snapshotHistory = parsed.snapshotHistory ?? (parsed.previousSnapshot ? [parsed.previousSnapshot] : []);
@@ -964,6 +987,10 @@ export function parseStoredState(raw: string): StoreState {
 /** The synced slice applied onto a local state — ONLY the synced fields (see
  *  applySyncedAppState). Pure; also used by importBackup's merge (E1). */
 export function applySyncedSlice(state: StoreState, synced: SyncedAppState): StoreState {
+  return withMigratedActionStatuses(applySyncedSliceRaw(state, synced));
+}
+
+function applySyncedSliceRaw(state: StoreState, synced: SyncedAppState): StoreState {
   return {
     ...state,
     personalIdentity: synced.personalIdentity,
@@ -2261,7 +2288,8 @@ export class CommandCenterStore {
   }
 
   private updateAction(id: string, patch: Partial<Action>) {
-    const actions = this.state.data.actions.map((a) => (a.id === id ? { ...a, ...patch } : a));
+    const now = new Date().toISOString();
+    const actions = this.state.data.actions.map((a) => (a.id === id ? { ...a, ...patch, ...(patch.status && patch.status !== a.status ? { statusChangedAt: now } : {}) } : a));
     this.set({ ...this.state, data: { ...this.state.data, actions } });
   }
 
@@ -2314,17 +2342,23 @@ export class CommandCenterStore {
     });
     this.bumpUsage(USAGE_KEYS.ACTION_COMPLETED);
   }
-  deferAction(id: string) {
-    this.updateAction(id, { status: "deferred" });
+  // G1 — action-level Defer / Snooze / Blocked are for TICKETLESS actions only (a ticket-backed
+  // action follows its ticket's TicketWorkState). Each wakes up on its own: an action whose
+  // deferredUntil / snoozedUntil has come is open again (action-plan.ts isActionActive).
+  /** Defer until `until` (local YYYY-MM-DD, default tomorrow). */
+  deferAction(id: string, until?: string) {
+    this.updateAction(id, { status: "deferred", deferredUntil: until ?? addDays(getTodayIso(), 1) });
   }
+  /** Snooze until `untilIso` (date or datetime, default tomorrow). */
   snoozeAction(id: string, untilIso?: string) {
-    this.updateAction(id, { status: "snoozed", snoozedUntil: untilIso });
+    this.updateAction(id, { status: "snoozed", snoozedUntil: untilIso ?? addDays(getTodayIso(), 1) });
   }
-  markActionBlocked(id: string) {
-    this.updateAction(id, { status: "blocked" });
+  markActionBlocked(id: string, reason?: string) {
+    this.updateAction(id, { status: "blocked", ...(reason?.trim() ? { blockedReason: reason.trim().slice(0, MAX_BLOCK_REASON_LENGTH) } : {}) });
   }
+  /** Back to open — clears the wake-up date and block reason. */
   reopenAction(id: string) {
-    this.updateAction(id, { status: "open" });
+    this.updateAction(id, { status: "open", deferredUntil: undefined, snoozedUntil: undefined, blockedReason: undefined });
   }
   addNoteToAction(id: string, note: string) {
     this.updateAction(id, { note });
@@ -2368,7 +2402,12 @@ export class CommandCenterStore {
   }
 
   addAction(action: Omit<Action, "id" | "createdAt" | "status">) {
-    const newAction: Action = { ...action, id: `action-${Date.now()}`, createdAt: getTodayIso(), status: "open" };
+    // G1 — unique even when two actions are created in the same millisecond (the plain
+    // `action-${Date.now()}` id collided, and every later update then hit both records).
+    const taken = new Set(this.state.data.actions.map((a) => a.id));
+    let id = `action-${Date.now()}`;
+    for (let n = 2; taken.has(id); n++) id = `action-${Date.now()}-${n}`;
+    const newAction: Action = { ...action, id, createdAt: getTodayIso(), status: "open" };
     this.set({ ...this.state, data: { ...this.state.data, actions: [...this.state.data.actions, newAction] } });
     return newAction.id;
   }
