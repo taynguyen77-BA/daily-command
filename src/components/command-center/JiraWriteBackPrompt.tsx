@@ -69,6 +69,8 @@ export function JiraWriteBackDialog({
       commandCenterStore.setJiraWriteBackSettings({ doneTransitions: { ...s.doneTransitions, [proposal.projectKey]: chosenTransition.name } });
     }
     const r = await executeJiraWriteBack(proposal, choices, sendJiraWrite, (e) => commandCenterStore.recordJiraWrite(e));
+    // V2.37 I3 — a posted reply answers the mention it was drafted for.
+    if (proposal.trigger === "reply" && proposal.mentionCommentId && r.commentPosted) commandCenterStore.markMentionReplied(proposal.mentionCommentId, proposal.ticketKey);
     setBusy(false);
     setResult(r.failed === 0 ? `Written to Jira ✓ (${r.attempted})` : `${r.failed} of ${r.attempted} write(s) failed — see Data & Settings → Jira write-back history.`);
   }
@@ -77,9 +79,11 @@ export function JiraWriteBackDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-labelledby="jira-write-title" data-jira-write-dialog>
       <div className="w-full max-w-md rounded-lg border border-border bg-surface p-5">
         <h2 id="jira-write-title" className="font-display text-base text-text">
-          Also update {proposal.ticketKey} in Jira?
+          {proposal.trigger === "reply" ? `Post this reply to ${proposal.ticketKey} in Jira?` : `Also update ${proposal.ticketKey} in Jira?`}
         </h2>
-        <p className="mt-1 text-xs text-text3">Your status here is already saved. Nothing is written to Jira unless you confirm below.</p>
+        <p className="mt-1 text-xs text-text3">
+          {proposal.trigger === "reply" ? "Review and edit the comment below. Nothing is posted unless you confirm." : "Your status here is already saved. Nothing is written to Jira unless you confirm below."}
+        </p>
 
         <div className="mt-3 space-y-3 text-sm text-text2" data-jira-write-preview>
           {comment && (
@@ -87,7 +91,7 @@ export function JiraWriteBackDialog({
               <span className="flex items-center gap-2">
                 <input type="checkbox" checked={commentOn} onChange={(e) => setCommentOn(e.target.checked)} /> Add a comment
               </span>
-              <textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} rows={2} maxLength={2000} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 text-sm" />
+              <textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} rows={proposal.trigger === "reply" ? 6 : 2} maxLength={2000} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 text-sm" />
             </label>
           )}
           {flag && (

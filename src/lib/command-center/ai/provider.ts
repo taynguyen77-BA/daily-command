@@ -51,7 +51,8 @@ import { queryAnswerPrompt } from "./prompts/query-answer";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
-import type { TicketContextInput } from "./task-registry";
+import type { TaskInput, TicketContextInput } from "./task-registry";
+import type { MentionReplyResponse, TicketBriefResponse, TriageResponse } from "./schemas";
 
 export interface AIProvider {
   readonly mode: "mock" | "claude";
@@ -91,6 +92,11 @@ export interface AIProvider {
   /** V2.36 H — requirement check over ONE ticket's content. The input must come from
    *  data-protection.ts buildTicketAiInput (allow-listed + redacted); never built by hand. */
   checkRequirements(ticket: TicketContextInput): Promise<RequirementCheckResult>;
+  // V2.37 I1–I4 — every input comes through data-protection.ts (allow-list + redaction).
+  generateTicketBrief(ticket: TicketContextInput, today: string): Promise<TicketBriefResponse>;
+  triageNewItems(input: TaskInput<"triageNewItems">): Promise<TriageResponse["items"]>;
+  draftMentionReply(input: TaskInput<"draftMentionReply">): Promise<MentionReplyResponse>;
+  rewriteReport(audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string>;
 }
 
 export interface RequirementCheckResult {
@@ -376,5 +382,55 @@ export class MockAIProvider implements AIProvider {
       confidence: 0.5,
       insufficientEvidence: descWords === 0 && ticket.comments.length === 0,
     };
+  }
+  // ===== V2.37 deterministic fallbacks =====
+
+  /** Brief from the ticket's own fields — no inference beyond what is written. */
+  async generateTicketBrief(ticket: TicketContextInput, _today: string): Promise<TicketBriefResponse> {
+    void _today;
+    const last = ticket.comments[ticket.comments.length - 1];
+    const questions = ticket.comments
+      .flatMap((c) => c.body.split(/(?<=[?.!])\s+/).filter((sentence) => sentence.trim().endsWith("?")).map((q) => `${c.author}: ${q.trim()}`))
+      .slice(-5);
+    const firstLine = ticket.description.split("\n").map((l) => l.trim()).find(Boolean);
+    return {
+      whatIsAsked: firstLine ? `${ticket.summary} — ${firstLine.slice(0, 300)}` : ticket.summary || ticket.key,
+      currentState: `Jira status: ${ticket.status || "unknown"}.${last ? ` Last comment by ${last.author} on ${last.created.slice(0, 10)}.` : " No comments yet."}`,
+      waitingOn: [],
+      openQuestions: questions,
+      suggestedNextStep: last ? `Read ${last.author}'s latest comment and reply if it needs you.` : "Read the description and confirm the next step with the reporter.",
+    };
+  }
+
+  /** Category from the item's own signal and role; always "keep" — low confidence, so the UI
+   *  leaves every suggestion unticked. */
+  async triageNewItems(input: TaskInput<"triageNewItems">): Promise<TriageResponse["items"]> {
+    return input.items.map((it) => {
+      const text = `${it.signal} ${it.role}`.toLowerCase();
+      const category = /mention|comment/.test(text) ? "Reply needed" : /review|approv|uat/.test(text) ? "Review needed" : /assign/.test(text) ? "Do" : "FYI";
+      return { key: it.key, category, action: { kind: "keep" as const }, confidence: 0.3, rationale: `From metadata: ${it.signal || it.role}`.slice(0, 300) };
+    });
+  }
+
+  async draftMentionReply(input: TaskInput<"draftMentionReply">): Promise<MentionReplyResponse> {
+    const who = input.mention.author;
+    const reply =
+      input.language === "vi"
+        ? `Cảm ơn ${who}, mình đã nhận được và sẽ phản hồi chi tiết sớm.`
+        : input.tone === "client"
+          ? `Thank you, ${who}. I have received your comment and will come back to you with an answer shortly.`
+          : `Thanks ${who} — got it, I'll get back to you on this.`;
+    const unansweredPoints = input.mention.body
+      .split(/(?<=[?.!])\s+/)
+      .map((x) => x.trim())
+      .filter((x) => x.endsWith("?"))
+      .slice(0, 10);
+    return { reply, unansweredPoints };
+  }
+
+  /** The deterministic report itself — the rewrite's fallback. */
+  async rewriteReport(_audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string> {
+    void _audience;
+    return report;
   }
 }

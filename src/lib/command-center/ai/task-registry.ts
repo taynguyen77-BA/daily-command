@@ -26,6 +26,10 @@ import { projectStoryPrompt } from "./prompts/project-story";
 import { queryAnswerPrompt } from "./prompts/query-answer";
 import { reportSummaryPolishPrompt } from "./prompts/report-summary-polish";
 import { requirementCheckPrompt } from "./prompts/requirement-check";
+import { ticketBriefPrompt } from "./prompts/ticket-brief";
+import { triagePrompt } from "./prompts/triage";
+import { mentionReplyPrompt } from "./prompts/mention-reply";
+import { reportRewritePrompt } from "./prompts/report-rewrite";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
@@ -40,6 +44,10 @@ import {
   queryAnswerResponseSchema,
   reasoningResponseSchema,
   requirementCheckResponseSchema,
+  ticketBriefResponseSchema,
+  triageResponseSchema,
+  mentionReplyResponseSchema,
+  reportRewriteResponseSchema,
   textResponseSchema,
   trendResponseSchema,
   type AITask,
@@ -125,6 +133,35 @@ export const TASK_INPUT_SCHEMAS = {
   generateCommunicationArtifact: z.object({ type: artifactTypeSchema, facts: strList(), evidenceStrings: strList() }),
   polishReportSummary: z.object({ summary: str(4000) }),
   checkRequirements: z.object({ ticket: ticketContextInputSchema }),
+  // V2.37 I1–I4
+  generateTicketBrief: z.object({ ticket: ticketContextInputSchema, today: str(10) }),
+  triageNewItems: z.object({
+    today: str(10),
+    deferDates: z.array(str(10)).min(1).max(5),
+    items: z
+      .array(
+        z.object({
+          key: str(40),
+          title: str(500),
+          type: str(60),
+          status: str(100),
+          signal: str(300),
+          role: str(200),
+          /** Present only for allow-listed projects (≤ 300 chars, redacted). */
+          lastCommentExcerpt: str(300).optional(),
+        })
+      )
+      .min(1)
+      .max(50),
+  }),
+  draftMentionReply: z.object({
+    ticket: ticketContextInputSchema,
+    mention: z.object({ author: str(200), created: str(40), body: str(4000) }),
+    tone: z.enum(["client", "internal"]),
+    language: z.enum(["en", "vi"]),
+    length: z.enum(["short", "normal"]),
+  }),
+  rewriteReport: z.object({ audience: z.enum(["standup", "pm", "client", "vi"]), report: str(16_000) }),
 } satisfies Record<AITask, z.ZodType>;
 
 export type TaskInput<T extends AITask> = z.infer<(typeof TASK_INPUT_SCHEMAS)[T]>;
@@ -156,6 +193,10 @@ const BUILDERS: Builders = {
   generateCommunicationArtifact: (i) => communicationArtifactPrompt(i.type as ArtifactType, i.facts, i.evidenceStrings),
   polishReportSummary: (i) => reportSummaryPolishPrompt(i.summary),
   checkRequirements: (i) => requirementCheckPrompt(i.ticket),
+  generateTicketBrief: (i) => ticketBriefPrompt(i.ticket, i.today),
+  triageNewItems: (i) => triagePrompt(i),
+  draftMentionReply: (i) => mentionReplyPrompt(i),
+  rewriteReport: (i) => reportRewritePrompt(i),
 };
 
 export const TASK_OUTPUT_SCHEMAS = {
@@ -178,13 +219,65 @@ export const TASK_OUTPUT_SCHEMAS = {
   generateCommunicationArtifact: communicationArtifactResponseSchema,
   polishReportSummary: textResponseSchema,
   checkRequirements: requirementCheckResponseSchema,
+  generateTicketBrief: ticketBriefResponseSchema,
+  triageNewItems: triageResponseSchema,
+  draftMentionReply: mentionReplyResponseSchema,
+  rewriteReport: reportRewriteResponseSchema,
 } satisfies Record<AITask, z.ZodType>;
 
 /** Visible-output budget per task (thinking models get extra room on top, server-side). */
 export function visibleTokenBudget(task: AITask): number {
-  if (task === "generateDecisionOptions" || task === "checkRequirements") return 1536;
+  if (task === "rewriteReport") return 4096;
+  if (task === "triageNewItems") return 3072;
+  if (task === "generateDecisionOptions" || task === "checkRequirements" || task === "generateTicketBrief" || task === "draftMentionReply") return 1536;
   return 512;
 }
+
+// ===== Task-specific fact checks (on top of the generic grounding guard) =====
+// Run server-side on every answer; a violation is treated exactly like a grounding violation
+// (one retry with the violations listed, then 422 → the browser shows deterministic output).
+
+const KEY_RE = /\b[A-Z][A-Z0-9_]{1,19}-\d{1,9}\b/g;
+const uniqStrings = (a: string[]) => Array.from(new Set(a));
+
+/** Every ticket key and every number in `output` must also be in `source` (list numbering at
+ *  the start of a line is formatting). I4's locked-facts rule — also used by the browser. */
+export function lockedFactViolations(output: string, source: string): string[] {
+  const v: string[] = [];
+  const srcKeys = new Set(source.match(KEY_RE) ?? []);
+  for (const k of uniqStrings(output.match(KEY_RE) ?? [])) if (!srcKeys.has(k)) v.push(`ticket key ${k} is not in the report`);
+  const nums = (t: string) => (t.replace(KEY_RE, " ").match(/(?<![\w.])\d[\d,]*(?:\.\d+)?/g) ?? []).map((n) => String(Number(n.replace(/,/g, ""))));
+  const srcNums = new Set(nums(source));
+  for (const n of uniqStrings(nums(output.replace(/^\s*\d+[.)]\s/gm, " ")))) if (!srcNums.has(n)) v.push(`number ${n} is not in the report`);
+  return v;
+}
+
+type ExtraCheck = (output: unknown, input: unknown, prompt: string) => string[];
+
+const NOBODY = /^(unknown|nobody|no one|none|n\/a|-)$/i;
+
+export const TASK_EXTRA_CHECKS: Partial<Record<AITask, ExtraCheck>> = {
+  generateTicketBrief: (out, _input, prompt) => {
+    const o = out as z.infer<typeof ticketBriefResponseSchema>;
+    const lower = prompt.toLowerCase();
+    return o.waitingOn.filter((w) => !NOBODY.test(w.who.trim()) && !lower.includes(w.who.trim().replace(/^@/, "").toLowerCase())).map((w) => `person "${w.who}" in waitingOn is not named in the ticket`);
+  },
+  triageNewItems: (out, input) => {
+    const o = out as z.infer<typeof triageResponseSchema>;
+    const i = input as TaskInput<"triageNewItems">;
+    const keys = new Set(i.items.map((x) => x.key));
+    const seen = new Set<string>();
+    const v: string[] = [];
+    for (const it of o.items) {
+      if (!keys.has(it.key)) v.push(`item ${it.key} was not in the list`);
+      if (seen.has(it.key)) v.push(`item ${it.key} appears twice`);
+      seen.add(it.key);
+      if (it.action.kind === "defer" && (!it.action.until || !i.deferDates.includes(it.action.until))) v.push(`defer date for ${it.key} must be one of ${i.deferDates.join(", ")}`);
+    }
+    return v;
+  },
+  rewriteReport: (out, input) => lockedFactViolations((out as { text: string }).text, (input as TaskInput<"rewriteReport">).report),
+};
 
 /** The tasks the deprecated free-form `{ task, prompt }` path may still serve while
  *  AI_LEGACY_PROMPT_PATH=on — only those that existed before V2.36. New tasks never do. */

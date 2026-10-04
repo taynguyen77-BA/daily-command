@@ -40,6 +40,7 @@ const FILES = [
   "./29-backup-encryption.test.mts",
   "./30-perf-interaction-events.test.mts",
   "./31-ai-foundation.test.mts",
+  "./32-ai-task-features.test.mts",
 ];
 
 for (const file of FILES) await import(file);

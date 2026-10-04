@@ -8,6 +8,8 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useMyWork } from "./use-my-work";
 import { Panel, SectionHeading } from "./ui";
+import { SmartTriagePanel } from "./SmartTriagePanel";
+import type { TriageCandidate } from "@/lib/command-center/ai/smart-triage";
 import { TIME_BUDGET_LABELS, type TimeBudget } from "@/lib/command-center/action-plan";
 import {
   applyMorningTriage,
@@ -65,6 +67,33 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step]);
   const titleOf = (key: string) => filteredData.workItems.find((w) => w.key === key)?.title;
+
+  // V2.37 I2 — what Smart Triage sees per New item (the panel applies the allow-list).
+  const triageCandidates: TriageCandidate[] = useMemo(() => {
+    const rows = new Map(work.views.new.map((r) => [r.ticketKey, r]));
+    return triageKeys
+      .filter((k) => !handled[k])
+      .map((key) => {
+        const r = rows.get(key);
+        const w = r?.workItem ?? filteredData.workItems.find((x) => x.key === key);
+        const lastMention = state.mentionEvents.filter((m) => m.issueKey === key).sort((a, b) => b.mentionedAt.localeCompare(a.mentionedAt))[0];
+        const signals = [r?.view.newReason, ...(r?.view.signals.map((sg) => sg.label) ?? [])].filter(Boolean).join("; ");
+        return {
+          key,
+          title: w?.title ?? "",
+          type: w?.type ?? "unknown",
+          status: w?.jiraStatusName ?? w?.status ?? "unknown",
+          signal: signals || "new",
+          role: [...(r?.sources ?? []), ...(lastMention ? ["mentioned"] : [])].join(", ") || "on my list",
+          ...(lastMention ? { lastCommentExcerpt: `${lastMention.commentAuthor ?? "Someone"}: ${lastMention.excerpt}` } : {}),
+        };
+      });
+  }, [triageKeys, handled, work.views.new, filteredData.workItems, state.mentionEvents]);
+
+  function markAiApplied(applied: { key: string; kind: Handled }[]) {
+    setHandledCount((n) => n + applied.filter((a) => !handled[a.key]).length);
+    setHandled((h) => ({ ...h, ...Object.fromEntries(applied.map((a) => [a.key, a.kind])) }));
+  }
 
   function act(kind: Handled, ticketKey: string) {
     applyMorningTriage(store, kind, ticketKey, today);
@@ -185,6 +214,7 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
               ))}{" "}
               · <kbd>J</kbd>/<kbd>K</kbd> move
             </p>
+            {state.features.smartTriage && <SmartTriagePanel candidates={triageCandidates} today={today} onApplied={markAiApplied} />}
             {triageKeys.length === 0 ? (
               <p className="text-sm text-text3">Nothing new since your last review.</p>
             ) : (

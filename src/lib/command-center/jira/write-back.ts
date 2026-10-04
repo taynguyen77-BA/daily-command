@@ -11,7 +11,7 @@
 
 import type { FeatureToggles, JiraWriteBackSettings, JiraWriteLogEntry } from "../types";
 
-export type JiraWriteTrigger = "block" | "done";
+export type JiraWriteTrigger = "block" | "done" | "reply";
 
 export type ProposedJiraWrite =
   | { kind: "comment"; text: string }
@@ -23,6 +23,8 @@ export interface JiraWriteBackProposal {
   projectKey: string;
   trigger: JiraWriteTrigger;
   writes: ProposedJiraWrite[];
+  /** V2.37 I3 — "reply": the mention comment this answers; marked replied once posted. */
+  mentionCommentId?: string;
 }
 
 export function projectKeyOf(ticketKey: string): string | undefined {
@@ -52,6 +54,22 @@ export function planJiraWriteBack(input: {
   return { ticketKey: input.ticketKey, projectKey, trigger: input.trigger, writes };
 }
 
+/** V2.37 I3 — "Post to Jira" for a drafted mention reply. Same rules as every other write: null
+ *  unless write-back is on and the project is allow-listed; it only PROPOSES — the confirmation
+ *  dialog (with the editable preview) and the server gate still decide. */
+export function planJiraReply(input: {
+  features: Pick<FeatureToggles, "jiraWriteBack">;
+  settings: JiraWriteBackSettings;
+  ticketKey: string;
+  text: string;
+  mentionCommentId: string;
+}): JiraWriteBackProposal | null {
+  if (!input.features.jiraWriteBack || !input.text.trim()) return null;
+  const projectKey = projectKeyOf(input.ticketKey);
+  if (!projectKey || !input.settings.projects.includes(projectKey)) return null;
+  return { ticketKey: input.ticketKey, projectKey, trigger: "reply", writes: [{ kind: "comment", text: input.text.trim().slice(0, 2000) }], mentionCommentId: input.mentionCommentId };
+}
+
 /** One request to the server route. */
 export type JiraWriteRequest =
   | { action: "comment"; issueKey: string; text: string }
@@ -77,7 +95,8 @@ export async function executeJiraWriteBack(
   choices: JiraWriteChoices,
   send: JiraWriteSender,
   log: (entry: Omit<JiraWriteLogEntry, "id" | "at">) => void
-): Promise<{ attempted: number; failed: number }> {
+): Promise<{ attempted: number; failed: number; commentPosted: boolean }> {
+  let commentPosted = false;
   let attempted = 0;
   let failed = 0;
   const run = async (req: JiraWriteRequest, kind: JiraWriteLogEntry["kind"], detail: string) => {
@@ -89,6 +108,7 @@ export async function executeJiraWriteBack(
       result = { ok: false, error: err instanceof Error ? err.message : "network error" };
     }
     if (!result.ok) failed++;
+    else if (kind === "comment") commentPosted = true;
     log({ ticketKey: proposal.ticketKey, kind, detail, ok: result.ok, ...(result.error ? { error: result.error } : {}), trigger: proposal.trigger });
   };
   for (const w of proposal.writes) {
@@ -99,7 +119,7 @@ export async function executeJiraWriteBack(
     if (w.kind === "flag" && choices.flag) await run({ action: "flag", issueKey: proposal.ticketKey, fieldId: w.fieldId }, "flag", "Flagged (Impediment)");
     if (w.kind === "transition" && choices.transition) await run({ action: "transition", issueKey: proposal.ticketKey, transitionId: choices.transition.id }, "transition", choices.transition.name);
   }
-  return { attempted, failed };
+  return { attempted, failed, commentPosted };
 }
 
 /** The transition to pre-select: the project's saved name (case-insensitive), else none. */

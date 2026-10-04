@@ -27,6 +27,7 @@ import { BlockReasonField, SkipReasonSelect } from "./ReasonPickers";
 import { FirstSeenBadge, TicketLink } from "./TicketLink";
 import { FollowUpDraft } from "./FollowUpDraft";
 import { AskFollowUp } from "./AskFollowUp";
+import { TicketBrief } from "./TicketBrief";
 import { blockedAgeBusinessDays, isBlockerOverdue } from "@/lib/command-center/blocker-followup";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
@@ -170,6 +171,7 @@ export function TaskReferenceRowView({
   newReason,
   stacked = false,
   initialPicker = null,
+  extra,
 }: {
   ticketKey: string;
   url?: string;
@@ -205,6 +207,8 @@ export function TaskReferenceRowView({
   stacked?: boolean;
   /** Which picker starts open (render tests compare its options with Focus Session's). */
   initialPicker?: "skip" | "block" | "defer" | null;
+  /** V2.37 I1 — extra content under the ticket info (the connected row's "Brief"). */
+  extra?: React.ReactNode;
 }) {
   const L = ticketScoped ? LABELS.ticket : LABELS.plain;
   const btnTitle = ticketScoped ? TICKET_TITLE : undefined;
@@ -273,6 +277,7 @@ export function TaskReferenceRowView({
           </p>
         )}
         {k === "blocked" && followUpRows && (blocker ? <AskFollowUp rows={followUpRows} /> : <FollowUpDraft rows={followUpRows} />)}
+        {extra}
       </div>
 
       {actions && k !== "done-in-jira" && (
@@ -481,6 +486,7 @@ export function TaskReferenceRow({
       signals={signals}
       newReason={newReason}
       stacked={stacked}
+      extra={state.features.ticketBrief && w?.sourceType === "jira" ? <TicketBrief ticketKey={key} workItemLastUpdated={w.lastUpdated} /> : undefined}
     />
   );
 }

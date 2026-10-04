@@ -36,7 +36,7 @@ import { MockAIProvider, type AIProvider, type CommunicationArtifactResult, type
 import { recordAiCall } from "./trace";
 import { pairedAuthHeader } from "../device-pairing";
 import { parseTaskInput, TASK_OUTPUT_SCHEMAS, type TaskInput, type TicketContextInput } from "./task-registry";
-import type { AITask } from "./schemas";
+import type { AITask, MentionReplyResponse, TicketBriefResponse, TriageResponse } from "./schemas";
 import type { z } from "zod";
 
 const ENDPOINT = "/api/command-center/ai";
@@ -61,6 +61,11 @@ export function getLastAiBudget(): AiBudgetStatus | null {
 export function subscribeAiBudget(fn: () => void): () => void {
   budgetListeners.add(fn);
   return () => budgetListeners.delete(fn);
+}
+/** Forget the last budget answer (tests; and Data & Settings after the cap was raised). */
+export function clearAiBudgetStatus(): void {
+  lastBudget = null;
+  budgetListeners.forEach((fn) => fn());
 }
 function setBudget(next: AiBudgetStatus) {
   lastBudget = next;
@@ -298,6 +303,26 @@ export class ClaudeProvider implements AIProvider {
     const r = await this.call("checkRequirements", { ticket });
     if (r.ok) return { summary: r.data.summary, gaps: r.data.gaps, questions: r.data.questions, risks: r.data.risks, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
     return this.mock.checkRequirements(ticket);
+  }
+
+  async generateTicketBrief(ticket: TicketContextInput, today: string): Promise<TicketBriefResponse> {
+    const r = await this.call("generateTicketBrief", { ticket, today });
+    return r.ok ? r.data : this.mock.generateTicketBrief(ticket, today);
+  }
+
+  async triageNewItems(input: TaskInput<"triageNewItems">): Promise<TriageResponse["items"]> {
+    const r = await this.call("triageNewItems", input);
+    return r.ok ? r.data.items : this.mock.triageNewItems(input);
+  }
+
+  async draftMentionReply(input: TaskInput<"draftMentionReply">): Promise<MentionReplyResponse> {
+    const r = await this.call("draftMentionReply", input);
+    return r.ok ? r.data : this.mock.draftMentionReply(input);
+  }
+
+  async rewriteReport(audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string> {
+    const r = await this.call("rewriteReport", { audience, report });
+    return r.ok ? r.data.text : this.mock.rewriteReport(audience, report);
   }
 }
 
