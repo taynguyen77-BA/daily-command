@@ -119,17 +119,29 @@ export function createMemoryStateStorage(options: { async?: boolean; initial?: s
   };
 }
 
-/** The real browser channel, or null where BroadcastChannel doesn't exist (the caller then
- *  relies on the focus/visibilitychange fallback). */
-export const browserStateChannel: StateChannelFactory = (onMessage) => {
-  if (typeof window === "undefined" || typeof (window as { BroadcastChannel?: unknown }).BroadcastChannel !== "function") return null;
-  const channel = new window.BroadcastChannel(STATE_CHANNEL_NAME);
+function wrapChannel(channel: BroadcastChannel, onMessage: (m: StateChannelMessage) => void): StateChannel {
   channel.onmessage = (ev: MessageEvent) => {
     const data = ev.data as Partial<StateChannelMessage> | null;
     if (data && typeof data.rev === "number" && typeof data.writerTabId === "string") onMessage({ rev: data.rev, writerTabId: data.writerTabId });
   };
   return { post: (m) => channel.postMessage(m), close: () => channel.close() };
+}
+
+/** The real browser channel, or null where BroadcastChannel doesn't exist (the caller then
+ *  relies on the focus/visibilitychange fallback). */
+export const browserStateChannel: StateChannelFactory = (onMessage) => {
+  if (typeof window === "undefined" || typeof (window as { BroadcastChannel?: unknown }).BroadcastChannel !== "function") return null;
+  return wrapChannel(new window.BroadcastChannel(STATE_CHANNEL_NAME), onMessage);
 };
+
+/** L5 — the same channel under another name (one per signed-in member, so tabs of different
+ *  members on one device never exchange revisions). */
+export const namedBrowserStateChannel =
+  (name: string): StateChannelFactory =>
+  (onMessage) => {
+    if (typeof window === "undefined" || typeof (window as { BroadcastChannel?: unknown }).BroadcastChannel !== "function") return null;
+    return wrapChannel(new window.BroadcastChannel(name), onMessage);
+  };
 
 /** A same-process hub standing in for BroadcastChannel in tests: every channel created from
  *  one hub receives every other channel's posts (never its own, like the real API). */
@@ -141,5 +153,43 @@ export function createStateChannelHub(): StateChannelFactory {
       post: (m) => members.forEach((deliver) => deliver !== onMessage && deliver(m)),
       close: () => members.delete(onMessage),
     };
+  };
+}
+
+// ===== L5 — a keyed backend (one device's storage, many keys) =================================
+// The store keeps each signed-in member's data under its own key on the device; this is the
+// backend those keys live in: IndexedDB in the browser, localStorage where IndexedDB is missing,
+// an in-memory map in tests (standing in for one device).
+
+export interface KeyedStateBackend {
+  read(key: string): Promise<string | null>;
+  /** Atomic read-modify-write; `fn` returns the value to write, or null to write nothing. */
+  update(key: string, fn: (current: string | null) => string | null): Promise<void>;
+  remove(key: string): Promise<void>;
+}
+
+export function createMemoryKeyedBackend(initial: Record<string, string> = {}): KeyedStateBackend & { dump(): Record<string, string> } {
+  const values = new Map(Object.entries(initial));
+  return {
+    dump: () => Object.fromEntries(values),
+    read: async (key) => values.get(key) ?? null,
+    update: async (key, fn) => {
+      const next = fn(values.get(key) ?? null);
+      if (next !== null) values.set(key, next);
+    },
+    remove: async (key) => {
+      values.delete(key);
+    },
+  };
+}
+
+export function createLocalStorageKeyedBackend(getStorage: () => Pick<Storage, "getItem" | "setItem" | "removeItem">): KeyedStateBackend {
+  return {
+    read: async (key) => getStorage().getItem(key),
+    update: async (key, fn) => {
+      const next = fn(getStorage().getItem(key));
+      if (next !== null) getStorage().setItem(key, next);
+    },
+    remove: async (key) => getStorage().removeItem(key),
   };
 }

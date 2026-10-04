@@ -7,6 +7,8 @@ import { NextResponse } from "next/server";
 import { getJiraConfig } from "@/lib/server/jira-client";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { buildJiraStatusResponse } from "@/lib/command-center/jira/status-response";
+import { principalError, principalJira, requestPrincipal } from "@/lib/server/auth";
+import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
 
 export const runtime = "nodejs";
 // V2.2.1 §4 — this GET handler has no request-dependent input, so Next.js would otherwise
@@ -18,5 +20,13 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  const p = await requestPrincipal(req, { legacy: auth });
+  // L3 — sign-in on: "configured" means the signed-in member's own Jira connection is usable.
+  if (p.kind === "user") {
+    const jira = await principalJira(p);
+    return NextResponse.json(buildJiraStatusResponse(jira.ok ? jira.config : null, true));
+  }
+  // Sign-in on: not signed in → 401, misconfigured → 503, like every other route.
+  if (p.kind === "error" && isAuthEnabled(process.env)) return principalError(p);
   return NextResponse.json(buildJiraStatusResponse(getJiraConfig(), auth.ok));
 }

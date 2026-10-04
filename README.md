@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.39
+**Current version:** V2.40
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.39.0` ↔ `V2.39`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.40.0` ↔ `V2.40`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -160,6 +160,46 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 - **Meeting notes → actions** *(J4)*. In Meeting Mode, paste notes or a transcript: decisions, action items (owner, due resolved from words like "Friday"), explicit ticket status changes and open questions, on a review screen where you edit and untick. **Create selected** is the only thing that creates decisions/actions or changes a status (history surface `ai-meeting`); ticket keys that don't exist here are listed as dropped, never created.
 - **Command Bar commands** *(J5)*. Type e.g. "defer all WF mentions to Monday" or "block MCWS-123 waiting for API spec". The command becomes operations from an allow-list (**setTicketStatus**, **addAction** — nothing else exists); the app resolves targets against real data and shows a preview diff; **Apply** runs it through the normal store (surface `ai-command`). An unknown ticket, a project name matching several projects, an unclear date or a vague target gets a question back instead of a guess. Without AI, a deterministic parser handles the same simple forms.
 - **Weekly insights** *(J6)*. Weekly Review → **Generate**: 3–5 observations, each with its evidence, and 3 suggestions for next week, from this week's ticket history, blockers by person, skip reasons and AI-triage acceptance (numbers locked). Saved per week; Reports → Weekly can add them to its copies ("Include in copies").
+
+## Team sign-in (V2.40) — opt-in, OFF unless `AUTH_ENABLED=true`
+
+Off (the default), nothing changes: one installation, one browser data set, the paired `APP_STATE_SECRET` / `JIRA_WRITE_SECRET` secrets, the server's Jira token. On, every team member signs in, connects **their own Jira**, and gets fully separate data and settings — in the browser (`command-center:v1:u:<uid>` in IndexedDB, its own BroadcastChannel) and on the server (every KV key scoped per member: cross-device sync state, notify baseline, daily snapshots, Jira write log; AI usage records carry the member's id). A member's id is `u_` + the first 24 hex characters of sha256(`daily-command:` + lower-cased email), so the same person gets the same data whichever provider they use.
+
+**What changes when it's on**
+- Pages without a session redirect to `/signin`; every API route needs a signed-in member (401 otherwise). Pairing secrets (`APP_STATE_SECRET`, `JIRA_WRITE_SECRET` bearers) are rejected (401) — they identify a device, not a person. `CRON_SECRET` is accepted only by the cron `GET /api/command-center/jira/sync`.
+- Misconfigured (e.g. `NEXTAUTH_SECRET` missing) → every route answers **503** naming the exact missing variables, and the sign-in page and Setup Health show the same list. Nothing falls back to "open".
+- **Data & Settings → My account:** connect Jira (Atlassian email + API token, verified against `{JIRA_BASE_URL}/rest/api/3/myself`; your accountId and name come from Jira; the token is stored AES-256-GCM-encrypted and never shown again), Slack (your own incoming webhook, the team channel, or off — with **Test**), server notifications, the daily snapshot, and your timezone. **Team** (admins): members, role, Jira connected?, last login, may-write-to-Jira, disable; invites. The last enabled admin can't be demoted or disabled; `AUTH_ADMIN_EMAILS` members are always enabled admins. Device pairing and the `JIRA_WRITE_SECRET` pairing are hidden.
+- **Jira sync** runs with your own connection; your verified accountId is authoritative (a different accountId in the request is ignored). The base URL is always the server's `JIRA_BASE_URL`.
+- **Jira write-back** needs an admin's "may write to Jira" plus your own (personal) Jira connection, the project in `JIRA_WRITE_PROJECT_KEYS` and `JIRA_WRITE_ENABLED`; `JIRA_WRITE_SECRET` isn't needed. 30 writes/hour **per member**; the write log records uid and email.
+- **The cron** walks every member who switched on server notifications or the daily snapshot and has a usable Jira connection, and runs notify + snapshot with that member's Jira, stores, Slack destination and timezone — sequentially, within `CRON_RUN_BUDGET_MS` (default 50 s); a member whose Jira fails (e.g. a revoked token) is reported and never stops the others. The response is `{ usersProcessed, failures[], skipped[] }`.
+- **AI:** `AI_USER_DAILY_TOKEN_CAP` caps each member on top of the global `AI_DAILY_TOKEN_CAP` (only that member gets 429). Data & Settings shows your usage ("you") and, to admins, the team's.
+
+| Variable | Purpose |
+| --- | --- |
+| `AUTH_ENABLED` | `true` turns team sign-in on. Read when the app is built — redeploy after changing it. Anything else = off. |
+| `NEXTAUTH_SECRET` | Required. Signs the session (httpOnly, sameSite=lax, secure in production). `openssl rand -base64 32`. |
+| `NEXTAUTH_URL` | The app's public URL (e.g. `https://daily-command.vercel.app`) — OAuth callbacks and the CSRF origin check use it. |
+| `AUTH_ADMIN_EMAILS` | Required. Comma list; always allowed, always admin. |
+| `AUTH_ALLOWED_EMAILS` / `AUTH_ALLOWED_DOMAINS` | Who else may sign in (plus admin invites). Everyone else is refused. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google sign-in. |
+| `AZURE_AD_CLIENT_ID` / `AZURE_AD_CLIENT_SECRET` / `AZURE_AD_TENANT_ID` | Microsoft Entra ID sign-in. |
+| `ATLASSIAN_CLIENT_ID` / `ATLASSIAN_CLIENT_SECRET` | Atlassian sign-in (identity only, scope `read:me`; Jira data still uses each member's API token). |
+| `AUTH_DEV_LOGIN` | `true` = email-only login for local development. Ignored when `NODE_ENV=production`. |
+| `AUTH_ENCRYPTION_KEY` | Optional 32-byte key (base64 or hex) for stored Jira tokens / webhooks; default is derived from `NEXTAUTH_SECRET` (HKDF). Changing either makes stored tokens unreadable — members reconnect. |
+| `AUTH_ALLOW_SHARED_JIRA` | `true` lets a member use the server's Jira token with their own accountId — read-only (writes 403). Off by default. |
+| `AUTH_LEGACY_DATA_OWNER` | The one email whose browser takes over this device's pre-sign-in data (see Migration). |
+| `AI_USER_DAILY_TOKEN_CAP` | Optional per-member daily AI tokens. |
+| `CRON_RUN_BUDGET_MS` | Optional time budget for one cron run over all members (default 50000). |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | **Required in production** when sign-in is on (members, profiles, invites, per-member data). A non-production dev server without KV keeps members in memory. |
+
+**Set up**
+1. **KV:** Vercel → Storage → Create Database → KV → Connect to Project (injects `KV_REST_API_URL`/`KV_REST_API_TOKEN`).
+2. **Google:** Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → *Web application*. Authorized JavaScript origin: your app URL. Authorized redirect URI: `https://<your-app>/api/auth/callback/google`. Copy the client id/secret into `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`. (OAuth consent screen: *Internal* for a Workspace org.)
+3. **Microsoft Entra ID:** Entra admin center → App registrations → New registration → *Accounts in this organizational directory only*; Redirect URI (Web): `https://<your-app>/api/auth/callback/azure-ad`. Certificates & secrets → New client secret. Set `AZURE_AD_CLIENT_ID` (Application ID), `AZURE_AD_CLIENT_SECRET` (the secret's *value*) and `AZURE_AD_TENANT_ID` (Directory ID).
+4. Optional **Atlassian:** developer.atlassian.com → Create OAuth 2.0 integration → Permissions: User identity API (`read:me`) → Callback URL `https://<your-app>/api/auth/callback/atlassian`.
+5. Set `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `AUTH_ADMIN_EMAILS` (and `AUTH_ALLOWED_DOMAINS` / `AUTH_ALLOWED_EMAILS`), then `AUTH_ENABLED=true`, and redeploy. Each member: sign in → Data & Settings → My account → connect Jira.
+
+**Migration from a single-user install.** Server data under the old single-user keys stays where it is and isn't shown to anyone once sign-in is on (each member starts with their own empty keys). In the browser, the existing local data (`command-center:v1`) is offered **only** to `AUTH_LEGACY_DATA_OWNER`: on their first sign-in on that device, if their own key is still empty, it is copied in (a conditional write — never over existing data) and the old key is deleted, so it is adopted once. Anyone else signing in on that device starts empty and never reads it. To go back, unset `AUTH_ENABLED` and redeploy — the per-member keys simply stop being used.
 
 ## Review fixes (V2.39)
 

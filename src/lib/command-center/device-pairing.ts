@@ -8,6 +8,19 @@
 
 const PAIRING_KEY = "command-center:app-state-secret:v1";
 
+// L5 — team sign-in: requests are authenticated by the session cookie instead of a pasted
+// secret. In that mode the device counts as paired (cross-device sync works per member without
+// pairing) and no pairing header is ever sent — the server rejects pairing secrets then anyway.
+let sessionAuthMode = false;
+
+export function setSessionAuthMode(on: boolean): void {
+  sessionAuthMode = on;
+}
+
+export function isSessionAuthMode(): boolean {
+  return sessionAuthMode;
+}
+
 export function getPairedSecret(): string | null {
   if (typeof window === "undefined") return null;
   try {
@@ -18,7 +31,7 @@ export function getPairedSecret(): string | null {
 }
 
 export function isDevicePaired(): boolean {
-  return !!getPairedSecret();
+  return sessionAuthMode || !!getPairedSecret();
 }
 
 export function setPairedSecret(secret: string): void {
@@ -42,6 +55,7 @@ export function clearPairedSecret(): void {
 /** The exact header this device sends on every authenticated sync request, or undefined when
  *  unpaired — callers (jira-source.ts, app-state-sync.ts) spread this into `fetch` headers. */
 export function pairedAuthHeader(): { Authorization: string } | undefined {
+  if (sessionAuthMode) return undefined;
   const secret = getPairedSecret();
   return secret ? { Authorization: `Bearer ${secret}` } : undefined;
 }
@@ -81,6 +95,7 @@ export function clearJiraWriteSecret(): void {
 
 /** Authorization for Jira WRITES — the write secret only. */
 export function jiraWriteAuthHeader(): { Authorization: string } | undefined {
+  if (sessionAuthMode) return undefined;
   const secret = getJiraWriteSecret();
   return secret ? { Authorization: `Bearer ${secret}` } : undefined;
 }

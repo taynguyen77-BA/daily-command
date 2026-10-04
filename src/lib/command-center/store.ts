@@ -20,7 +20,8 @@ import { JiraDataSource } from "./datasource/jira-source";
 import type { DataSourceProvider, DataSourceSyncResult } from "./datasource/types";
 import { LOCK_UNAVAILABLE, withJiraSyncLock, type JiraSyncLockManager } from "./sync-lock";
 import { idbGet, idbUpdate } from "./local-db";
-import { browserStateChannel, createLocalStorageStateStorage, readRevFromRaw, rebaseState, serializeWithRev, type StateChannel, type StateChannelFactory, type StateStorage } from "./state-persistence";
+import { idbDelete } from "./local-db";
+import { browserStateChannel, createLocalStorageKeyedBackend, createLocalStorageStateStorage, namedBrowserStateChannel, readRevFromRaw, rebaseState, serializeWithRev, STATE_CHANNEL_NAME, type KeyedStateBackend, type StateChannel, type StateChannelFactory, type StateStorage } from "./state-persistence";
 import { applyProjectScope, DEFAULT_JIRA_PROJECT_SCOPE, parseJiraProjectScope, scopeMentionEvents } from "./jira/project-scope";
 import { buildStandupState, type StandupState } from "./reports";
 import { buildDailyReview, type DailyReview } from "./daily-review";
@@ -133,6 +134,13 @@ import { asWeeklyInsights, type StoredWeeklyInsights } from "./ai/weekly-insight
 export type { MyActionItemsOnlyByPage };
 
 const STORAGE_KEY = "command-center:v1";
+
+/** L5 — the device's keyed storage for namespaced (signed-in) data. */
+function defaultKeyedBackend(): KeyedStateBackend | null {
+  if (typeof window === "undefined") return null;
+  if (typeof indexedDB !== "undefined") return { read: idbGet, update: idbUpdate, remove: idbDelete };
+  return createLocalStorageKeyedBackend(() => window.localStorage);
+}
 const MAX_SNAPSHOT_HISTORY = 60; // ~2 months of daily closes — plenty for trend/pattern/weekly-review, bounded
 const MAX_MEMORY_EVENTS = 200;
 const MAX_BLOCK_REASON_LENGTH = 200;
@@ -475,7 +483,13 @@ export interface CommandCenterStoreDeps {
   /** A2 — where the no-BroadcastChannel fallback listens for "focus"/"visibilitychange".
    *  undefined → window + document. */
   stateFocusTargets?: Pick<EventTarget, "addEventListener">[];
+  /** L5 — the device storage a signed-in member's namespaced key lives in. undefined →
+   *  IndexedDB (localStorage without it). Only used after setUserNamespace(). */
+  stateBackend?: KeyedStateBackend;
 }
+
+/** L5 — the key one signed-in member's data lives under on a device. */
+export const userStorageKey = (uid: string) => `${STORAGE_KEY}:u:${uid}`;
 
 /** E2 — a Focus Session action the store refused: the ticket's current status doesn't allow
  *  the move (ticket-work-state.ts canTransition). `since`/`surface` describe the change that
@@ -1079,10 +1093,33 @@ export class CommandCenterStore {
   private usesDefaultIndexedDb = false;
   private persistInFlight = false;
   private persistQueued = false;
+  /** L5 — team sign-in: whose data this tab holds (null = the single, pre-sign-in data set). */
+  private namespace: { uid: string; adoptLegacy: boolean } | null = null;
+  private namespacedBackend: KeyedStateBackend | null = null;
+
+  /** L5 — must be called before the first read (AuthGate does, before rendering the app): the
+   *  state is then read from and written to `command-center:v1:u:<uid>` only, and cross-tab
+   *  messages use a channel of that member's own. `adoptLegacy` (only for AUTH_LEGACY_DATA_OWNER)
+   *  moves the pre-sign-in data into this member's empty key, once. Returns false if the store
+   *  has already been read (too late to switch). */
+  setUserNamespace(uid: string, opts: { adoptLegacy?: boolean } = {}): boolean {
+    if (this.hydrated) return this.namespace?.uid === uid;
+    if (!/^u_[0-9a-f]{24}$/.test(uid)) return false;
+    this.namespace = { uid, adoptLegacy: opts.adoptLegacy === true };
+    this.resolvedStorage = undefined;
+    return true;
+  }
 
   private storage(): StateStorage | null {
     if (this.resolvedStorage !== undefined) return this.resolvedStorage;
     if (this.deps.stateStorage !== undefined) return (this.resolvedStorage = this.deps.stateStorage);
+    if (this.namespace) {
+      const backend = this.deps.stateBackend ?? defaultKeyedBackend();
+      if (!backend) return null;
+      const key = userStorageKey(this.namespace.uid);
+      this.namespacedBackend = backend;
+      return (this.resolvedStorage = { read: () => backend.read(key), update: (fn) => backend.update(key, fn) });
+    }
     if (typeof window === "undefined") return null; // server render — not cached, the client resolves its own
     if (typeof indexedDB === "undefined") {
       // No IndexedDB available (old browser, some locked-down private-browsing modes, or
@@ -1102,6 +1139,10 @@ export class CommandCenterStore {
     if (!storage) return;
     this.hydrated = true;
     this.connectCrossTab();
+    if (this.namespacedBackend) {
+      void this.hydrateNamespaced();
+      return;
+    }
     if (this.usesDefaultIndexedDb) {
       // V2.16 — IndexedDB reads are inherently async, but getSnapshot() must return
       // synchronously for useSyncExternalStore — this kicks off the read in the background;
@@ -1169,6 +1210,64 @@ export class CommandCenterStore {
     void this.checkForNewerState();
   }
 
+  /** L5 — a signed-in member's data: their own key only. The pre-sign-in data set
+   *  ("command-center:v1", in IndexedDB or the even older localStorage copy) is read ONLY for
+   *  the AUTH_LEGACY_DATA_OWNER, and only while their key is empty: it is copied in with a
+   *  conditional write (never over existing data), then deleted — so it is adopted once, by one
+   *  person, and every other member starts pristine without ever reading it. */
+  private async hydrateNamespaced() {
+    const backend = this.namespacedBackend!;
+    const ns = this.namespace!;
+    const key = userStorageKey(ns.uid);
+    try {
+      const raw = await backend.read(key);
+      if (raw) {
+        this.adoptStored(parseStoredState(raw), readRevFromRaw(raw));
+        return;
+      }
+    } catch {
+      return; // unreadable — stay pristine; never fall through to someone else's data
+    }
+    if (!ns.adoptLegacy) return;
+    let legacy: string | null = null;
+    try {
+      legacy = await backend.read(STORAGE_KEY);
+    } catch {
+      legacy = null;
+    }
+    if (!legacy && typeof window !== "undefined") {
+      try {
+        legacy = window.localStorage.getItem(STORAGE_KEY);
+      } catch {
+        legacy = null;
+      }
+    }
+    if (!legacy) return;
+    const migrated = serializeWithRev(parseStoredState(legacy), 0);
+    let wrote = false;
+    try {
+      await backend.update(key, (current) => {
+        if (current) return null;
+        wrote = true;
+        return migrated;
+      });
+      const now = await backend.read(key);
+      if (now) this.adoptStored(parseStoredState(now), readRevFromRaw(now));
+      if (wrote && now) {
+        await backend.remove(STORAGE_KEY);
+        if (typeof window !== "undefined") {
+          try {
+            window.localStorage.removeItem(STORAGE_KEY); // the pre-IndexedDB copy, if any
+          } catch {
+            // best-effort
+          }
+        }
+      }
+    } catch {
+      // Adoption failed — the legacy copy stays; the next load retries (still only for the owner).
+    }
+  }
+
   /** A2 — take a newer stored state as this tab's own. Local changes not yet persisted are
    *  rebased on top (never dropped), then persisted. */
   private adoptStored(stored: StoreState, rev: number) {
@@ -1193,7 +1292,7 @@ export class CommandCenterStore {
   }
 
   private connectCrossTab() {
-    const factory = this.deps.stateChannel !== undefined ? this.deps.stateChannel : browserStateChannel;
+    const factory = this.deps.stateChannel !== undefined ? this.deps.stateChannel : this.namespace ? namedBrowserStateChannel(`${STATE_CHANNEL_NAME}:${this.namespace.uid}`) : browserStateChannel;
     this.channel = factory
       ? factory((m) => {
           if (m.writerTabId !== this.tabId && m.rev > this.rev) void this.checkForNewerState();

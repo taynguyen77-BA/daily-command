@@ -5,13 +5,16 @@
 import { NextResponse } from "next/server";
 import { checkAppStateAuth } from "@/lib/command-center/app-state";
 import { createServerReportStore } from "@/lib/server/server-report-store";
+import { principalError, requestPrincipal, scopeOf } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   const auth = checkAppStateAuth(req.headers.get("authorization"), process.env.APP_STATE_SECRET);
-  if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
-  const state = await createServerReportStore().get();
+  // L2/L4 — sign-in on: the signed-in member's own snapshots.
+  const p = await requestPrincipal(req, { legacy: auth });
+  if (p.kind === "error") return principalError(p);
+  const state = await createServerReportStore(scopeOf(p)).get();
   return NextResponse.json({ ok: true, reports: state?.reports ?? {} });
 }

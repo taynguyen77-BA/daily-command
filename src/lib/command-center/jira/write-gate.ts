@@ -11,6 +11,11 @@
 // Writes are rate limited per server instance (30/hour by default) and every outcome past
 // authentication is appended to the server log (no comment text beyond 200 characters).
 //
+// L4 — team sign-in on: the caller is a signed-in member instead of a paired device. The
+// member needs canWriteJira (set by an admin) and their OWN Jira connection (shared Jira is
+// read-only); JIRA_WRITE_SECRET is not required; the rate limit and the log are per member
+// (the route passes that member's limiter and log), and log entries carry uid/email.
+//
 // Pure: env, the provider, the limiter, the log and the clock are injected — the route
 // (api/command-center/jira/write) is a thin wrapper, and every rule here is tested offline.
 
@@ -29,11 +34,12 @@ export interface JiraWriteServerConfig {
   missing: string[];
 }
 
-export function readJiraWriteConfig(env: JiraWriteGateEnv): JiraWriteServerConfig {
+export function readJiraWriteConfig(env: JiraWriteGateEnv, opts: { requireSecret?: boolean } = {}): JiraWriteServerConfig {
+  const requireSecret = opts.requireSecret ?? true;
   const enabled = env.JIRA_WRITE_ENABLED?.trim().toLowerCase() === "true";
   const projectKeys = Array.from(new Set((env.JIRA_WRITE_PROJECT_KEYS ?? "").split(",").map((k) => k.trim().toUpperCase()).filter((k) => /^[A-Z][A-Z0-9_]{0,19}$/.test(k))));
   const secretConfigured = !!env.JIRA_WRITE_SECRET?.trim();
-  const missing = [...(!enabled ? ["JIRA_WRITE_ENABLED=true"] : []), ...(projectKeys.length === 0 ? ["JIRA_WRITE_PROJECT_KEYS"] : []), ...(!secretConfigured ? ["JIRA_WRITE_SECRET"] : [])];
+  const missing = [...(!enabled ? ["JIRA_WRITE_ENABLED=true"] : []), ...(projectKeys.length === 0 ? ["JIRA_WRITE_PROJECT_KEYS"] : []), ...(requireSecret && !secretConfigured ? ["JIRA_WRITE_SECRET"] : [])];
   return { enabled, projectKeys, secretConfigured, missing };
 }
 
@@ -45,6 +51,16 @@ export const JIRA_WRITE_RATE_WINDOW_MS = 60 * 60 * 1000;
 export interface WriteRateLimiter {
   /** Records one write if under the limit; false when the limit is reached. */
   tryTake(nowMs: number): boolean;
+}
+
+/** L4 — one limiter per member (sign-in on), created on first use. */
+export function createPerUserRateLimiters(limit = JIRA_WRITE_RATE_LIMIT, windowMs = JIRA_WRITE_RATE_WINDOW_MS): (uid: string) => WriteRateLimiter {
+  const byUser = new Map<string, WriteRateLimiter>();
+  return (uid) => {
+    let l = byUser.get(uid);
+    if (!l) byUser.set(uid, (l = createWriteRateLimiter(limit, windowMs)));
+    return l;
+  };
 }
 
 export function createWriteRateLimiter(limit = JIRA_WRITE_RATE_LIMIT, windowMs = JIRA_WRITE_RATE_WINDOW_MS): WriteRateLimiter {
@@ -70,6 +86,9 @@ export interface JiraWriteServerLogEntry {
   outcome: "ok" | "failed" | "forbidden" | "rate-limited";
   /** Comment text (≤200 chars), flag field, or transition id; Jira's error on failure. */
   detail?: string;
+  /** L4 — the signed-in member who asked (team sign-in on). */
+  uid?: string;
+  email?: string;
 }
 
 export interface JiraWriteLogStore {
@@ -106,23 +125,33 @@ export interface JiraWriteGateDeps {
   limiter: WriteRateLimiter;
   log: JiraWriteLogStore;
   now: () => Date;
+  /** L4 — team sign-in: the signed-in member (replaces the JIRA_WRITE_SECRET pairing). */
+  member?: { uid: string; email: string; canWriteJira: boolean; jiraMode: "personal" | "shared" | "none" };
 }
 
 export async function handleJiraWriteRequest(req: JiraWriteGateRequest, authorization: string | null, deps: JiraWriteGateDeps): Promise<{ status: number; body: Record<string, unknown> }> {
-  const config = readJiraWriteConfig(deps.env);
+  const member = deps.member;
+  const config = readJiraWriteConfig(deps.env, { requireSecret: !member });
   if (config.missing.length > 0) {
     return { status: 503, body: { ok: false, error: `Jira write-back is not enabled on this server (missing: ${config.missing.join(", ")}).`, missing: config.missing } };
   }
-  const writeSecret = deps.env.JIRA_WRITE_SECRET!.trim();
   const isWrite = req.action !== "list-transitions";
-  const authorized = bearerMatches(authorization, writeSecret) || (!isWrite && bearerMatches(authorization, deps.env.APP_STATE_SECRET?.trim()));
-  if (!authorized) {
-    return { status: 401, body: { ok: false, error: isWrite ? "Writes need this device paired with JIRA_WRITE_SECRET (Data & Settings → Jira write-back)." : "Pair this device first." } };
+  if (member) {
+    if (member.jiraMode === "none") return { status: 403, body: { ok: false, error: "Connect your Jira account first (Data & Settings → My account)." } };
+    if (isWrite && member.jiraMode !== "personal") return { status: 403, body: { ok: false, error: "Shared Jira access is read-only — connect your own Jira account to write." } };
+    if (isWrite && !member.canWriteJira) return { status: 403, body: { ok: false, error: "Your account isn't allowed to write to Jira — ask an admin." } };
+  } else {
+    const writeSecret = deps.env.JIRA_WRITE_SECRET!.trim();
+    const authorized = bearerMatches(authorization, writeSecret) || (!isWrite && bearerMatches(authorization, deps.env.APP_STATE_SECRET?.trim()));
+    if (!authorized) {
+      return { status: 401, body: { ok: false, error: isWrite ? "Writes need this device paired with JIRA_WRITE_SECRET (Data & Settings → Jira write-back)." : "Pair this device first." } };
+    }
   }
+  const who = member ? { uid: member.uid, email: member.email } : {};
   const project = projectKeyOf(req.issueKey);
   const at = deps.now().toISOString();
   if (!project || !config.projectKeys.includes(project)) {
-    if (isWrite) await deps.log.append({ at, issueKey: req.issueKey, action: req.action, outcome: "forbidden" });
+    if (isWrite) await deps.log.append({ at, issueKey: req.issueKey, action: req.action, outcome: "forbidden", ...who });
     return { status: 403, body: { ok: false, error: `${project ?? req.issueKey} is not in this server's JIRA_WRITE_PROJECT_KEYS.` } };
   }
   if (!isWrite) {
@@ -130,10 +159,10 @@ export async function handleJiraWriteRequest(req: JiraWriteGateRequest, authoriz
     return { status: r.ok ? 200 : 502, body: r };
   }
   if (!deps.limiter.tryTake(deps.now().getTime())) {
-    await deps.log.append({ at, issueKey: req.issueKey, action: req.action, outcome: "rate-limited" });
-    return { status: 429, body: { ok: false, error: `Rate limit: at most ${JIRA_WRITE_RATE_LIMIT} Jira writes per hour on this server.` } };
+    await deps.log.append({ at, issueKey: req.issueKey, action: req.action, outcome: "rate-limited", ...who });
+    return { status: 429, body: { ok: false, error: `Rate limit: at most ${JIRA_WRITE_RATE_LIMIT} Jira writes per hour ${member ? "per member" : "on this server"}.` } };
   }
   const r = await performJiraWrite(deps.provider, req);
-  await deps.log.append({ at, issueKey: req.issueKey, action: req.action, outcome: r.ok ? "ok" : "failed", detail: r.ok ? detailOf(req) : clip(r.error) });
+  await deps.log.append({ at, issueKey: req.issueKey, action: req.action, outcome: r.ok ? "ok" : "failed", detail: r.ok ? detailOf(req) : clip(r.error), ...who });
   return { status: r.ok ? 200 : 502, body: r };
 }

@@ -10,14 +10,19 @@ import { NextResponse } from "next/server";
 import { fetchIssueContext, getConfiguredProjectKeys, getJiraConfig } from "@/lib/server/jira-client";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { handleIssueContextRequest } from "@/lib/command-center/jira/issue-context-handler";
+import { principalError, principalJira, requestPrincipal } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 
 export async function GET(req: Request) {
   const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
-  if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
+  // L2/L3 — sign-in on: the signed-in member, reading with their own Jira connection.
+  const p = await requestPrincipal(req, { legacy: auth });
+  if (p.kind === "error") return principalError(p);
 
-  const config = getJiraConfig();
+  const jira = p.kind === "user" ? await principalJira(p) : null;
+  if (jira && !jira.ok) return NextResponse.json({ ok: false, error: jira.error, errorKind: jira.errorKind }, { status: jira.status });
+  const config = jira?.ok ? jira.config : getJiraConfig();
   const result = await handleIssueContextRequest(new URL(req.url), {
     configured: !!config,
     jiraProjectKeys: getConfiguredProjectKeys(),

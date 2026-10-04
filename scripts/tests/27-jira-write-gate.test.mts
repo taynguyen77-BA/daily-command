@@ -97,7 +97,8 @@ const WRITES: JiraWriteGateRequest[] = [comment, { action: "flag", issueKey: "PA
   const failing = gate(ENV, { status: 400 });
   const f = await failing.call(comment, "Bearer write-s3cret");
   ok(group, f.status === 502 && failing.log.entries[0].outcome === "failed" && /400: Nope/.test(failing.log.entries[0].detail ?? ""), "a Jira refusal → 502, logged as failed with Jira's message");
-  const store = read("src/lib/server/jira-write-log-store.ts");
+  // L4 (V2.40) — the KV log implementation moved to kv/kv-stores.ts (scoped per member, tested offline).
+  const store = read("src/lib/command-center/kv/kv-stores.ts");
   ok(group, /kv\.rpush\(LOG_KEY/.test(store) && !/kv\.(set|lset|lrem)\(LOG_KEY/.test(store), "the KV log is append-only (rpush; trimmed to the newest entries, never edited)");
   const panel = read("src/components/command-center/JiraWriteBackPanel.tsx");
   ok(group, /data-jira-write-server-log/.test(panel) && /checkJiraWriteServerStatus/.test(panel), "Data & Settings shows the server log");

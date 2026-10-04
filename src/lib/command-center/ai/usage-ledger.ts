@@ -26,6 +26,8 @@ export interface AiUsageRecord {
   /** Served from the server's dedupe cache — no model call, zero tokens. */
   cached: boolean;
   outcome: "ok" | "grounding-retry" | "grounding-rejected" | "invalid-output" | "refused" | "truncated" | "error";
+  /** L4 — the signed-in member who made the call (team sign-in on); absent otherwise. */
+  uid?: string;
 }
 
 export interface AiUsageTotals {
@@ -63,6 +65,17 @@ export function resolveDailyTokenCap(raw: string | undefined): number {
   const n = Number(raw.trim().replace(/_/g, ""));
   return Number.isInteger(n) && n >= 0 ? n : DEFAULT_AI_DAILY_TOKEN_CAP;
 }
+
+/** L4 — AI_USER_DAILY_TOKEN_CAP: each signed-in member's own daily budget, on top of the
+ *  global cap. Unset/invalid → no per-member cap (null). */
+export function resolveUserDailyTokenCap(raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  const n = Number(raw.trim().replace(/_/g, ""));
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** One member's records. */
+export const recordsOfUser = (records: AiUsageRecord[], uid: string) => records.filter((r) => r.uid === uid);
 
 export const utcDay = (d: Date) => d.toISOString().slice(0, 10);
 

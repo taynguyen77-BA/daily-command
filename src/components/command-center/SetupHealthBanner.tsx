@@ -36,7 +36,7 @@ import { isOlderThanDays } from "@/lib/command-center/backup";
 import { useCrossDeviceSyncActive } from "./BackupReminder";
 import { latestSnapshotRunLocal, localHourOf } from "@/lib/command-center/report-schedule";
 import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
-import { getJiraWriteSecret } from "@/lib/command-center/device-pairing";
+import { getJiraWriteSecret, isSessionAuthMode } from "@/lib/command-center/device-pairing";
 import type { CommandCenterData, DataSourceType, PersonalIdentity } from "@/lib/command-center/types";
 
 /** C4 — additional, independently-loaded facts. Every field optional: undefined/null means
@@ -55,8 +55,14 @@ export interface SetupHealthExtras {
   /** G2 — Jira write-back switched on here; the server gate's status (null = loading /
    *  unreachable) and whether this device holds the write pairing. */
   jiraWrite?: { clientOn: boolean; server: { missing: string[] } | null; devicePaired: boolean };
+  /** L1 — team sign-in switched on but missing required variables (from /api/command-center/me). */
+  authMissing?: string[];
   /** G3 — the sync cron's UTC hours, Jira's offset (minutes) and the snapshot hour, when known. */
   snapshotSchedule?: { cronHoursUtc: number[]; offsetMinutes?: number; snapshotHourLocal: number };
+}
+
+export function authMisconfiguredText(missing: string[]): string {
+  return `Team sign-in is on (AUTH_ENABLED=true) but not fully configured — every route refuses requests until the server sets: ${missing.join(", ")}.`;
 }
 
 export const AI_CAP_WITHOUT_KV_WARNING = "AI daily cap is per server instance — configure KV to enforce it";
@@ -78,6 +84,9 @@ export function computeSetupHealthRows(
   extras: SetupHealthExtras = {}
 ): SetupHealthRow[] {
   const rows: SetupHealthRow[] = [];
+
+  // L1 — fail closed: with sign-in on but misconfigured, every route answers 503.
+  if (extras.authMissing && extras.authMissing.length > 0) rows.push({ id: "auth-config", text: authMisconfiguredText(extras.authMissing) });
 
   // C4 — only meaningful once Jira is the data source (demo/local-import have no accounts).
   if (dataSource === "jira" && !personalIdentity?.accountId) {
@@ -246,7 +255,7 @@ export function SetupHealthBanner() {
     sprintFieldMapped: !!state.jiraSprintFieldId,
     ai,
     backup: { lastBackupAt: state.lastBackupAt, crossDeviceActive, isDemo: state.isDemo, now: new Date() },
-    jiraWrite: { clientOn: writeOn, server: jiraWriteServer, devicePaired: !!getJiraWriteSecret() },
+    jiraWrite: { clientOn: writeOn, server: jiraWriteServer, devicePaired: isSessionAuthMode() || !!getJiraWriteSecret() },
     snapshotSchedule: schedule,
   });
   if (rows.length === 0) return null;

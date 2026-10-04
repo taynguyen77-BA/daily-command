@@ -87,3 +87,18 @@ export async function idbUpdate(key: string, fn: (current: string | null) => str
     db.close();
   }
 }
+
+/** L5 — removes one key (the pre-sign-in data, once its owner has taken it over). */
+export async function idbDelete(key: string): Promise<void> {
+  const db = await openDb();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("IndexedDB delete failed"));
+    });
+  } finally {
+    db.close();
+  }
+}

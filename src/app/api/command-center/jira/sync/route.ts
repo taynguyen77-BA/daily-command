@@ -20,7 +20,12 @@ import { createServerReportStore } from "@/lib/server/server-report-store";
 import { isServerDailyReportConfigured, reportSnapshotHourLocal } from "@/lib/command-center/server-daily-report";
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
-import { runCronTick } from "@/lib/command-center/jira/cron-tick";
+import { runCronForMembers, runCronTick } from "@/lib/command-center/jira/cron-tick";
+import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
+import { effectiveAccountId } from "@/lib/command-center/auth/principal";
+import { planCronMembers } from "@/lib/command-center/auth/cron-plan";
+import { isAppStateStoreConfigured } from "@/lib/command-center/app-state";
+import { authSettings, encryptionKey, principalError, principalJira, requestPrincipal, userDirectory } from "@/lib/server/auth";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents, latestOwnCommentAt, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
@@ -67,11 +72,16 @@ function authorizeSyncRequest(req: Request): { ok: true } | { ok: false; status:
 
 export async function POST(req: Request) {
   const auth = authorizeSyncRequest(req);
-  if (!auth.ok) {
-    return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
+  // L2 — sign-in on: the signed-in member (CRON_SECRET only on the cron GET below).
+  const principal = await requestPrincipal(req, { legacy: auth });
+  if (principal.kind === "error") {
+    return NextResponse.json({ ok: false, error: principal.error, errorKind: principal.status === 503 && principal.missing ? "not-configured" : "cron-unauthorized", ...(principal.missing ? { missing: principal.missing } : {}) }, { status: principal.status });
   }
 
-  const config = getJiraConfig();
+  // L3 — a member syncs with their own Jira connection; their verified accountId is authoritative.
+  const memberJira = principal.kind === "user" ? await principalJira(principal) : null;
+  if (memberJira && !memberJira.ok) return NextResponse.json({ ok: false, error: memberJira.error, errorKind: memberJira.errorKind }, { status: memberJira.status });
+  const config = memberJira?.ok ? memberJira.config : getJiraConfig();
   if (!config) {
     return NextResponse.json({ ok: false, error: "Jira is not configured on the server.", errorKind: "not-configured" }, { status: 503 });
   }
@@ -163,7 +173,7 @@ export async function POST(req: Request) {
     if (!cur[field] || at > cur[field]!) cur[field] = at;
     if (field === "lastCommentAt" && (!cur.lastActivityAt || at > cur.lastActivityAt)) cur.lastActivityAt = at;
   };
-  const requestAccountId = parsedRequest.data.accountId;
+  const requestAccountId = effectiveAccountId(memberJira?.ok ? memberJira.accountId : undefined, parsedRequest.data.accountId);
   await Promise.all(
     prioritizedKeys.map(async (key) => {
       try {
@@ -185,7 +195,7 @@ export async function POST(req: Request) {
   // never fails the sync, same discipline as the changelog enrichment above; the client
   // simply keeps whatever mentionEvents it already had from the previous sync.
   let mentionEvents: MentionEvent[] | undefined;
-  const accountId = parsedRequest.data.accountId;
+  const accountId = requestAccountId;
   if (accountId) {
     try {
       // V2.18 §6 — same projectKeys the main issue fetch above uses, so a FOCUSED sync never
@@ -281,6 +291,8 @@ export async function POST(req: Request) {
  */
 export async function GET(req: Request) {
   const auth = authorizeSyncRequest(req);
+  // L4 — sign-in on: CRON_SECRET only, and one run per member (their Jira, stores, Slack, timezone).
+  if (isAuthEnabled(process.env)) return memberCron(req);
   if (!auth.ok) {
     return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
   }
@@ -299,4 +311,24 @@ export async function GET(req: Request) {
       : undefined,
   });
   return NextResponse.json(result);
+}
+
+/** L4 — the cron with team sign-in on: notify + snapshot for every member who turned them on
+ *  and has a usable Jira connection, sequentially within a time budget; one member's failure
+ *  never stops the others. */
+async function memberCron(req: Request) {
+  const principal = await requestPrincipal(req, { allowCron: true });
+  if (principal.kind === "error") return principalError(principal);
+  if (principal.kind !== "cron") return NextResponse.json({ ok: false, error: "The cron run needs Authorization: Bearer <CRON_SECRET>.", errorKind: "cron-unauthorized" }, { status: 401 });
+  const directory = userDirectory();
+  if (!directory) return NextResponse.json({ ok: false, error: "Sign-in needs Vercel KV.", errorKind: "not-configured" }, { status: 503 });
+  const { plans, skipped } = await planCronMembers(directory, process.env, encryptionKey(), authSettings().allowSharedJira);
+  const budget = Number(process.env.CRON_RUN_BUDGET_MS);
+  const result = await runCronForMembers(fetch, plans, {
+    storesFor: (uid) => ({ notifyStore: isNotifyStoreConfigured() ? createNotifyStore(uid) : undefined, reportStore: isAppStateStoreConfigured() ? createServerReportStore(uid) : undefined }),
+    now: () => new Date(),
+    snapshotHourLocal: reportSnapshotHourLocal(process.env),
+    budgetMs: Number.isFinite(budget) && budget > 0 ? budget : 50_000,
+  });
+  return NextResponse.json({ ...result, skipped: [...skipped, ...result.skipped] });
 }

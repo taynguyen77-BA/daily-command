@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
-import { clearJiraWriteSecret, getJiraWriteSecret, setJiraWriteSecret } from "@/lib/command-center/device-pairing";
+import { clearJiraWriteSecret, getJiraWriteSecret, isSessionAuthMode, setJiraWriteSecret } from "@/lib/command-center/device-pairing";
 import { Panel, SectionHeading } from "./ui";
 import { useCommandCenter } from "./use-command-center";
 
@@ -20,6 +20,9 @@ export function JiraWriteBackPanel() {
   const [server, setServer] = useState<JiraWriteServerStatus | null | undefined>(undefined);
   const [secretDraft, setSecretDraft] = useState("");
   const [devicePaired, setDevicePaired] = useState(false);
+  // L6 — team sign-in: writes use the member's own Jira account and an admin's permission; the
+  // JIRA_WRITE_SECRET device pairing doesn't apply and isn't shown.
+  const sessionMode = isSessionAuthMode();
   const refresh = () => {
     setDevicePaired(!!getJiraWriteSecret());
     void checkJiraWriteServerStatus().then(setServer);
@@ -47,9 +50,13 @@ export function JiraWriteBackPanel() {
             <p className="text-orange">Off on the server — nothing can be written until it sets: {server.missing.join(", ")}.</p>
           ) : (
             <p className="text-green">
-              On{server.projectKeys ? ` — server allows: ${server.projectKeys.join(", ")}` : ""}. Writes need this device paired with JIRA_WRITE_SECRET (separate from sync), and are limited to 30 per hour.
+              On{server.projectKeys ? ` — server allows: ${server.projectKeys.join(", ")}` : ""}.{" "}
+              {sessionMode
+                ? `Writes use your own Jira connection and need an admin's permission (${server.writePaired ? "you have both" : "not yet — see My account / ask an admin"}); at most 30 per hour.`
+                : "Writes need this device paired with JIRA_WRITE_SECRET (separate from sync), and are limited to 30 per hour."}
             </p>
           )}
+          {!sessionMode && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <span>This device: {devicePaired ? <span className="text-green">paired for writes</span> : "not paired for writes"}</span>
             {devicePaired ? (
@@ -79,6 +86,7 @@ export function JiraWriteBackPanel() {
               </>
             )}
           </div>
+          )}
         </div>
         <div>
           <p className="text-xs font-semibold uppercase tracking-wide text-text3">Allowed projects</p>
