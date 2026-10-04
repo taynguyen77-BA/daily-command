@@ -16,8 +16,9 @@ export function UserMenu() {
       <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="rounded-full border border-border bg-surface px-2.5 py-0.5 text-[11px] text-text2 hover:text-text">
         {user.name || user.email}
       </button>
+      {/* z-40: above the sticky Nav (z-30), below dialogs (z-50). */}
       {open && (
-        <div className="absolute right-0 z-20 mt-1 w-64 rounded-md border border-border bg-surface p-3 text-xs text-text2 shadow-lg">
+        <div className="absolute right-0 z-40 mt-1 w-64 rounded-md border border-border bg-surface p-3 text-xs text-text2 shadow-lg">
           <p className="font-semibold text-text">{user.name || user.email}</p>
           <p className="break-all">{user.email}</p>
           <p className="mt-1 text-text3">Role: {user.role === "admin" ? "Admin" : "Member"}</p>
