@@ -48,7 +48,7 @@ export interface SetupHealthExtras {
   /** Whether a Jira sprint custom field id is set in Data & Settings. */
   sprintFieldMapped?: boolean;
   /** The AI endpoint's status (null = still loading / unreachable). */
-  ai?: { available: boolean; modelFromEnv?: boolean; fastModelFromEnv?: boolean; model?: string; fastModel?: string } | null;
+  ai?: { available: boolean; modelFromEnv?: boolean; fastModelFromEnv?: boolean; model?: string; fastModel?: string; capStorage?: "kv" | "memory" } | null;
   /** E1 — last backup download and whether cross-device sync (configured + paired) is active
    *  (null = still loading). */
   backup?: { lastBackupAt?: string; crossDeviceActive: boolean | null; isDemo: boolean; now: Date };
@@ -58,6 +58,8 @@ export interface SetupHealthExtras {
   /** G3 — the sync cron's UTC hours, Jira's offset (minutes) and the snapshot hour, when known. */
   snapshotSchedule?: { cronHoursUtc: number[]; offsetMinutes?: number; snapshotHourLocal: number };
 }
+
+export const AI_CAP_WITHOUT_KV_WARNING = "AI daily cap is per server instance — configure KV to enforce it";
 
 export interface SetupHealthRow {
   id: string;
@@ -116,6 +118,11 @@ export function computeSetupHealthRows(
   if (extras.ai?.available && (!extras.ai.modelFromEnv || !extras.ai.fastModelFromEnv)) {
     const missing = [!extras.ai.modelFromEnv ? `ANTHROPIC_MODEL (using ${extras.ai.model ?? "the default"})` : "", !extras.ai.fastModelFromEnv ? `ANTHROPIC_MODEL_FAST (using ${extras.ai.fastModel ?? "the default"})` : ""].filter(Boolean);
     rows.push({ id: "ai-model", text: `AI model not set explicitly: ${missing.join(", ")} — set it on the server to pin which model answers.` });
+  }
+
+  // K6 — without KV the usage ledger is per serverless instance, so the cap isn't really daily.
+  if (extras.ai?.available && extras.ai.capStorage === "memory") {
+    rows.push({ id: "ai-cap-kv", text: AI_CAP_WITHOUT_KV_WARNING });
   }
 
   // E1 — the only copy of this data is this browser's: say so once a week has passed.

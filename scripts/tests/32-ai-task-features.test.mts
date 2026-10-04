@@ -118,14 +118,14 @@ function fakeStatusStore() {
   let loads = 0;
   const provider = { mode: "claude" as const, generateTicketBrief: async () => (modelCalls++, good as never) };
   const loadContext = async () => (loads++, { ok: true as const, context: ctx("PAY-1") });
-  const first = await openTicketBrief({ key: "PAY-1", workItemLastUpdated: "2026-10-04", cache: {}, settings, today: TODAY, nowIso: NOW.toISOString(), loadContext, provider });
+  const first = await openTicketBrief({ key: "PAY-1", workItemUpdated: "2026-10-04", cache: {}, settings, today: TODAY, nowIso: NOW.toISOString(), loadContext, provider });
   ok(group, first.kind === "generated" && modelCalls === 1 && first.stored.updated === "2026-10-04T10:00:00.000+0000", "first open generates a brief keyed by the issue's `updated`");
   const cache = first.kind === "generated" ? { "PAY-1": first.stored } : {};
-  const again = await openTicketBrief({ key: "PAY-1", workItemLastUpdated: "2026-10-04", cache, settings, today: TODAY, loadContext, provider });
+  const again = await openTicketBrief({ key: "PAY-1", workItemUpdated: "2026-10-04", cache, settings, today: TODAY, loadContext, provider });
   ok(group, again.kind === "cached" && !again.stale && modelCalls === 1 && loads === 1, "re-opening the unchanged ticket uses the cache: 0 model calls, no refetch");
-  const changed = await openTicketBrief({ key: "PAY-1", workItemLastUpdated: "2026-10-05", cache, settings, today: TODAY, loadContext, provider });
+  const changed = await openTicketBrief({ key: "PAY-1", workItemUpdated: "2026-10-05", cache, settings, today: TODAY, loadContext, provider });
   ok(group, changed.kind === "cached" && changed.stale && modelCalls === 1, "a ticket updated since shows the stored brief marked 'updated since brief' (still 0 calls)");
-  const regen = await openTicketBrief({ key: "PAY-1", workItemLastUpdated: "2026-10-05", cache, settings, today: TODAY, regenerate: true, loadContext, provider });
+  const regen = await openTicketBrief({ key: "PAY-1", workItemUpdated: "2026-10-05", cache, settings, today: TODAY, regenerate: true, loadContext, provider });
   ok(group, regen.kind === "generated" && modelCalls === 2, "Regenerate makes a new brief");
   const blocked = await openTicketBrief({ key: "OPS-1", cache: {}, settings, today: TODAY, loadContext, provider });
   ok(group, blocked.kind === "disabled" && loads === 2, "a project outside the allow-list: 'AI disabled', nothing fetched or sent");
@@ -234,7 +234,8 @@ function fakeStatusStore() {
     },
   };
   const cache = memoryDraftCache();
-  const base = { context: ctx("PAY-1"), mention, settings, provider, cache };
+  const fixed = (c: IssueContext) => async () => ({ ok: true as const, context: c, fromCache: false });
+  const base = { loadContext: fixed(ctx("PAY-1")), mention, settings, provider, cache };
   const a = await draftMentionReplyFlow({ ...base, options: DEFAULT_REPLY_OPTIONS });
   ok(group, a.kind === "done" && !a.fromCache && calls.length === 1 && calls[0].body.includes("column order by Friday"), "drafts from the comment thread (the full mention comment)");
   const same = await draftMentionReplyFlow({ ...base, options: DEFAULT_REPLY_OPTIONS });
@@ -243,7 +244,7 @@ function fakeStatusStore() {
   const client = await draftMentionReplyFlow({ ...base, options: { ...DEFAULT_REPLY_OPTIONS, tone: "client" } });
   ok(group, vi.kind === "done" && !vi.fromCache && client.kind === "done" && !client.fromCache && calls.length === 3 && calls[1].language === "vi" && calls[2].tone === "client", "a language or tone switch produces a new draft");
   ok(group, new Set([DEFAULT_REPLY_OPTIONS, { ...DEFAULT_REPLY_OPTIONS, language: "vi" as const }, { ...DEFAULT_REPLY_OPTIONS, tone: "client" as const }, { ...DEFAULT_REPLY_OPTIONS, length: "short" as const }].map((o) => mentionReplyCacheKey(mention, "u", o))).size === 4, "each option set has its own cache key");
-  const off = await draftMentionReplyFlow({ ...base, context: ctx("OPS-1"), mention: { ...mention, issueKey: "OPS-1" }, options: DEFAULT_REPLY_OPTIONS });
+  const off = await draftMentionReplyFlow({ ...base, loadContext: fixed(ctx("OPS-1")), mention: { ...mention, issueKey: "OPS-1" }, options: DEFAULT_REPLY_OPTIONS });
   ok(group, off.kind === "disabled" && calls.length === 3, "non-allowed project: nothing is sent");
   ok(group, aiTaskTier("draftMentionReply") === "default", "default tier");
 

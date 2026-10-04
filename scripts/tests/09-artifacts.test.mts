@@ -3,7 +3,7 @@
 
 import { toSnapshot } from "../../src/lib/command-center/change-detection";
 import { emptyData } from "../../src/lib/command-center/types";
-import { aiRequestSchema } from "../../src/lib/command-center/ai/schemas";
+import { aiStructuredRequestSchema } from "../../src/lib/command-center/ai/schemas";
 import { MockAIProvider } from "../../src/lib/command-center/ai/provider";
 import { ClaudeProvider } from "../../src/lib/command-center/ai/claude-provider";
 import { parseStoredState, commandCenterStore } from "../../src/lib/command-center/store";
@@ -258,7 +258,7 @@ import { TODAY, makeJiraIssue, v22Blocked, v22Data, v22Dep, v22Derived, v22Norma
   ok("V2.2 AI schema", communicationArtifactResponseSchema.safeParse({ text: "Draft wording.", confidence: 0.6 }).success, "a valid COMMUNICATION_ARTIFACT payload is accepted");
   ok("V2.2 AI schema", !communicationArtifactResponseSchema.safeParse({ text: "Draft wording." }).success, "a payload missing confidence is rejected");
   ok("V2.2 AI schema", !communicationArtifactResponseSchema.safeParse({ confidence: 0.6 }).success, "a payload missing text is rejected");
-  ok("V2.2 AI schema", aiRequestSchema.safeParse({ task: "generateCommunicationArtifact", prompt: "..." }).success, "'generateCommunicationArtifact' is a recognized AITask");
+  ok("V2.2 AI schema", aiStructuredRequestSchema.safeParse({ task: "generateCommunicationArtifact", input: {} }).success, "'generateCommunicationArtifact' is a recognized AITask");
 
   const mock = new MockAIProvider();
   const mockResult = await mock.generateCommunicationArtifact("STATUS_UPDATE", ["Trajectory: ON TRACK."], ["evidence 1"]);

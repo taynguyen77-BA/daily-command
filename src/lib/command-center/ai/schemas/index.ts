@@ -176,15 +176,6 @@ export const aiStructuredRequestSchema = z.object({
 });
 export type AIStructuredRequest = z.infer<typeof aiStructuredRequestSchema>;
 
-/** @deprecated V2.36 H3 — the old free-form `{ task, prompt }` proxy. Accepted only while
- *  AI_LEGACY_PROMPT_PATH=on and only for the tasks that existed before V2.36 (LEGACY_PROMPT_TASKS
- *  in task-registry.ts). Scheduled for removal in V2.37. */
-export const aiRequestSchema = z.object({
-  task: aiTaskSchema,
-  prompt: z.string().min(1).max(20000),
-});
-export type AIRequest = z.infer<typeof aiRequestSchema>;
-
 // V2.36 H — requirement check over one ticket. Lists, never a verdict; every item must be
 // traceable to the supplied ticket text (grounding guard, ai/evaluation.ts).
 export const requirementCheckResponseSchema = z.object({

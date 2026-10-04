@@ -33,6 +33,7 @@ import { BA_CHECK_TYPES } from "@/lib/command-center/ai/ba-requirements";
 import { blockedAgeBusinessDays, isBlockerOverdue } from "@/lib/command-center/blocker-followup";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
+import { workItemUpdatedStamp } from "@/lib/command-center/jira/updated-time";
 
 /** Re-exported for existing importers; the list itself lives in types.ts (E3). */
 export { SKIP_REASONS };
@@ -491,8 +492,8 @@ export function TaskReferenceRow({
       extra={
         w?.sourceType === "jira" && (state.features.ticketBrief || (state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type))) ? (
           <>
-            {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemLastUpdated={w.lastUpdated} />}
-            {state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type) && <BaRequirementCheck ticketKey={key} workItemLastUpdated={w.lastUpdated} />}
+            {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}
+            {state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type) && <BaRequirementCheck ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}
           </>
         ) : undefined
       }

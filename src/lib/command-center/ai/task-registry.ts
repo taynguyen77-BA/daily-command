@@ -399,29 +399,6 @@ export function quoteFound(quote: string | undefined, source: string): boolean {
   return squash(source).includes(squash(quote));
 }
 
-/** The tasks the deprecated free-form `{ task, prompt }` path may still serve while
- *  AI_LEGACY_PROMPT_PATH=on — only those that existed before V2.36. New tasks never do. */
-export const LEGACY_PROMPT_TASKS: ReadonlySet<AITask> = new Set<AITask>([
-  "analyzePriorities",
-  "detectRisks",
-  "explainChanges",
-  "generateActionPlan",
-  "generateCommunication",
-  "generateEndOfDaySummary",
-  "interpretTrend",
-  "detectDecisionConflicts",
-  "analyzeActionOutcomes",
-  "generateWeeklyReview",
-  "answerQuery",
-  "assessProactive",
-  "generateProjectStory",
-  "generateDecisionOptions",
-  "interpretOutcome",
-  "generateDailyGuidance",
-  "generateCommunicationArtifact",
-  "polishReportSummary",
-]);
-
 export type ParsedTaskInput = { ok: true; input: unknown } | { ok: false; error: string };
 
 export function parseTaskInput(task: AITask, input: unknown): ParsedTaskInput {

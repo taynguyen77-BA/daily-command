@@ -17,10 +17,10 @@ import {
   getProjectClientMap,
 } from "@/lib/server/jira-client";
 import { createServerReportStore } from "@/lib/server/server-report-store";
-import { isServerDailyReportConfigured, reportSnapshotHourLocal, runServerDailySnapshot } from "@/lib/command-center/server-daily-report";
+import { isServerDailyReportConfigured, reportSnapshotHourLocal } from "@/lib/command-center/server-daily-report";
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
-import { runServerSideNotifyCheck } from "@/lib/command-center/cron-notify";
+import { runCronTick } from "@/lib/command-center/jira/cron-tick";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents, latestOwnCommentAt, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
@@ -264,66 +264,39 @@ export async function POST(req: Request) {
 }
 
 /**
- * V2.10 §4 — Vercel Cron Jobs (see vercel.json) always issue a GET request, never POST; this
- * re-dispatches to the exact same POST handler above (an unscoped, full sync — a cron
- * invocation has no browser-persisted `lastSyncCompletedAt`/accountId/focus-scope to send, so
- * it can only ever request everything this server is configured to see) rather than
- * duplicating any sync logic.
+ * V2.10 §4 — Vercel Cron Jobs (see vercel.json) and the GitHub Actions fallback always issue a
+ * GET. K3 (V2.39) — the GET no longer runs the POST sync above: a cron has no browser to merge
+ * a full dataset into, so that sync (every issue, changelogs, mention comments) was fetched and
+ * thrown away. It now runs only the server-side steps that persist something (jira/cron-tick.ts):
  *
- * V2.13 §2 — this app's "no server-side persistence" limitation (see types.ts's own
- * "Local-only V1: no auth, no multi-tenant, no backend") was, until this pass, a real gap for
- * an unattended cron GET specifically: there was no accountId to search mentions for and
- * nowhere server-side to merge/store a result or fire a Slack notification from. That gap is
- * now closed for the narrow slice of state a personal-notify check needs (see notify-state.ts/
- * notify-store.ts) — when PERSONAL_JIRA_ACCOUNT_ID and Vercel KV are both configured, this GET
- * additionally runs runServerSideNotifyCheck AFTER the existing full sync above completes,
- * using the real Jira config and the real KV-backed store. Everything else about this app
- * remains exactly as local-only as before — see the dev prompt this pass implements. When
- * either PERSONAL_JIRA_ACCOUNT_ID or KV is absent, this is a complete no-op (the sync response
- * is returned completely unchanged) — same graceful-degradation contract as every optional
- * capability in this app.
+ * V2.13 §2 — the notify check, when PERSONAL_JIRA_ACCOUNT_ID and Vercel KV are configured
+ * (notify-state.ts/notify-store.ts).
  *
- * E4 — when Vercel KV + APP_STATE_SECRET + PERSONAL_JIRA_ACCOUNT_ID are configured, this GET
- * also writes the day's server-side standup snapshot (server-daily-report.ts) on workdays, so a
- * Daily Report exists even for a day the app was never opened.
+ * E4 — the day's server-side standup snapshot, when Vercel KV + APP_STATE_SECRET +
+ * PERSONAL_JIRA_ACCOUNT_ID are configured (server-daily-report.ts), so a Daily Report exists
+ * even for a day the app was never opened.
+ *
+ * Without an account id (or with neither step configured) the cron makes no Jira call at all.
+ * The browser's Sync Now keeps using POST, unchanged.
  */
 export async function GET(req: Request) {
-  const forwarded = new Request(req.url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", authorization: req.headers.get("authorization") ?? "" },
-    body: "{}",
-  });
-  const response = await POST(forwarded);
-
-  const accountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
+  const auth = authorizeSyncRequest(req);
+  if (!auth.ok) {
+    return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
+  }
   const config = getJiraConfig();
-  if (!accountId || !config) return response;
-
-  // §2 Task 2 point 3 — a connectivity failure inside either step below must never corrupt
-  // persisted state (both modules only write after every fetch succeeded) AND must never fail
-  // this response — the sync above already succeeded or failed on its own terms; these are
-  // separate, best-effort concerns layered on top, surfaced as warnings.
-  const warnings: string[] = [];
-  if (isNotifyStoreConfigured()) {
-    try {
-      const result = await runServerSideNotifyCheck(fetch, config, accountId, createNotifyStore());
-      if (result.error) warnings.push(`Server-side notify check failed: ${result.error}`);
-    } catch (err) {
-      warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    }
+  if (!config) {
+    return NextResponse.json({ ok: false, error: "Jira is not configured on the server.", errorKind: "not-configured" }, { status: 503 });
   }
-  // E4 — with KV + APP_STATE_SECRET, also write today's server-side standup snapshot (workdays
-  // only), so a day the app was never opened still has a Daily Report.
-  if (isServerDailyReportConfigured(process.env)) {
-    try {
-      const result = await runServerDailySnapshot(fetch, config, accountId, createServerReportStore(), { now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) });
-      if (result.error) warnings.push(`Server-side daily report failed: ${result.error}`);
-    } catch (err) {
-      warnings.push(`Server-side daily report failed: ${err instanceof Error ? err.message : "unknown error"}`);
-    }
+  const accountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
+  if (!accountId) {
+    return NextResponse.json({ ok: true, cron: true, ran: { notify: false, snapshot: false }, warnings: ["PERSONAL_JIRA_ACCOUNT_ID is not set — the cron has nothing to do (notify and the daily snapshot both need it)."] });
   }
-  if (warnings.length === 0) return response;
-  const body = (await response.clone().json()) as Record<string, unknown>;
-  const merged = [...(Array.isArray(body.warnings) ? body.warnings : []), ...warnings];
-  return NextResponse.json({ ...body, warnings: merged }, { status: response.status });
+  const result = await runCronTick(fetch, config, accountId, {
+    notifyStore: isNotifyStoreConfigured() ? createNotifyStore() : undefined,
+    snapshot: isServerDailyReportConfigured(process.env)
+      ? { store: createServerReportStore(), now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) }
+      : undefined,
+  });
+  return NextResponse.json(result);
 }

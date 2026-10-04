@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.35
+**Current version:** V2.39
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.35.0` ↔ `V2.35`) and the test suite fails if this line disagrees with it (group `E6 Version line`).
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.39.0` ↔ `V2.39`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -59,7 +59,7 @@ A malformed value for any optional variable is ignored (never throws) and falls 
 
 Writes are limited to 30 per hour per server instance (429 beyond), and every write past authentication — ok, failed, refused for the project, rate-limited — is appended to a server log in Vercel KV (time, issue key, action, outcome; at most 200 characters of comment text), shown in Data & Settings → Jira write-back.
 
-**Server report snapshot timing (V2.35):** the Vercel cron in `vercel.json` runs at `0 11 * * *` — 11:00 UTC, i.e. 18:00 in UTC+7 — so the day's server snapshot (see "Reports without opening the app") is taken after the workday and includes afternoon Jira closes. For another timezone, set the hour so it lands at or after 17:00 local: local hour − UTC offset (e.g. `0 22 * * *` for 17:00 in UTC−5); Setup Health warns, using `JIRA_TIMEZONE_OFFSET_MINUTES`, when the scheduled run falls before 17:00 local. `REPORT_SNAPSHOT_HOUR_LOCAL` (0–23, default `17`) is the local hour from which a cron run may write the day's snapshot — an earlier run still syncs and notifies but writes nothing, so adding a second, morning cron for the Morning Brief (e.g. `0 0 * * *` = 07:00 UTC+7, if your Vercel plan allows two crons) can never freeze a day that isn't over. This repo keeps one cron.
+**Server report snapshot timing (V2.35):** the Vercel cron in `vercel.json` runs at `0 11 * * *` — 11:00 UTC, i.e. 18:00 in UTC+7 — so the day's server snapshot (see "Reports without opening the app") is taken after the workday and includes afternoon Jira closes. For another timezone, set the hour so it lands at or after 17:00 local: local hour − UTC offset (e.g. `0 22 * * *` for 17:00 in UTC−5); Setup Health warns, using `JIRA_TIMEZONE_OFFSET_MINUTES`, when the scheduled run falls before 17:00 local. `REPORT_SNAPSHOT_HOUR_LOCAL` (0–23, default `17`) is the local hour from which a cron run may write the day's snapshot — an earlier run still notifies but writes nothing, so adding a second, morning cron for the Morning Brief (e.g. `0 0 * * *` = 07:00 UTC+7, if your Vercel plan allows two crons) can never freeze a day that isn't over. This repo keeps one cron.
 
 ### Claude / Anthropic (optional — enables real AI wording instead of Mock)
 
@@ -68,11 +68,11 @@ Writes are limited to 30 per hour per server instance (429 beyond), and every wr
 | `ANTHROPIC_API_KEY` | Every AI-labeled output (risk explanations, communication drafts, artifact wording, weekly review narrative, etc.) runs through the deterministic **Mock AI** provider instead — same schemas, same trust labeling, clearly marked "Mock fallback" everywhere it appears. No external call is made, no data leaves the browser. |
 | `ANTHROPIC_MODEL` (C4, V2.36) | Default tier (priorities, risks, decision options, artifacts, Ask…) uses the mid-cost default `claude-sonnet-5-5`. Setup Health notes that the model isn't pinned. |
 | `ANTHROPIC_MODEL_DEEP` (V2.36) | Deep tier — only tasks explicitly marked deep (requirement check; a release brief when added) — uses the default `claude-opus-5-5`. |
-| `AI_DAILY_TOKEN_CAP` (V2.36) | Server-side daily AI budget in tokens (input + output + cache reads/writes, UTC day); default `400000`, `0` turns AI calls off. When reached the AI route answers 429 and every AI feature shows its deterministic text. Usage is logged in Vercel KV when `KV_REST_API_URL`/`KV_REST_API_TOKEN` are set (shared by all instances), otherwise per server instance; Data & Settings shows today/7-day totals. |
-| `AI_LEGACY_PROMPT_PATH` (V2.36) | Off by default. `on` temporarily re-enables the deprecated free-form `{ task, prompt }` request for pre-V2.36 tasks during migration; the app itself only sends `{ task, input }`. Scheduled for removal in V2.37. |
+| `AI_DAILY_TOKEN_CAP` (V2.36) | Server-side daily AI budget in tokens (input + output + cache reads/writes, UTC day); default `400000`, `0` turns AI calls off. When reached the AI route answers 429 and every AI feature shows its deterministic text. Usage is logged in Vercel KV when `KV_REST_API_URL`/`KV_REST_API_TOKEN` are set (shared by all instances), otherwise per server instance (Setup Health then warns "AI daily cap is per server instance — configure KV to enforce it"); Data & Settings shows today/7-day totals. |
+| `AI_ALLOWED_PROJECT_KEYS` (V2.39) | Server AI data policy: comma list of Jira project keys whose ticket content `GET /api/command-center/jira/issue-context` will return. Any other project → 403 before Jira is called. The personal allow-list (Data & Settings → AI data protection) still applies on top, so AI works only for projects in both; Data & Settings shows this list read-only to a paired device. Unset = no server restriction. A value with no valid key allows nothing. |
 | `ANTHROPIC_MODEL_FAST` (C4) | Short narration tasks (explain changes, trend/outcome interpretation, end-of-day summary, daily guidance) use the cheaper default `claude-haiku-4-5`. |
 
-Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser only ever POSTs an already-built prompt string and receives back schema-validated JSON — it never talks to Anthropic directly and never sees the key.
+Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser only ever POSTs `{ task, input }` (the server builds the prompt) and receives back schema-validated JSON — it never talks to Anthropic directly and never sees the key.
 
 ### Slack (optional — real-time "mentioned me" / "assigned to me" notifications, V2.10)
 
@@ -93,7 +93,7 @@ Everything above (V2.10's Slack notifications) only ever fires from a **browser 
 
 | Variable | Purpose | Behavior when missing |
 | --- | --- | --- |
-| `PERSONAL_JIRA_ACCOUNT_ID` | Server-only, separate from the browser-stored `PersonalIdentity.accountId` (a cron invocation has no browser session to read that from) — the Jira `accountId` the server-side check tracks assignments/mentions for. | The cron sync runs exactly as it did before this pass (fetches and returns fresh Jira data, but nothing durable consumes it) — a complete no-op for this capability. |
+| `PERSONAL_JIRA_ACCOUNT_ID` | Server-only, separate from the browser-stored `PersonalIdentity.accountId` (a cron invocation has no browser session to read that from) — the Jira `accountId` the server-side check tracks assignments/mentions for. | The cron has nothing to do and makes no Jira call (V2.39 — it no longer runs the full sync either; see Review fixes (V2.39)). |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Auto-injected by Vercel once a KV store is created and linked to the project (Storage tab → Create Database → KV → Connect to Project). Required by `@vercel/kv`. | Same as above — a complete no-op; `notify-store.ts`'s `get()` returns `null` and `set()` does nothing, never an error. |
 
 Both are required together for the server-side path to activate; either one missing means an install behaves byte-for-byte like it did before this pass (Option A/client-only). Data & Settings' "Slack Notifications" panel and `GET /api/command-center/notify` both report the live `serverSideNotifyActive` boolean so you can confirm which mode is actually active.
@@ -160,6 +160,16 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 - **Meeting notes → actions** *(J4)*. In Meeting Mode, paste notes or a transcript: decisions, action items (owner, due resolved from words like "Friday"), explicit ticket status changes and open questions, on a review screen where you edit and untick. **Create selected** is the only thing that creates decisions/actions or changes a status (history surface `ai-meeting`); ticket keys that don't exist here are listed as dropped, never created.
 - **Command Bar commands** *(J5)*. Type e.g. "defer all WF mentions to Monday" or "block MCWS-123 waiting for API spec". The command becomes operations from an allow-list (**setTicketStatus**, **addAction** — nothing else exists); the app resolves targets against real data and shows a preview diff; **Apply** runs it through the normal store (surface `ai-command`). An unknown ticket, a project name matching several projects, an unclear date or a vague target gets a question back instead of a guess. Without AI, a deterministic parser handles the same simple forms.
 - **Weekly insights** *(J6)*. Weekly Review → **Generate**: 3–5 observations, each with its evidence, and 3 suggestions for next week, from this week's ticket history, blockers by person, skip reasons and AI-triage acceptance (numbers locked). Saved per week; Reports → Weekly can add them to its copies ("Include in copies").
+
+## Review fixes (V2.39)
+
+- **Mention reply drafts read the current thread.** A ticket's content cached earlier (e.g. by a Brief) is refetched — once — when the mention is newer than it or its comments don't include the mention. If the mention comment still isn't in the thread (it can be older than the last 20 comments), the draft is made from the mention's excerpt and says **Mention comment not found in thread — draft based on excerpt only**. A cached draft keeps the mode that produced it, so a template draft is never shown as an AI one.
+- **Same-day changes count.** Work items now keep Jira's full `updated` time (`updatedAt`; `lastUpdated` stays the day for reports). Brief's **Updated since brief** and the ticket-content cache compare full times, so a comment at 15:00 after a 10:00 brief marks it. Items synced before V2.39 keep the old day comparison until the next sync.
+- **The cron no longer runs a full sync it throws away.** `GET /api/command-center/jira/sync` (Vercel Cron / GitHub Actions) now runs only the server-side notify check and the daily snapshot, with their own targeted queries — no issue search over every project, no changelogs, no mention-comment sweep. Without `PERSONAL_JIRA_ACCOUNT_ID` it makes no Jira call. **Sync Now** (POST) is unchanged.
+- **Server-side AI data policy** — `AI_ALLOWED_PROJECT_KEYS` (see Environment Variables). Data & Settings → AI data protection shows it read-only and marks a ticked project the server blocks.
+- **Removed the legacy `{ task, prompt }` AI request** and its `AI_LEGACY_PROMPT_PATH` flag, as announced in V2.36: the AI route accepts only `{ task, input }`.
+- **Setup Health** warns when the AI daily cap is counted per server instance (Anthropic key set, Vercel KV not).
+- The test suite now also fails when a README `(V2.NN)` heading is newer than `package.json`'s version.
 
 ## Review fixes (V2.35)
 

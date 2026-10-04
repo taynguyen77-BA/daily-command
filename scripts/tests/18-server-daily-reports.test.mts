@@ -178,7 +178,7 @@ const wednesdayJira = () =>
   const group = "E4 Wiring";
   const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
   const sync = read("src/app/api/command-center/jira/sync/route.ts");
-  ok(group, /if \(isServerDailyReportConfigured\(process\.env\)\) \{[\s\S]*runServerDailySnapshot\(fetch, config, accountId, createServerReportStore\(\)/.test(sync), "the cron GET runs the real snapshot with the KV store, gated on configuration");
+  ok(group, /snapshot: isServerDailyReportConfigured\(process\.env\)\s*\? \{ store: createServerReportStore\(\)/.test(sync) && /runServerDailySnapshot\(fetchImpl, config, accountId, store, options\)/.test(read("src/lib/command-center/jira/cron-tick.ts")), "the cron GET runs the real snapshot with the KV store, gated on configuration");
   const route = read("src/app/api/command-center/reports/server/route.ts");
   ok(group, /checkAppStateAuth\(req\.headers\.get\("authorization"\), process\.env\.APP_STATE_SECRET\)/.test(route) && /force-dynamic/.test(route), "GET /api/command-center/reports/server uses the paired-device auth and is never statically cached");
   const sync2 = read("src/lib/command-center/app-state-sync.ts");

@@ -114,6 +114,7 @@ export function normalizeIssue(issue: JiraIssue, options: NormalizeOptions): { w
     dueDate: f.duedate ?? undefined,
     createdDate: truncateToDate(f.created, options.today),
     lastUpdated: truncateToDate(f.updated, options.today),
+    ...(f.updated ? { updatedAt: f.updated } : {}),
     blocked,
     blockerReason: blocked ? (flagged ? "Flagged in Jira" : `Status: ${f.status?.name ?? "unknown"}`) : undefined,
     dependencyIds: dependencies.map((d) => d.id),
