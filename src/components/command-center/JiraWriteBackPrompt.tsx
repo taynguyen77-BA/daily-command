@@ -79,10 +79,10 @@ export function JiraWriteBackDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="dialog" aria-modal="true" aria-labelledby="jira-write-title" data-jira-write-dialog>
       <div className="w-full max-w-md rounded-lg border border-border bg-surface p-5">
         <h2 id="jira-write-title" className="font-display text-base text-text">
-          {proposal.trigger === "reply" ? `Post this reply to ${proposal.ticketKey} in Jira?` : `Also update ${proposal.ticketKey} in Jira?`}
+          {proposal.trigger === "reply" ? `Post this reply to ${proposal.ticketKey} in Jira?` : proposal.trigger === "comment" ? `Post this comment on ${proposal.ticketKey} in Jira?` : `Also update ${proposal.ticketKey} in Jira?`}
         </h2>
         <p className="mt-1 text-xs text-text3">
-          {proposal.trigger === "reply" ? "Review and edit the comment below. Nothing is posted unless you confirm." : "Your status here is already saved. Nothing is written to Jira unless you confirm below."}
+          {proposal.trigger === "reply" || proposal.trigger === "comment" ? "Review and edit the comment below. Nothing is posted unless you confirm." : "Your status here is already saved. Nothing is written to Jira unless you confirm below."}
         </p>
 
         <div className="mt-3 space-y-3 text-sm text-text2" data-jira-write-preview>
@@ -91,7 +91,7 @@ export function JiraWriteBackDialog({
               <span className="flex items-center gap-2">
                 <input type="checkbox" checked={commentOn} onChange={(e) => setCommentOn(e.target.checked)} /> Add a comment
               </span>
-              <textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} rows={proposal.trigger === "reply" ? 6 : 2} maxLength={2000} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 text-sm" />
+              <textarea value={commentText} onChange={(e) => setCommentText(e.target.value)} rows={proposal.trigger === "reply" || proposal.trigger === "comment" ? 8 : 2} maxLength={proposal.trigger === "comment" ? 30000 : 2000} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 text-sm" />
             </label>
           )}
           {flag && (

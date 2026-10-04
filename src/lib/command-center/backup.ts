@@ -81,7 +81,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 // Container types of the fields a backup must not get wrong. A present field with the wrong
 // type means the file is damaged or not ours: reject, never silently drop it.
 const ARRAY_FIELDS = ["personalPlan", "memoryEvents", "syncLog", "snapshotHistory", "eodHistory", "artifacts", "mentionEvents", "pilotFeedback"] as const;
-const OBJECT_FIELDS = ["data", "ticketWorkStates", "attentionState", "dailyReports", "features", "dailyCommandCompletions", "dailyCommandSkips", "dailyCommandBlocks", "dailyReviewAcks", "mentionReplies", "aiContextCache", "aiDataProtection", "aiBriefs", "aiTriageStats"] as const;
+const OBJECT_FIELDS = ["data", "ticketWorkStates", "attentionState", "dailyReports", "features", "dailyCommandCompletions", "dailyCommandSkips", "dailyCommandBlocks", "dailyReviewAcks", "mentionReplies", "aiContextCache", "aiDataProtection", "aiBriefs", "aiTriageStats", "aiWeeklyInsights"] as const;
 const DATA_ARRAY_FIELDS = ["workItems", "projects", "clients", "actions", "decisions", "risks", "dependencies"] as const;
 
 export function parseBackup(raw: string): ParsedBackup {
@@ -193,6 +193,7 @@ export function mergeImportedState(local: StoreState, imported: StoreState, nowI
     aiContextCache: fillRecord(local.aiContextCache, imported.aiContextCache),
     aiBriefs: fillRecord(local.aiBriefs, imported.aiBriefs),
     aiTriageStats: fillRecord(local.aiTriageStats, imported.aiTriageStats),
+    aiWeeklyInsights: fillRecord(local.aiWeeklyInsights, imported.aiWeeklyInsights),
     lastBackupAt: local.lastBackupAt ?? imported.lastBackupAt,
   };
   return applySyncedSlice(base, synced);

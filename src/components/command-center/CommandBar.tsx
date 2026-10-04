@@ -15,6 +15,7 @@ import { useCommandCenter, buildProjectOverrideView } from "./use-command-center
 import type { DerivedData } from "@/lib/command-center/selectors";
 import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { ArtifactEditor } from "./ArtifactEditor";
+import { applyCommandPlan, looksLikeCommand, planCommand, type CommandPlan } from "@/lib/command-center/ai/nl-commands";
 import { ConfidenceTag, MetaPill, Panel, TrustLabel } from "./ui";
 
 /** V2.4 §19-20, §22 — the data one Command Bar query actually answers against: either the
@@ -60,6 +61,29 @@ export function CommandBar() {
   // V2.4 §20 — set only while the LAST run() answered under a temporary explicit-project
   // override; never written to the store, so the global scope is unaffected either way.
   const [overrideProject, setOverrideProject] = useState<JiraProjectSummary | null>(null);
+  // V2.38 J5 — a natural-language command's preview (nothing runs until Apply).
+  const [commandPlan, setCommandPlan] = useState<CommandPlan | null>(null);
+  const [commandDone, setCommandDone] = useState<string | null>(null);
+
+  async function runCommand(q: string) {
+    setLoading(true);
+    setLastQuery(q);
+    setResult(null);
+    setArtifactDraft(null);
+    setArtifactNote(null);
+    setCommandDone(null);
+    const s = commandCenterStore.getSnapshot();
+    const baseline = s.dailyReviewBaselineAt;
+    const newKeys = baseline ? Object.entries(s.knownTicketFirstSeen).filter(([k, at]) => at && at > baseline && !s.dailyReviewAcks[k]).map(([k]) => k) : [];
+    const plan = await planCommand(
+      q,
+      { data: s.data, states: s.ticketWorkStates, mentionEvents: s.mentionEvents, repliedCommentIds: new Set(Object.keys(s.mentionReplies)), newKeys, today },
+      getAIProvider(),
+      knownJiraProjects(s.data).map((p) => ({ key: p.key, ...(p.name ? { name: p.name } : {}) }))
+    );
+    setCommandPlan(plan);
+    setLoading(false);
+  }
 
   const personalReview = useMemo(
     () => (proactive && personalFocus ? buildPersonalDeliveryReviewFacts(state.personalPlan, personalFocus.candidates, proactive.actionEffectiveness, filteredData, 7, today) : undefined),
@@ -68,6 +92,8 @@ export function CommandBar() {
 
   async function run(q: string) {
     if (!q.trim()) return;
+    setCommandPlan(null);
+    if (state.features.nlCommands && looksLikeCommand(q)) return runCommand(q);
     setLoading(true);
     setLastQuery(q);
     setResult(null);
@@ -211,7 +237,7 @@ export function CommandBar() {
           onKeyDown={(e) => {
             if (e.key === "Enter") run(query);
           }}
-          placeholder="Ask a focused project question…"
+          placeholder={state.features.nlCommands ? "Ask a question — or give a command, e.g. “block ABC-12 waiting for API spec”…" : "Ask a focused project question…"}
           className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
         />
         <button
@@ -288,6 +314,57 @@ export function CommandBar() {
           )}
         </div>
       )}
+
+      {commandPlan && (
+        <div data-command-plan={commandPlan.kind} className="mt-3 space-y-2 border-t border-border pt-3 text-sm">
+          <p className="text-xs text-text3">&quot;{lastQuery}&quot;</p>
+          {commandPlan.kind === "clarify" ? (
+            <p data-command-clarify className="text-text2">
+              <TrustLabel kind="ai-assessment" /> {commandPlan.question}
+            </p>
+          ) : (
+            <>
+              <p className="text-xs font-semibold uppercase tracking-wide text-text3">Preview — nothing changes until Apply</p>
+              <ul className="space-y-0.5 text-text2">
+                {commandPlan.operations.map((o, i) => (
+                  <li key={i} data-command-op={o.op}>
+                    {o.op === "setTicketStatus" ? (
+                      <>
+                        <span className="font-mono">{o.ticketKey}</span>: {o.from.toLowerCase().replace("_", " ")} → <span className="text-text">{o.status.toLowerCase().replace("_", " ")}</span>
+                        {o.until ? ` until ${o.until}` : ""}
+                        {o.reason ? ` — ${o.reason}` : ""}
+                      </>
+                    ) : (
+                      <>
+                        + action <span className="text-text">{o.title}</span>
+                        {o.ticketKey ? ` on ${o.ticketKey}` : ""}
+                        {o.dueDate ? `, due ${o.dueDate}` : ""}
+                      </>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const s = commandCenterStore.getSnapshot();
+                    const n = applyCommandPlan(commandCenterStore, commandPlan.operations, lastQuery, (k) => s.data.workItems.find((w) => w.key === k)?.id);
+                    setCommandDone(`Applied ${n} change(s).`);
+                    setCommandPlan(null);
+                  }}
+                  className="btn btn-sm btn-primary"
+                >
+                  Apply ({commandPlan.operations.length})
+                </button>
+                <button onClick={() => setCommandPlan(null)} className="btn btn-sm btn-ghost">
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {commandDone && <p className="mt-3 text-sm text-green">{commandDone}</p>}
 
       {artifactDraft && <ArtifactEditor draft={artifactDraft} onClose={() => setArtifactDraft(null)} />}
     </Panel>

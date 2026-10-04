@@ -28,11 +28,13 @@ export const SHORT_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>([
   "polishReportSummary",
   // V2.37 I2 — one batched triage call over metadata: fast tier.
   "triageNewItems",
+  // V2.38 J5 — turning one sentence into typed operations.
+  "parseCommand",
 ]);
 
 /** Reasoning-heavy tasks — the only ones that get the deep (most expensive) tier. A release
  *  brief task joins this set when it is added. */
-export const DEEP_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>(["checkRequirements"]);
+export const DEEP_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>(["checkRequirements", "baRequirementCheck", "releaseGoNoGo"]);
 
 export type AiModelTier = "fast" | "default" | "deep";
 

@@ -61,6 +61,12 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
   triageNewItems: entry("triageNewItems", { cacheDurationMs: TEN_MINUTES_MS }),
   draftMentionReply: entry("draftMentionReply"),
   rewriteReport: entry("rewriteReport", { cacheDurationMs: TEN_MINUTES_MS }),
+  baRequirementCheck: entry("baRequirementCheck"),
+  draftBlockerFollowUps: entry("draftBlockerFollowUps", { cacheDurationMs: TEN_MINUTES_MS }),
+  releaseGoNoGo: entry("releaseGoNoGo", { cacheDurationMs: TEN_MINUTES_MS }),
+  extractMeetingActions: entry("extractMeetingActions"),
+  parseCommand: entry("parseCommand", { cacheDurationMs: TEN_MINUTES_MS }),
+  weeklyInsights: entry("weeklyInsights"),
 };
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {

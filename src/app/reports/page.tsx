@@ -25,6 +25,8 @@ import { sendReportToSlack } from "@/lib/command-center/notify-client";
 import { OverdueBlockersCallout, ReportSummaryParagraph } from "@/components/command-center/ReportSummary";
 import type { NeedsDecisionGroup } from "@/lib/command-center/report-summary";
 import { ReportRewrite } from "@/components/command-center/ReportRewrite";
+import { WeeklyInsightsView } from "@/components/command-center/WeeklyInsights";
+import { weeklyInsightsText } from "@/lib/command-center/ai/weekly-insights";
 
 const FORMATS: { format: ReportFormat; label: string }[] = [
   { format: "markdown", label: "Copy Markdown" },
@@ -144,6 +146,8 @@ export default function ReportsPage() {
   const [weekAnchor, setWeekAnchor] = useState(today);
   const [includeTeam, setIncludeTeam] = useState(true);
   const [groupBy, setGroupBy] = useState<WeeklyGroupBy>("project");
+  // V2.38 J6 — append this week's saved AI insights to the weekly report's copies (optional).
+  const [includeInsights, setIncludeInsights] = useState(false);
   const identity = useMemo(() => ({ displayName: state.personalIdentity?.displayName ?? state.ownerName, accountId: state.personalIdentity?.accountId }), [state.personalIdentity, state.ownerName]);
 
   // Today is always built live: today's events so far + the standup state as of now.
@@ -192,6 +196,8 @@ export default function ReportsPage() {
       else delete next[key];
       return next;
     });
+  const weekInsights = state.features.weeklyInsights ? state.aiWeeklyInsights[weekly.weekStart] : undefined;
+  const renderWeekly = (format: ReportFormat) => renderWeeklyReport(w, format, { includeTeam }) + (weekInsights && includeInsights ? `\n\n${weeklyInsightsText(weekInsights)}` : "");
   return (
     <div className="space-y-6 pb-16">
       <SectionHeading level="page" title="Reports" subtitle="Standup-ready daily and weekly reports — ticket lists with Jira links, ready to paste into Slack or an update." />
@@ -280,9 +286,20 @@ export default function ReportsPage() {
                 </select>
               </label>
             </div>
-            <CopyButtons render={(format) => renderWeeklyReport(w, format, { includeTeam })} />
-            {state.features.reportExport && <ShareButtons subject={`Weekly Report — ${w.weekStart} to ${w.weekEnd}`} render={(format) => renderWeeklyReport(w, format, { includeTeam })} />}
+            <CopyButtons render={renderWeekly} />
+            {state.features.reportExport && <ShareButtons subject={`Weekly Report — ${w.weekStart} to ${w.weekEnd}`} render={renderWeekly} />}
             {state.features.audienceReports && <ReportRewrite key={`w:${w.weekStart}`} report={{ kind: "weekly", view: w }} includeTeam={includeTeam} />}
+            {weekInsights && (
+              <details data-report-insights className="rounded-md border border-border bg-surface2 p-3">
+                <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-text3">AI insights for this week</summary>
+                <label className="mt-2 flex items-center gap-1.5 text-xs text-text3">
+                  <input type="checkbox" checked={includeInsights} onChange={(e) => setIncludeInsights(e.target.checked)} /> Include in copies
+                </label>
+                <div className="mt-2">
+                  <WeeklyInsightsView stored={weekInsights} />
+                </div>
+              </details>
+            )}
           </div>
           <ReportSummaryParagraph summary={weekly.summary} polished={polished[weeklyKey]} onPolished={setPolish(weeklyKey)} />
           <p className="text-xs text-text3">

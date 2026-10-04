@@ -119,7 +119,7 @@ import type { TimeBudget } from "./action-plan";
 import { rollDailySyncSummary } from "./sync-history";
 import { migrateTicketBackedActionStatuses } from "./action-migration";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
-import { planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
+import { planJiraComment, planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
@@ -129,6 +129,7 @@ import type { CustomTerm } from "./ai/redaction";
 import type { IssueContext } from "./jira/issue-context";
 import { asAiBriefCache, putBrief, type AiBriefCache, type StoredTicketBrief } from "./ai/ticket-brief";
 import { addTriageStats, asTriageStats, type TriageCategory, type TriageStatsByDay } from "./ai/smart-triage";
+import { asWeeklyInsights, type StoredWeeklyInsights } from "./ai/weekly-insights";
 export type { MyActionItemsOnlyByPage };
 
 const STORAGE_KEY = "command-center:v1";
@@ -356,6 +357,8 @@ export interface StoreState {
   aiBriefs: AiBriefCache;
   /** V2.37 I2 — Smart Triage suggestions vs. accepted, per local day and category. */
   aiTriageStats: TriageStatsByDay;
+  /** V2.38 J6 — AI weekly insights, keyed by week start (last 12 kept). */
+  aiWeeklyInsights: Record<string, StoredWeeklyInsights>;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -413,6 +416,7 @@ function initialState(): StoreState {
     aiContextCache: {},
     aiBriefs: {},
     aiTriageStats: {},
+    aiWeeklyInsights: {},
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -868,7 +872,7 @@ function asJiraWriteBackSettings(v: unknown): JiraWriteBackSettings {
 
 function isJiraWriteLogEntry(v: unknown): v is JiraWriteLogEntry {
   const e = v as Partial<JiraWriteLogEntry>;
-  return typeof e === "object" && e !== null && typeof e.id === "string" && typeof e.at === "string" && typeof e.ticketKey === "string" && typeof e.ok === "boolean" && ["comment", "flag", "transition"].includes(e.kind as string) && (e.trigger === undefined || ["block", "done", "reply"].includes(e.trigger as string));
+  return typeof e === "object" && e !== null && typeof e.id === "string" && typeof e.at === "string" && typeof e.ticketKey === "string" && typeof e.ok === "boolean" && ["comment", "flag", "transition"].includes(e.kind as string) && (e.trigger === undefined || ["block", "done", "reply", "comment"].includes(e.trigger as string));
 }
 
 type TicketStateSlice = Pick<StoreState, "ticketWorkStates" | "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones">;
@@ -999,6 +1003,7 @@ function parseStoredStateRaw(raw: string): StoreState {
       aiContextCache: asAiContextCache(parsed.aiContextCache),
       aiBriefs: asAiBriefCache(parsed.aiBriefs),
       aiTriageStats: asTriageStats(parsed.aiTriageStats),
+      aiWeeklyInsights: asWeeklyInsights(parsed.aiWeeklyInsights),
       jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
@@ -1646,6 +1651,16 @@ export class CommandCenterStore {
     return true;
   }
 
+  /** V2.38 J1/J2 — "Post as Jira comment": the same confirmation dialog + server gate. False
+   *  when write-back isn't on for this project (then the UI offers copy only). */
+  proposeJiraComment(ticketKey: string, text: string): boolean {
+    const proposal = planJiraComment({ features: this.state.features, settings: this.state.jiraWriteBack, ticketKey, text });
+    if (!proposal) return false;
+    this.pendingJiraWrite = proposal;
+    this.listeners.forEach((l) => l());
+    return true;
+  }
+
   /** F4 — the pending write-back proposal (stable reference for useSyncExternalStore). */
   getPendingJiraWrite = (): JiraWriteBackProposal | null => this.pendingJiraWrite;
   getServerPendingJiraWrite = (): JiraWriteBackProposal | null => null;
@@ -1847,6 +1862,13 @@ export class CommandCenterStore {
   /** V2.37 I1 — keep a generated brief (one per issue; newest replaces). */
   saveTicketBrief(brief: StoredTicketBrief) {
     this.set({ ...this.state, aiBriefs: putBrief(this.state.aiBriefs, brief) });
+  }
+
+  /** V2.38 J6 — keep a week's insights (newest 12 weeks). */
+  saveWeeklyInsights(w: StoredWeeklyInsights) {
+    const next = { ...this.state.aiWeeklyInsights, [w.weekStart]: w };
+    for (const k of Object.keys(next).sort().slice(0, Math.max(0, Object.keys(next).length - 12))) delete next[k];
+    this.set({ ...this.state, aiWeeklyInsights: next });
   }
 
   /** V2.37 I2 — how many triage suggestions per category were shown vs. applied. */

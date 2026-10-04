@@ -10,6 +10,7 @@ import { groupAskByPerson } from "@/lib/command-center/blocker-followup";
 import type { NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { sendReportToSlack } from "@/lib/command-center/notify-client";
 import { slackReportText } from "@/lib/command-center/report-export";
+import { AiFollowUpDrafter } from "./AiFollowUpDrafter";
 
 export type AskSend = (text: string) => Promise<{ sent: boolean; reason?: string; detail?: string }>;
 
@@ -86,6 +87,8 @@ export function AskFollowUp({
           ))}
         </ul>
       )}
+      {/* V2.38 J2 — the AI version, for the same blocked tickets (renders nothing when off). */}
+      {open && <AiFollowUpDrafter ticketKeys={Array.from(new Set(rows.flatMap((r) => r.why.match(/\b[A-Z][A-Z0-9_]+-\d+\b/g) ?? [])))} />}
     </div>
   );
 }
