@@ -113,3 +113,102 @@ export function evaluateAiResponse(input: AiEvaluationInput): AiEvaluationResult
     failCount: findings.filter((f) => f.severity === "FAIL").length,
   };
 }
+
+// ===== V2.36 H5 — Grounding guard ======================================================
+// Every AI output that references a ticket key, a person, a number or a date must match the
+// facts it was given. Deterministic, run server-side on every model answer (server-runner.ts):
+// a violation → one retry with the violations listed → still violating → rejected, and the
+// browser falls back to the deterministic text. "Supplied facts" = the exact text the model
+// was shown (the server-built prompt), so anything the model could legitimately have read is
+// allowed and anything else is invented.
+
+export interface GroundingResult {
+  ok: boolean;
+  violations: string[];
+}
+
+const TICKET_KEY = /\b[A-Z][A-Z0-9_]{1,19}-\d{1,9}\b/g;
+const ISO_DATE = /\b\d{4}-\d{2}-\d{2}\b/g;
+const MONTHS = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+const WORDY_DATE = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+\\d{4})?|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:${MONTHS})(?:\\s+\\d{4})?)\\b`, "gi");
+const MONTH_INDEX: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const PLACEHOLDER = /\[[A-Z_]+_\d+\]/g;
+const uniq = (a: string[]): string[] => Array.from(new Set(a));
+// Capitalized words that are not names — headings, weekdays, months, product nouns.
+const NOT_A_NAME = new Set(
+  "the a an and or but if this that these those it its i we you they he she hi hello team next last first new open done blocked status sprint release ticket tickets jira project client clients summary risk risks gap gaps question questions action actions decision decisions recommendation recommended tomorrow today yesterday week weekly daily monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december executive what why how when where who carry over starting point priorities priority focus watch plan high medium low critical outcome assessment impact acceptance criteria description comment comments linked issue issues story epic bug task subtask dev qa uat api ui ux product owner manager analyst business no none not overall confidence trend evidence fact facts option options upside downside tradeoffs please note also however because given based per".split(" ")
+);
+
+/** Every string value in a JSON-like output (structured numeric fields like confidence are
+ *  not narrative and are not checked here). */
+export function collectStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(collectStrings);
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap(collectStrings);
+  return [];
+}
+
+function wordyDateKey(m: string): string | null {
+  const parts = m.toLowerCase().replace(/(st|nd|rd|th)\b/g, "").match(/[a-z]+|\d+/g) ?? [];
+  const month = parts.find((p) => /[a-z]/.test(p));
+  const day = parts.find((p) => /^\d{1,2}$/.test(p));
+  if (!month || !day) return null;
+  const mi = MONTH_INDEX[month.slice(0, 3)];
+  return mi ? `${String(mi).padStart(2, "0")}-${day.padStart(2, "0")}` : null;
+}
+
+function normalizeNumber(n: string): string {
+  const v = Number(n.replace(/,/g, ""));
+  return Number.isFinite(v) ? String(v) : n;
+}
+
+export function checkGrounding(output: unknown, suppliedText: string): GroundingResult {
+  const violations: string[] = [];
+  const outText = collectStrings(output).join("\n");
+  const facts = suppliedText;
+
+  // 1. Ticket keys
+  const factKeys = new Set(facts.match(TICKET_KEY) ?? []);
+  for (const k of uniq(outText.match(TICKET_KEY) ?? [])) {
+    if (!factKeys.has(k)) violations.push(`ticket key ${k} is not in the supplied facts`);
+  }
+
+  // 2. Dates (ISO, and "Oct 3" / "3 October" style matched by month-day)
+  const factIso = new Set(facts.match(ISO_DATE) ?? []);
+  const factMonthDays = new Set<string>(Array.from(factIso).map((d) => d.slice(5)));
+  for (const m of facts.match(WORDY_DATE) ?? []) {
+    const k = wordyDateKey(m);
+    if (k) factMonthDays.add(k);
+  }
+  for (const d of uniq(outText.match(ISO_DATE) ?? [])) {
+    if (!factIso.has(d)) violations.push(`date ${d} is not in the supplied facts`);
+  }
+  for (const m of uniq(outText.match(WORDY_DATE) ?? [])) {
+    const k = wordyDateKey(m);
+    if (k && !factMonthDays.has(k)) violations.push(`date "${m}" is not in the supplied facts`);
+  }
+
+  // 3. Numbers — after removing keys, dates and placeholders (their digits are checked above).
+  //    List numbering at the start of a line ("1. …") is formatting, not a claim.
+  const strip = (t: string) => t.replace(TICKET_KEY, " ").replace(ISO_DATE, " ").replace(WORDY_DATE, " ").replace(PLACEHOLDER, " ");
+  const numbersIn = (t: string) => (t.match(/(?<![\w.])\d[\d,]*(?:\.\d+)?/g) ?? []).map(normalizeNumber);
+  const factNumbers = new Set(numbersIn(strip(facts)));
+  const outForNumbers = strip(outText).replace(/^\s*\d+[.)]\s/gm, " ");
+  for (const n of uniq(numbersIn(outForNumbers))) {
+    if (!factNumbers.has(n)) violations.push(`number ${n} is not in the supplied facts`);
+  }
+
+  // 4. People — "@Name" mentions, and capitalized "First Last" pairs where neither word appears
+  //    anywhere in the facts (a real name the model read always shares a word with the facts).
+  const factsLower = facts.toLowerCase();
+  for (const m of uniq(outText.match(/@[A-Za-z][\w.-]{1,40}/g) ?? [])) {
+    if (!factsLower.includes(m.slice(1).toLowerCase())) violations.push(`person ${m} is not in the supplied facts`);
+  }
+  for (const m of uniq(outText.match(/\b[A-Z][a-z]{1,20}\s[A-Z][a-z]{1,20}\b/g) ?? [])) {
+    const words: string[] = m.split(/\s/);
+    if (words.some((w) => NOT_A_NAME.has(w.toLowerCase()))) continue;
+    if (words.every((w) => !new RegExp(`\\b${w}\\b`, "i").test(facts))) violations.push(`person "${m}" is not in the supplied facts`);
+  }
+
+  return { ok: violations.length === 0, violations };
+}

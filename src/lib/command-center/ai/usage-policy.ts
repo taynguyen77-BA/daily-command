@@ -54,6 +54,8 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
   generateCommunicationArtifact: entry("generateCommunicationArtifact"),
   // V2.34 F5 — on-demand "Polish with AI" on a report summary.
   polishReportSummary: entry("polishReportSummary"),
+  // V2.36 H — keyed by the ticket's Jira `updated`, so a changed ticket is re-checked.
+  checkRequirements: entry("checkRequirements"),
 };
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {

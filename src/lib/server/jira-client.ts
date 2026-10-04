@@ -19,6 +19,7 @@ import {
   type JiraFetchResult,
 } from "../command-center/jira/http";
 import type { JiraChangelogHistory, JiraComment, JiraConnectionConfig, JiraIssue, JiraProject } from "../command-center/jira/types";
+import { fetchIssueContextWith, type IssueContext } from "../command-center/jira/issue-context";
 
 export function getJiraConfig(): JiraConnectionConfig | null {
   const baseUrl = process.env.JIRA_BASE_URL;
@@ -93,4 +94,9 @@ export async function fetchIssueComments(config: JiraConnectionConfig, issueKey:
  *  query for the server-side notify check (cron-notify.ts) — never the full sync dataset. */
 export async function fetchAssignedIssues(config: JiraConnectionConfig, accountId: string): Promise<JiraFetchResult<JiraIssue[]>> {
   return fetchAssignedIssuesWith(fetch, config, accountId);
+}
+
+/** H1 — one ticket's content (description, comments, links, status history), on demand. */
+export async function fetchIssueContext(config: JiraConnectionConfig, issueKey: string, options: { acceptanceCriteriaFieldId?: string }): Promise<JiraFetchResult<IssueContext>> {
+  return fetchIssueContextWith(fetch, config, issueKey, options);
 }

@@ -46,8 +46,11 @@ export interface BackupCounts {
 
 export type ParsedBackup = { ok: true; schemaVersion: number; exportedAt: string; state: StoreState; counts: BackupCounts; migratedFrom?: number } | { ok: false; error: string };
 
+/** V2.36 H1 — the AI context cache (fetched ticket descriptions/comments) is left out of a
+ *  backup unless the user ticked "include AI context cache" (aiDataProtection setting). */
 export function buildBackup(state: StoreState, exportedAt: string): BackupFile {
-  return { format: BACKUP_FORMAT, schemaVersion: DATA_SCHEMA_VERSION, exportedAt, state };
+  const includeCache = state.aiDataProtection?.includeContextCacheInBackup === true;
+  return { format: BACKUP_FORMAT, schemaVersion: DATA_SCHEMA_VERSION, exportedAt, state: includeCache ? state : { ...state, aiContextCache: {} } };
 }
 
 export function serializeBackup(backup: BackupFile): string {
@@ -78,7 +81,7 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "obj
 // Container types of the fields a backup must not get wrong. A present field with the wrong
 // type means the file is damaged or not ours: reject, never silently drop it.
 const ARRAY_FIELDS = ["personalPlan", "memoryEvents", "syncLog", "snapshotHistory", "eodHistory", "artifacts", "mentionEvents", "pilotFeedback"] as const;
-const OBJECT_FIELDS = ["data", "ticketWorkStates", "attentionState", "dailyReports", "features", "dailyCommandCompletions", "dailyCommandSkips", "dailyCommandBlocks", "dailyReviewAcks", "mentionReplies"] as const;
+const OBJECT_FIELDS = ["data", "ticketWorkStates", "attentionState", "dailyReports", "features", "dailyCommandCompletions", "dailyCommandSkips", "dailyCommandBlocks", "dailyReviewAcks", "mentionReplies", "aiContextCache", "aiDataProtection"] as const;
 const DATA_ARRAY_FIELDS = ["workItems", "projects", "clients", "actions", "decisions", "risks", "dependencies"] as const;
 
 export function parseBackup(raw: string): ParsedBackup {
@@ -172,6 +175,7 @@ export function mergeImportedState(local: StoreState, imported: StoreState, nowI
           jiraSprintFieldId: imported.jiraSprintFieldId,
           weeklyReportMode: imported.weeklyReportMode,
           defaultLandingPage: imported.defaultLandingPage,
+          aiDataProtection: imported.aiDataProtection,
           ownerName: local.ownerName ?? imported.ownerName,
         }
       : {}),
@@ -186,6 +190,7 @@ export function mergeImportedState(local: StoreState, imported: StoreState, nowI
     myTicketActivity: fillRecord(local.myTicketActivity, imported.myTicketActivity),
     followUpNotified: fillRecord(local.followUpNotified, imported.followUpNotified),
     usageCounters: fillRecord(local.usageCounters, imported.usageCounters),
+    aiContextCache: fillRecord(local.aiContextCache, imported.aiContextCache),
     lastBackupAt: local.lastBackupAt ?? imported.lastBackupAt,
   };
   return applySyncedSlice(base, synced);

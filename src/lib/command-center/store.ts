@@ -123,6 +123,10 @@ import { planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
+import { asAiDataProtectionSettings, DEFAULT_AI_DATA_PROTECTION, type AiDataProtectionSettings } from "./ai/data-protection";
+import { asAiContextCache, putCachedContext, type AiContextCache } from "./ai/context-cache";
+import type { CustomTerm } from "./ai/redaction";
+import type { IssueContext } from "./jira/issue-context";
 export type { MyActionItemsOnlyByPage };
 
 const STORAGE_KEY = "command-center:v1";
@@ -340,6 +344,11 @@ export interface StoreState {
   /** F4 — Jira write-back settings and the history of every write attempt. */
   jiraWriteBack: JiraWriteBackSettings;
   jiraWriteLog: JiraWriteLogEntry[];
+  /** V2.36 H2 — AI allow-list, redaction terms, acceptance-criteria field, preview acks. */
+  aiDataProtection: AiDataProtectionSettings;
+  /** V2.36 H1 — fetched ticket content, keyed by issue key, valid per Jira `updated`. Local-only:
+   *  never synced, and left out of backups unless aiDataProtection.includeContextCacheInBackup. */
+  aiContextCache: AiContextCache;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -393,6 +402,8 @@ function initialState(): StoreState {
     blockerSlaBusinessDays: DEFAULT_BLOCKER_SLA_BUSINESS_DAYS,
     jiraWriteBack: { ...DEFAULT_JIRA_WRITE_BACK_SETTINGS },
     jiraWriteLog: [],
+    aiDataProtection: { ...DEFAULT_AI_DATA_PROTECTION, previewSeenProjects: {} },
+    aiContextCache: {},
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -975,6 +986,8 @@ function parseStoredStateRaw(raw: string): StoreState {
       timeBudgetMinutes: TIME_BUDGETS.includes(parsed.timeBudgetMinutes as TimeBudget) ? (parsed.timeBudgetMinutes as TimeBudget) : undefined,
       blockerSlaBusinessDays: asBlockerSla(parsed.blockerSlaBusinessDays),
       jiraWriteBack: asJiraWriteBackSettings(parsed.jiraWriteBack),
+      aiDataProtection: asAiDataProtectionSettings(parsed.aiDataProtection),
+      aiContextCache: asAiContextCache(parsed.aiContextCache),
       jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
@@ -1766,6 +1779,49 @@ export class CommandCenterStore {
   }
 
   /** F4 — write-back settings (validated the same way as on load). */
+  // ===== V2.36 H — AI data protection & ticket context =====
+
+  /** Allow (or stop allowing) one project's ticket content to be sent to the model. */
+  setAiProjectAllowed(projectKey: string, allowed: boolean) {
+    const key = projectKey.trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9_]{0,19}$/.test(key)) return;
+    const current = this.state.aiDataProtection.allowedProjectKeys.filter((k) => k !== key);
+    this.set({ ...this.state, aiDataProtection: { ...this.state.aiDataProtection, allowedProjectKeys: allowed ? [...current, key].sort() : current } });
+  }
+
+  setAiCustomTerms(terms: CustomTerm[]) {
+    this.set({ ...this.state, aiDataProtection: asAiDataProtectionSettings({ ...this.state.aiDataProtection, customTerms: terms }) });
+  }
+
+  /** Blank clears it; anything not in Jira's `customfield_<digits>` form is refused (false). */
+  setAiAcceptanceCriteriaFieldId(id: string | undefined): boolean {
+    const trimmed = id?.trim();
+    if (trimmed && !/^customfield_\d{1,9}$/.test(trimmed)) return false;
+    const { acceptanceCriteriaFieldId: _drop, ...rest } = this.state.aiDataProtection;
+    void _drop;
+    // A different field means different cached content.
+    this.set({ ...this.state, aiDataProtection: trimmed ? { ...rest, acceptanceCriteriaFieldId: trimmed } : rest, aiContextCache: {} });
+    return true;
+  }
+
+  setAiIncludeContextCacheInBackup(on: boolean) {
+    this.set({ ...this.state, aiDataProtection: { ...this.state.aiDataProtection, includeContextCacheInBackup: on } });
+  }
+
+  /** The user confirmed the "What will be sent" preview for this project. */
+  acknowledgeAiSendPreview(projectKey: string, atIso: string = new Date().toISOString()) {
+    const key = projectKey.toUpperCase();
+    this.set({ ...this.state, aiDataProtection: { ...this.state.aiDataProtection, previewSeenProjects: { ...this.state.aiDataProtection.previewSeenProjects, [key]: atIso } } });
+  }
+
+  cacheIssueContext(ctx: IssueContext) {
+    this.set({ ...this.state, aiContextCache: putCachedContext(this.state.aiContextCache, ctx) });
+  }
+
+  clearAiContextCache() {
+    this.set({ ...this.state, aiContextCache: {} });
+  }
+
   setJiraWriteBackSettings(patch: Partial<JiraWriteBackSettings>) {
     this.set({ ...this.state, jiraWriteBack: asJiraWriteBackSettings({ ...this.state.jiraWriteBack, ...patch }) });
   }

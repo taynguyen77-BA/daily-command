@@ -9,6 +9,7 @@ import { useCommandCenter } from "@/components/command-center/use-command-center
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { BackupPanel } from "@/components/command-center/BackupPanel";
 import { JiraWriteBackPanel } from "@/components/command-center/JiraWriteBackPanel";
+import { AiDataProtectionPanel } from "@/components/command-center/AiDataProtectionPanel";
 import { ExportBackupDialog } from "@/components/command-center/ExportBackupDialog";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
@@ -672,6 +673,7 @@ const FEATURE_TOGGLE_LABELS: { key: keyof FeatureToggles; label: string; detail:
   { key: "blockerFollowUp", label: "Blocker follow-ups", detail: "Blocked rows show their age in business days and an 'Ask' that drafts one follow-up per person (copy, or Slack after you confirm). Blockers over the SLA below lead Today and the Daily Report." },
   { key: "reportSummaries", label: "Report summaries", detail: "Daily and weekly reports open with a one-paragraph summary (counts, top blocker, biggest risk) plus 'Blocked aging' and 'Needs decision from'. No AI needed; 'Polish with AI' is optional and never changes numbers or ticket keys." },
   { key: "jiraWriteBack", label: "Jira write-back (off by default)", detail: "On Block, offer a Jira comment 'Blocked: <reason>' (and the Flag); on Done, offer a transition. Only for allow-listed projects below, always previewed and confirmed, every write logged." },
+  { key: "ticketAi", label: "Ticket AI (off by default)", detail: "'Check requirements' on a Jira ticket: reads its description, acceptance criteria and comments on demand and asks the AI for gaps and questions. Only for projects allowed in AI data protection below, redacted first, with a 'What will be sent' preview the first time per project." },
 ];
 export default function DataSettingsPage() {
   const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
@@ -1031,6 +1033,8 @@ export default function DataSettingsPage() {
       </Panel>
 
       <JiraWriteBackPanel />
+
+      <AiDataProtectionPanel />
 
       <Panel className="p-5">
         <SectionHeading title="Stale Assigned Ticket thresholds" subtitle="Attention Queue flags a ticket assigned to you with no observable activity for this many business days (weekends never count as silence). A miss-ticket safety net, not a proven risk — tune it to how fast your projects actually move." />

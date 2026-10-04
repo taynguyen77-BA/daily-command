@@ -51,7 +51,7 @@ export const JIRA_MAX_ISSUES = 2000; // safety cap — §11 "handle large result
 // Jira instance would block the request until Vercel's own platform timeout kills the
 // function uncleanly; with it, the request fails fast into the *existing*
 // network-error/errorKind classification below (no new error path needed).
-const JIRA_FETCH_TIMEOUT_MS = 20_000;
+export const JIRA_FETCH_TIMEOUT_MS = 20_000;
 
 export type JiraFetchResult<T> =
   | { ok: true; data: T; recordsFetched: number; method?: "jql-cursor" | "classic-offset"; truncated?: boolean }
@@ -63,11 +63,11 @@ export type FetchLike = (url: string, init?: { headers?: Record<string, string>;
   json: () => Promise<unknown>;
 }>;
 
-function authHeader(config: JiraConnectionConfig): string {
+export function authHeader(config: JiraConnectionConfig): string {
   return "Basic " + Buffer.from(`${config.email}:${config.apiToken}`).toString("base64");
 }
 
-function buildUrl(baseUrl: string, path: string, params: Record<string, string>): string {
+export function buildUrl(baseUrl: string, path: string, params: Record<string, string>): string {
   const url = new URL(path, baseUrl);
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   return url.toString();
@@ -96,7 +96,7 @@ export function classifyHttpError(status: number): { error: string; errorKind: J
  * whatever it finds to the status-based message, never replacing it (so a caller can never
  * end up with an empty/missing error).
  */
-async function describeJiraError(res: { status: number; json: () => Promise<unknown> }): Promise<{ error: string; errorKind: JiraErrorKind }> {
+export async function describeJiraError(res: { status: number; json: () => Promise<unknown> }): Promise<{ error: string; errorKind: JiraErrorKind }> {
   const base = classifyHttpError(res.status);
   try {
     const body = (await res.json()) as unknown;
