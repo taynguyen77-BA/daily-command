@@ -66,7 +66,10 @@ Writes are limited to 30 per hour per server instance (429 beyond), and every wr
 | Variable | Behavior when missing |
 | --- | --- |
 | `ANTHROPIC_API_KEY` | Every AI-labeled output (risk explanations, communication drafts, artifact wording, weekly review narrative, etc.) runs through the deterministic **Mock AI** provider instead — same schemas, same trust labeling, clearly marked "Mock fallback" everywhere it appears. No external call is made, no data leaves the browser. |
-| `ANTHROPIC_MODEL` (C4) | Reasoning tasks (priorities, risks, decision options, artifacts, Ask…) use the default `claude-opus-5-5`. Setup Health notes that the model isn't pinned. |
+| `ANTHROPIC_MODEL` (C4, V2.36) | Default tier (priorities, risks, decision options, artifacts, Ask…) uses the mid-cost default `claude-sonnet-5-5`. Setup Health notes that the model isn't pinned. |
+| `ANTHROPIC_MODEL_DEEP` (V2.36) | Deep tier — only tasks explicitly marked deep (requirement check; a release brief when added) — uses the default `claude-opus-5-5`. |
+| `AI_DAILY_TOKEN_CAP` (V2.36) | Server-side daily AI budget in tokens (input + output + cache reads/writes, UTC day); default `400000`, `0` turns AI calls off. When reached the AI route answers 429 and every AI feature shows its deterministic text. Usage is logged in Vercel KV when `KV_REST_API_URL`/`KV_REST_API_TOKEN` are set (shared by all instances), otherwise per server instance; Data & Settings shows today/7-day totals. |
+| `AI_LEGACY_PROMPT_PATH` (V2.36) | Off by default. `on` temporarily re-enables the deprecated free-form `{ task, prompt }` request for pre-V2.36 tasks during migration; the app itself only sends `{ task, input }`. Scheduled for removal in V2.37. |
 | `ANTHROPIC_MODEL_FAST` (C4) | Short narration tasks (explain changes, trend/outcome interpretation, end-of-day summary, daily guidance) use the cheaper default `claude-haiku-4-5`. |
 
 Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser only ever POSTs an already-built prompt string and receives back schema-validated JSON — it never talks to Anthropic directly and never sees the key.

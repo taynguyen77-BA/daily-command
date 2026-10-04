@@ -1,5 +1,6 @@
 "use client";
 
+import { TicketAiPanel } from "./TicketAiPanel";
 import { useEffect, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { evidenceForScore, factsForWorkItem } from "@/lib/command-center/evidence";
@@ -128,6 +129,8 @@ export function PriorityCard({
       </div>
 
       {workRelevanceIndex && <WhyNotATaskDrawer item={item} workRelevanceIndex={workRelevanceIndex} />}
+
+      <TicketAiPanel item={item} />
 
       {workRelevanceIndex && today && (
         <ExecutionPathTrace

@@ -51,6 +51,7 @@ import { queryAnswerPrompt } from "./prompts/query-answer";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
+import type { TicketContextInput } from "./task-registry";
 
 export interface AIProvider {
   readonly mode: "mock" | "claude";
@@ -87,6 +88,18 @@ export interface AIProvider {
   generateCommunicationArtifact(type: ArtifactType, facts: string[], evidenceStrings: string[]): Promise<CommunicationArtifactResult>;
   /** V2.34 F5 — rewording only; callers verify numbers and ticket keys are unchanged. */
   polishReportSummary(summary: string): Promise<string>;
+  /** V2.36 H — requirement check over ONE ticket's content. The input must come from
+   *  data-protection.ts buildTicketAiInput (allow-listed + redacted); never built by hand. */
+  checkRequirements(ticket: TicketContextInput): Promise<RequirementCheckResult>;
+}
+
+export interface RequirementCheckResult {
+  summary: string;
+  gaps: string[];
+  questions: string[];
+  risks: string[];
+  confidence: number;
+  insufficientEvidence?: boolean;
 }
 
 export interface CommunicationArtifactResult {
@@ -335,5 +348,33 @@ export class MockAIProvider implements AIProvider {
     }
     const label = type.replace(/_/g, " ").toLowerCase();
     return { text: `${label.charAt(0).toUpperCase()}${label.slice(1)}: ${facts.slice(0, 4).join(" ")}`, confidence: 0.6 };
+  }
+  /** Deterministic checklist over the ticket's own text — what the AI answer falls back to. */
+  async checkRequirements(ticket: TicketContextInput): Promise<RequirementCheckResult> {
+    const gaps: string[] = [];
+    const questions: string[] = [];
+    const risks: string[] = [];
+    const descWords = ticket.description.trim() ? ticket.description.trim().split(/\s+/).length : 0;
+    if (descWords === 0) gaps.push("The description is empty.");
+    else if (descWords < 25) gaps.push(`The description is short (${descWords} words).`);
+    const ac = ticket.acceptanceCriteria ?? "";
+    const hasAcInDescription = /acceptance criteria|\bgiven\b[\s\S]*\bwhen\b[\s\S]*\bthen\b/i.test(ticket.description);
+    if (ticket.acceptanceCriteria !== undefined && !ac.trim()) gaps.push("The acceptance-criteria field is empty.");
+    if (ticket.acceptanceCriteria === undefined && !hasAcInDescription) gaps.push("No acceptance criteria found in the description.");
+    if (gaps.length) questions.push(`Can the reporter add the missing details to ${ticket.key}?`);
+    const openLinks = ticket.links.filter((l) => !/done|closed|resolved/i.test(l.status));
+    if (openLinks.length) risks.push(`${openLinks.length} linked issue(s) not done: ${openLinks.slice(0, 5).map((l) => l.key).join(", ")}.`);
+    const questionComments = ticket.comments.filter((c) => c.body.includes("?"));
+    if (questionComments.length) risks.push(`${questionComments.length} comment(s) contain a question — check they were answered.`);
+    const reopened = ticket.statusHistory.filter((h) => /done|closed|resolved/i.test(h.from) && !/done|closed|resolved/i.test(h.to));
+    if (reopened.length) risks.push(`Reopened ${reopened.length} time(s) after being done.`);
+    return {
+      summary: `${ticket.key}: ${descWords} description word(s), ${ticket.comments.length} comment(s), ${ticket.links.length} linked issue(s).`,
+      gaps,
+      questions,
+      risks,
+      confidence: 0.5,
+      insufficientEvidence: descWords === 0 && ticket.comments.length === 0,
+    };
   }
 }

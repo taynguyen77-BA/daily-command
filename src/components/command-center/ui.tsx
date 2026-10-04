@@ -535,7 +535,7 @@ export function ConfidenceTag({ confidence }: { confidence: number }) {
 /** V1.8 §13 — AI fallback transparency. A single, contextual tri-state indicator so Mock
  *  output can never be mistaken for real Claude output — deliberately not repeated on
  *  every AI-generated card (§13 "do not create a disruptive warning on every card"). */
-export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CACHED" | "CALL_FAILED" | "VALIDATION_FAILED" }) {
+export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CACHED" | "CALL_FAILED" | "VALIDATION_FAILED" | "BUDGET_EXHAUSTED" | "GROUNDING_REJECTED" }) {
   const styles: Record<typeof state, string> = {
     REAL_CLAUDE: "bg-green/10 text-green border-green/30",
     MOCK_FALLBACK: "bg-yellow/10 text-yellow border-yellow/30",
@@ -547,6 +547,9 @@ export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FA
     // fallback": the request itself failed, vs. a response arrived but failed validation.
     CALL_FAILED: "bg-red/10 text-red border-red/30",
     VALIDATION_FAILED: "bg-orange/10 text-orange border-orange/30",
+    // V2.36 H4/H5 — the daily AI budget is used up; an answer was rejected for unsupplied facts.
+    BUDGET_EXHAUSTED: "bg-yellow/10 text-yellow border-yellow/30",
+    GROUNDING_REJECTED: "bg-orange/10 text-orange border-orange/30",
   };
   const labels: Record<typeof state, string> = {
     REAL_CLAUDE: "Real Claude",
@@ -555,6 +558,8 @@ export function AiProviderIndicator({ state }: { state: "REAL_CLAUDE" | "MOCK_FA
     CACHED: "Cached result",
     CALL_FAILED: "Call failed",
     VALIDATION_FAILED: "Response invalid",
+    BUDGET_EXHAUSTED: "AI budget used up",
+    GROUNDING_REJECTED: "Ungrounded — rejected",
   };
   return (
     <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium normal-case leading-3 tracking-normal ${styles[state]}`}>

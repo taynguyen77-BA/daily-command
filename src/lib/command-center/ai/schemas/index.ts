@@ -151,11 +151,36 @@ export const aiTaskSchema = z.enum([
   "generateCommunicationArtifact",
   // V2.34 F5 — optional rewording of a deterministic report summary
   "polishReportSummary",
+  // V2.36 H — task-level: requirement check over one ticket's (allow-listed, redacted) content
+  "checkRequirements",
 ]);
 export type AITask = z.infer<typeof aiTaskSchema>;
 
+// V2.36 H3 — the request shape: a task plus that task's own structured input (validated by the
+// task's Zod schema in ai/task-registry.ts). The SERVER builds the prompt from ai/prompts/*.
+export const aiStructuredRequestSchema = z.object({
+  task: aiTaskSchema,
+  input: z.unknown(),
+});
+export type AIStructuredRequest = z.infer<typeof aiStructuredRequestSchema>;
+
+/** @deprecated V2.36 H3 — the old free-form `{ task, prompt }` proxy. Accepted only while
+ *  AI_LEGACY_PROMPT_PATH=on and only for the tasks that existed before V2.36 (LEGACY_PROMPT_TASKS
+ *  in task-registry.ts). Scheduled for removal in V2.37. */
 export const aiRequestSchema = z.object({
   task: aiTaskSchema,
   prompt: z.string().min(1).max(20000),
 });
 export type AIRequest = z.infer<typeof aiRequestSchema>;
+
+// V2.36 H — requirement check over one ticket. Lists, never a verdict; every item must be
+// traceable to the supplied ticket text (grounding guard, ai/evaluation.ts).
+export const requirementCheckResponseSchema = z.object({
+  summary: z.string().min(1).max(1500),
+  gaps: z.array(z.string().min(1).max(500)).max(10),
+  questions: z.array(z.string().min(1).max(500)).max(10),
+  risks: z.array(z.string().min(1).max(500)).max(10),
+  confidence: z.number().min(0).max(1),
+  insufficientEvidence: z.boolean().optional(),
+});
+export type RequirementCheckResponse = z.infer<typeof requirementCheckResponseSchema>;

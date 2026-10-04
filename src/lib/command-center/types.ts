@@ -1569,7 +1569,7 @@ export interface AiEvaluationResult {
  *  was never meaningfully consulted; VALIDATION_FAILED means a response WAS received but
  *  didn't pass schema validation. Never show "Claude error" when the real state is simply
  *  "not configured" (CLAUDE_UNAVAILABLE) — these five states must stay distinguishable. */
-export type AiProviderState = "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CALL_FAILED" | "VALIDATION_FAILED";
+export type AiProviderState = "REAL_CLAUDE" | "MOCK_FALLBACK" | "CLAUDE_UNAVAILABLE" | "CALL_FAILED" | "VALIDATION_FAILED" | "BUDGET_EXHAUSTED" | "GROUNDING_REJECTED";
 
 /** V1.7 §27 — one AI call's trace. Never persists the raw prompt/credentials — just enough
  *  to answer "did this call use Claude or Mock, and did its output pass validation?".
@@ -1787,6 +1787,9 @@ export interface FeatureToggles {
   jiraWriteBack: boolean;
   /** F5 — deterministic summary paragraph + Blocked aging / Needs decision from in reports. */
   reportSummaries: boolean;
+  /** V2.36 H — task-level AI on one ticket's content (requirement check). OFF by default; also
+   *  needs the ticket's project in the AI allow-list (Data & Settings). */
+  ticketAi: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1802,6 +1805,7 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   blockerFollowUp: true,
   jiraWriteBack: false,
   reportSummaries: true,
+  ticketAi: false,
 };
 
 /** F1 — one finished Morning Mode triage, per local day. */

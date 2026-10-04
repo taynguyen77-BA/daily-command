@@ -933,10 +933,11 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
   ok(group, rowsFor({ ai: { available: true, modelFromEnv: false, fastModelFromEnv: true, model: "claude-opus-5-5" } }).includes("ai-model") && !rowsFor({ ai: { available: true, modelFromEnv: true, fastModelFromEnv: true } }).includes("ai-model") && !rowsFor({ ai: { available: false } }).includes("ai-model") && !rowsFor({ ai: null }).includes("ai-model"), "AI model row when a key is set but the model env isn't; never when AI is off or still loading");
   ok(group, !computeSetupHealthRows(undefined, "demo", emptyData(), idx, fine).some((r) => r.id === "identity") && computeSetupHealthRows(undefined, "jira", emptyData(), idx, fine).some((r) => r.id === "identity"), "identity row is gated to dataSource === 'jira'");
   // C4 — AI model from env.
-  ok(group, resolveAiModel("analyzePriorities", {}).model === DEFAULT_AI_MODEL && resolveAiModel("interpretTrend", {}).model === DEFAULT_AI_MODEL_FAST && DEFAULT_AI_MODEL === "claude-opus-5-5" && DEFAULT_AI_MODEL_FAST === "claude-haiku-4-5", "defaults: a current model for reasoning tasks, a cheaper one for short tasks");
+  ok(group, resolveAiModel("analyzePriorities", {}).model === DEFAULT_AI_MODEL && resolveAiModel("interpretTrend", {}).model === DEFAULT_AI_MODEL_FAST && DEFAULT_AI_MODEL === "claude-sonnet-5-5" && DEFAULT_AI_MODEL_FAST === "claude-haiku-4-5", "defaults (V2.36 H4): a mid-cost model for the default tier, a cheaper one for short tasks");
   ok(group, resolveAiModel("analyzePriorities", { ANTHROPIC_MODEL: "claude-sonnet-5-5" }).model === "claude-sonnet-5-5" && resolveAiModel("interpretTrend", { ANTHROPIC_MODEL_FAST: "claude-sonnet-5-5" }).model === "claude-sonnet-5-5" && resolveAiModel("analyzePriorities", { ANTHROPIC_MODEL: "bad model; rm" }).model === DEFAULT_AI_MODEL, "ANTHROPIC_MODEL / ANTHROPIC_MODEL_FAST override the defaults; a malformed value is ignored");
   const routeSrc = fs.readFileSync(path.join(process.cwd(), "src/app/api/command-center/ai/route.ts"), "utf8");
-  ok(group, !/"claude-[a-z0-9.-]+"/.test(routeSrc) && /resolveAiModel\(task/.test(routeSrc), "the AI route never hardcodes a model id");
+  const runnerSrc = fs.readFileSync(path.join(process.cwd(), "src/lib/command-center/ai/server-runner.ts"), "utf8");
+  ok(group, !/"claude-[a-z0-9.-]+"/.test(routeSrc) && !/"claude-[a-z0-9.-]+"/.test(runnerSrc) && /resolveAiModel\(task/.test(runnerSrc), "the AI route (and its server runner) never hardcodes a model id");
 }
 
 
@@ -950,7 +951,8 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
 
   // ---- toggles ----
   // F4 (V2.34) — Jira write-back is OFF by default by design (it writes to Jira).
-  ok(group, Object.entries(DEFAULT_FEATURE_TOGGLES).every(([k, v]) => v === (k !== "staleUseMyActivity" && k !== "jiraWriteBack")), "every feature defaults ON except 'staleness from my own activity' (and Jira write-back)");
+  // V2.36 H — Ticket AI is OFF by default too (it sends ticket content to the model).
+  ok(group, Object.entries(DEFAULT_FEATURE_TOGGLES).every(([k, v]) => v === (k !== "staleUseMyActivity" && k !== "jiraWriteBack" && k !== "ticketAi")), "every feature defaults ON except 'staleness from my own activity' (and Jira write-back, Ticket AI)");
   const parsedToggles = parseStoredState(JSON.stringify({ features: { morningBrief: false, keyboardTriage: "yes", bogus: true } })).features;
   ok(group, parsedToggles.morningBrief === false && parsedToggles.keyboardTriage === true && !("bogus" in parsedToggles) && parseStoredState("{}").features.reportExport === true, "stored toggles parse defensively; pre-D state gets the defaults");
   const settingsSrc = src("src/app/data-settings/page.tsx");

@@ -1,12 +1,18 @@
 // C4 — which Claude model answers which AI task. Never hardcoded at the call site: the server
-// route reads ANTHROPIC_MODEL (reasoning tasks) and ANTHROPIC_MODEL_FAST (short narration
-// tasks), falling back to the defaults below. Pure (env passed in) so it is unit-testable and
-// so Setup Health can say whether the model was chosen explicitly.
+// route reads the model ids from env, falling back to the defaults below. Pure (env passed in)
+// so it is unit-testable and so Setup Health can say whether the model was chosen explicitly.
+//
+// V2.36 H4 — three cost tiers, model ids via env only (never chosen from the browser):
+//   fast    ANTHROPIC_MODEL_FAST  short, single-paragraph narration
+//   default ANTHROPIC_MODEL       everything else — a mid-cost model by default
+//   deep    ANTHROPIC_MODEL_DEEP  only tasks explicitly marked deep (requirement check, release brief)
 
 import type { AITask } from "./schemas";
 
-/** Default for reasoning-heavy tasks (priorities, risks, decision options, artifacts…). */
-export const DEFAULT_AI_MODEL = "claude-opus-5-5";
+/** Default tier — a mid-cost model (priorities, risks, decision options, artifacts…). */
+export const DEFAULT_AI_MODEL = "claude-sonnet-5-5";
+/** Deep tier — only for tasks in DEEP_AI_TASKS. */
+export const DEFAULT_AI_MODEL_DEEP = "claude-opus-5-5";
 /** Default for short, single-paragraph narration tasks — cheaper and faster. */
 export const DEFAULT_AI_MODEL_FAST = "claude-haiku-4-5";
 
@@ -22,26 +28,43 @@ export const SHORT_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>([
   "polishReportSummary",
 ]);
 
+/** Reasoning-heavy tasks — the only ones that get the deep (most expensive) tier. A release
+ *  brief task joins this set when it is added. */
+export const DEEP_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>(["checkRequirements"]);
+
+export type AiModelTier = "fast" | "default" | "deep";
+
 export interface AiModelEnv {
   ANTHROPIC_MODEL?: string;
   ANTHROPIC_MODEL_FAST?: string;
+  ANTHROPIC_MODEL_DEEP?: string;
 }
 
 const MODEL_ID = /^[a-z0-9][a-z0-9.\-]{2,80}$/;
 const clean = (v: string | undefined) => (v && MODEL_ID.test(v.trim()) ? v.trim() : undefined);
 
-export function resolveAiModel(task: AITask, env: AiModelEnv): { model: string; tier: "default" | "fast" } {
-  if (SHORT_AI_TASKS.has(task)) return { model: clean(env.ANTHROPIC_MODEL_FAST) ?? DEFAULT_AI_MODEL_FAST, tier: "fast" };
-  return { model: clean(env.ANTHROPIC_MODEL) ?? DEFAULT_AI_MODEL, tier: "default" };
+export function aiTaskTier(task: AITask): AiModelTier {
+  if (DEEP_AI_TASKS.has(task)) return "deep";
+  if (SHORT_AI_TASKS.has(task)) return "fast";
+  return "default";
+}
+
+export function resolveAiModel(task: AITask, env: AiModelEnv): { model: string; tier: AiModelTier } {
+  const tier = aiTaskTier(task);
+  if (tier === "deep") return { model: clean(env.ANTHROPIC_MODEL_DEEP) ?? DEFAULT_AI_MODEL_DEEP, tier };
+  if (tier === "fast") return { model: clean(env.ANTHROPIC_MODEL_FAST) ?? DEFAULT_AI_MODEL_FAST, tier };
+  return { model: clean(env.ANTHROPIC_MODEL) ?? DEFAULT_AI_MODEL, tier };
 }
 
 /** What Setup Health / Data & Settings may show — model ids only, never a secret. */
-export function aiModelStatus(env: AiModelEnv): { model: string; fastModel: string; modelFromEnv: boolean; fastModelFromEnv: boolean } {
+export function aiModelStatus(env: AiModelEnv): { model: string; fastModel: string; deepModel: string; modelFromEnv: boolean; fastModelFromEnv: boolean; deepModelFromEnv: boolean } {
   return {
     model: clean(env.ANTHROPIC_MODEL) ?? DEFAULT_AI_MODEL,
     fastModel: clean(env.ANTHROPIC_MODEL_FAST) ?? DEFAULT_AI_MODEL_FAST,
+    deepModel: clean(env.ANTHROPIC_MODEL_DEEP) ?? DEFAULT_AI_MODEL_DEEP,
     modelFromEnv: !!clean(env.ANTHROPIC_MODEL),
     fastModelFromEnv: !!clean(env.ANTHROPIC_MODEL_FAST),
+    deepModelFromEnv: !!clean(env.ANTHROPIC_MODEL_DEEP),
   };
 }
 
