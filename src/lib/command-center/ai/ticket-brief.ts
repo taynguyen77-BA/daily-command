@@ -12,6 +12,7 @@
 import type { IssueContext } from "../jira/issue-context";
 import type { TicketStatusSurface, TicketWorkStatus } from "../types";
 import { addDays } from "../date-utils";
+import { compareJiraUpdated } from "../jira/updated-time";
 import { AI_DISABLED_FOR_PROJECT, gateTicketAi, isProjectAiAllowed, projectKeyOf, type AiDataProtectionSettings, type TicketAiGate } from "./data-protection";
 import type { AIProvider } from "./provider";
 import type { TicketBriefResponse } from "./schemas";
@@ -27,9 +28,11 @@ export interface StoredTicketBrief {
 export type AiBriefCache = Record<string, StoredTicketBrief>;
 export const MAX_STORED_BRIEFS = 200;
 
-/** The synced ticket changed on a later day than the content the brief was made from. */
-export function isBriefStale(b: StoredTicketBrief, workItemLastUpdated?: string): boolean {
-  return !!workItemLastUpdated && workItemLastUpdated.slice(0, 10) > b.updated.slice(0, 10);
+/** The synced ticket changed after the content the brief was made from. K2 — with the work
+ *  item's full `updated` (WorkItem.updatedAt) that is to the second; a pre-V2.39 item only has
+ *  the day, so only a later day counts. */
+export function isBriefStale(b: StoredTicketBrief, workItemUpdated?: string): boolean {
+  return !!workItemUpdated && compareJiraUpdated(workItemUpdated, b.updated) > 0;
 }
 
 export function putBrief(cache: AiBriefCache, b: StoredTicketBrief): AiBriefCache {
@@ -49,7 +52,7 @@ export type BriefOpen =
  *  touching Jira or the model. Otherwise loads the content, gates it and asks the provider. */
 export async function openTicketBrief(args: {
   key: string;
-  workItemLastUpdated?: string;
+  workItemUpdated?: string;
   cache: AiBriefCache;
   settings: AiDataProtectionSettings;
   regenerate?: boolean;
@@ -60,10 +63,10 @@ export async function openTicketBrief(args: {
   provider: Pick<AIProvider, "generateTicketBrief" | "mode">;
 }): Promise<BriefOpen> {
   const stored = args.cache[args.key];
-  if (stored && !args.regenerate) return { kind: "cached", stored, stale: isBriefStale(stored, args.workItemLastUpdated) };
+  if (stored && !args.regenerate) return { kind: "cached", stored, stale: isBriefStale(stored, args.workItemUpdated) };
   // Not allow-listed: don't even fetch the content.
   if (!isProjectAiAllowed(args.settings, projectKeyOf(args.key))) return { kind: "disabled", reason: AI_DISABLED_FOR_PROJECT };
-  const loaded = await args.loadContext(!!stored && isBriefStale(stored, args.workItemLastUpdated));
+  const loaded = await args.loadContext(!!stored && isBriefStale(stored, args.workItemUpdated));
   if (!loaded.ok) return { kind: "error", message: loaded.error };
   const gate = gateTicketAi(loaded.context, args.settings, { previewConfirmed: args.previewConfirmed });
   if (gate.kind !== "ready") return gate;

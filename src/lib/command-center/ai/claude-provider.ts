@@ -35,6 +35,7 @@ import type { WeeklyReviewFacts } from "../weekly-review";
 import { MockAIProvider, type AIProvider, type CommunicationArtifactResult, type RequirementCheckResult } from "./provider";
 import { recordAiCall } from "./trace";
 import { pairedAuthHeader } from "../device-pairing";
+import type { AiStatusResponse } from "./status-response";
 import { parseTaskInput, TASK_OUTPUT_SCHEMAS, type TaskInput, type TicketContextInput } from "./task-registry";
 import type { AITask, BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
 import type { z } from "zod";
@@ -360,11 +361,13 @@ export class ClaudeProvider implements AIProvider {
  *  "AI provider" status label; it never blocks provider construction or method calls. */
 /** C4 — the server's AI status: whether a key is configured and which models it will use
  *  (ids only). null when the endpoint is unreachable. */
-export async function checkAiModelStatus(): Promise<{ available: boolean; model?: string; fastModel?: string; modelFromEnv?: boolean; fastModelFromEnv?: boolean } | null> {
+/** GET /api/command-center/ai (status-response.ts). Sends the paired auth, so a paired device
+ *  also learns the server AI policy (K4). Every field may be missing from an older server. */
+export async function checkAiModelStatus(): Promise<Partial<AiStatusResponse> & { available: boolean } | null> {
   try {
-    const res = await fetch(ENDPOINT, { method: "GET" });
+    const res = await fetch(ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
     if (!res.ok) return null;
-    return (await res.json()) as { available: boolean; model?: string; fastModel?: string; modelFromEnv?: boolean; fastModelFromEnv?: boolean };
+    return (await res.json()) as Partial<AiStatusResponse> & { available: boolean };
   } catch {
     return null;
   }

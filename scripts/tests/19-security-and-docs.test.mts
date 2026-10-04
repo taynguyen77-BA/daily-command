@@ -60,6 +60,13 @@ function walk(dir: string): string[] {
   ok(group, /^\d+\.\d+\.\d+$/.test(pkg.version) && pkg.version !== "0.1.0", `package.json carries the real release version (${pkg.version})`);
   ok(group, lines.length === 1, `README has exactly one "Current version" line (found ${lines.length})`);
   ok(group, actual === expected, `README "Current version" (${actual}) equals package.json "version" (${pkg.version} → ${expected})`);
+  // K5 — a heading documenting a newer release than package.json means the bump was forgotten.
+  const pkgRank = Number(major) * 1000 + Number(minor);
+  const ahead = (readme.match(/^#+ .*$/gm) ?? []).filter((h) => Array.from(h.matchAll(/\(([^)]*)\)/g)).some((m) => Array.from(m[1].matchAll(/V(\d+)\.(\d+)/g)).some((v) => Number(v[1]) * 1000 + Number(v[2]) > pkgRank)));
+  ok(group, ahead.length === 0, `no README "(V2.NN)" heading is newer than package.json ${pkg.version} (${ahead.join(" | ") || "none"})`);
+  const fakeRank = 2 * 1000 + 35;
+  const fake = ["## Task-level AI (V2.36–V2.37) — x", "## Review fixes (V2.35)"].filter((h) => Array.from(h.matchAll(/\(([^)]*)\)/g)).some((m) => Array.from(m[1].matchAll(/V(\d+)\.(\d+)/g)).some((v) => Number(v[1]) * 1000 + Number(v[2]) > fakeRank)));
+  ok(group, fake.length === 1, "the check catches a V2.36–V2.37 heading in a README still versioned 2.35.0 (the stale state K5 fixed)");
   const lock = JSON.parse(read("package-lock.json")) as { version: string; packages: Record<string, { version?: string }> };
   ok(group, lock.version === pkg.version && lock.packages[""]?.version === pkg.version, "package-lock.json agrees");
 }

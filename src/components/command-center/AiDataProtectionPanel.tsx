@@ -4,12 +4,14 @@
 //   - per-project AI allow-list (default: none), custom redaction terms, acceptance-criteria
 //     field id, the AI context cache (and whether backups include it)
 //   - today / 7-day token usage from the server's usage ledger, the daily cap, what remains
+//   - K4 — the server's AI policy (AI_ALLOWED_PROJECT_KEYS), read-only, next to the personal
+//     allow-list: a project needs both
 
 import { useEffect, useState } from "react";
 import { formatCustomTerms, parseCustomTermsText } from "@/lib/command-center/ai/redaction";
 import { contextCacheStats } from "@/lib/command-center/ai/context-cache";
 import { fetchAiUsage } from "@/lib/command-center/ai/ticket-ai-client";
-import { clearAiBudgetStatus } from "@/lib/command-center/ai/claude-provider";
+import { checkAiModelStatus, clearAiBudgetStatus } from "@/lib/command-center/ai/claude-provider";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import type { AiUsageSummary, AiUsageTotals } from "@/lib/command-center/ai/usage-ledger";
 import { Panel, SectionHeading } from "./ui";
@@ -49,6 +51,18 @@ export function AiDataProtectionPanel() {
     });
   };
   useEffect(refreshUsage, []);
+  // undefined = loading; "unknown" = not paired / older server; null = no server restriction.
+  const [serverPolicy, setServerPolicy] = useState<string[] | null | "unknown" | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    void checkAiModelStatus().then((st) => {
+      if (!cancelled) setServerPolicy(st && "aiAllowedProjectKeys" in st ? (st.aiAllowedProjectKeys ?? null) : "unknown");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const serverBlocks = (key: string) => Array.isArray(serverPolicy) && !serverPolicy.includes(key);
 
   return (
     <Panel className="p-5" data-ai-data-protection>
@@ -73,12 +87,25 @@ export function AiDataProtectionPanel() {
                     <input type="checkbox" checked={settings.allowedProjectKeys.includes(p.key)} onChange={(e) => store.setAiProjectAllowed(p.key, e.target.checked)} />
                     <span className="font-mono text-text">{p.key}</span>
                     {p.name && <span className="text-xs text-text3">{p.name}</span>}
+                    {serverBlocks(p.key) && <span className="text-xs text-orange">blocked by server</span>}
                   </label>
                 </li>
               ))}
             </ul>
           )}
           <p className="mt-1 text-xs text-text3">Default: none. A ticket in any other project shows &ldquo;AI disabled for this project&rdquo; and nothing from it is sent.</p>
+          <p data-ai-server-policy className="mt-2 text-xs text-text3">
+            <span className="font-semibold text-text2">Server policy</span> (<span className="font-mono">AI_ALLOWED_PROJECT_KEYS</span>, read-only):{" "}
+            {serverPolicy === undefined
+              ? "checking…"
+              : serverPolicy === "unknown"
+                ? "not available — pair this device (Cross-Device Sync) to see it."
+                : serverPolicy === null
+                  ? "not set — the server adds no restriction; your list above decides."
+                  : serverPolicy.length === 0
+                    ? "set, but lists no valid project — the server refuses ticket content for every project."
+                    : <><span className="font-mono text-text">{serverPolicy.join(", ")}</span> — a project must be allowed here and ticked above.</>}
+          </p>
         </div>
 
         <div data-ai-redaction>

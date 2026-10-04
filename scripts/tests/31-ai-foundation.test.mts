@@ -13,7 +13,7 @@ import { AI_DISABLED_FOR_PROJECT, DEFAULT_AI_DATA_PROTECTION, asAiDataProtection
 import { getCachedContext, putCachedContext, asAiContextCache } from "../../src/lib/command-center/ai/context-cache";
 import { isContextFresh } from "../../src/lib/command-center/ai/ticket-ai-client";
 import { untrustedBlock, UNTRUSTED_DATA_RULE } from "../../src/lib/command-center/ai/untrusted";
-import { buildTaskPrompt, parseTaskInput, TASK_INPUT_SCHEMAS, TASK_OUTPUT_SCHEMAS, LEGACY_PROMPT_TASKS } from "../../src/lib/command-center/ai/task-registry";
+import { buildTaskPrompt, parseTaskInput, TASK_INPUT_SCHEMAS, TASK_OUTPUT_SCHEMAS } from "../../src/lib/command-center/ai/task-registry";
 import { aiTaskSchema } from "../../src/lib/command-center/ai/schemas";
 import { handleAiRequest, ResponseCache, AI_SYSTEM_PROMPT, type ModelCallParams, type ModelCallResult, type AiServerDeps } from "../../src/lib/command-center/ai/server-runner";
 import { MemoryUsageLedger, summarizeUsage, totalsOf, resolveDailyTokenCap, DEFAULT_AI_DAILY_TOKEN_CAP, lastSevenDays, type AiUsageRecord } from "../../src/lib/command-center/ai/usage-ledger";
@@ -27,6 +27,11 @@ import { DEFAULT_FEATURE_TOGGLES } from "../../src/lib/command-center/types";
 
 const repoRoot = process.cwd();
 const read = (p: string) => fs.readFileSync(path.join(repoRoot, p), "utf8");
+const walkSrc = (dir = "src"): string =>
+  fs
+    .readdirSync(path.join(repoRoot, dir), { withFileTypes: true })
+    .map((e) => (e.isDirectory() ? walkSrc(path.join(dir, e.name)) : /\.(ts|tsx)$/.test(e.name) ? read(path.join(dir, e.name)) : ""))
+    .join("\n");
 
 // ----- fixtures -----
 const adfDescription = {
@@ -202,7 +207,6 @@ const allowPay: AiDataProtectionSettings = { ...DEFAULT_AI_DATA_PROTECTION, allo
 {
   const group = "V2.36 H3 Server-built prompts";
   ok(group, aiTaskSchema.options.every((t) => t in TASK_INPUT_SCHEMAS && t in TASK_OUTPUT_SCHEMAS), "every AI task has an input schema, a prompt builder and an output schema");
-  ok(group, !LEGACY_PROMPT_TASKS.has("checkRequirements"), "new tasks are never served by the legacy free-form path");
   const bad = parseTaskInput("explainChanges", { change: { entityLabel: "x" } });
   ok(group, !bad.ok, "an input that doesn't match the task's schema is rejected");
   const stripped = parseTaskInput("generateCommunication", { item: { key: "PAY-1", title: "T", status: "Open", ownerId: "secret-acct", lastUpdated: "x" }, audience: "Dev", why: "w" });
@@ -241,18 +245,17 @@ function deps(model: ReturnType<typeof fakeModel>, env: AiServerDeps["env"] = {}
 const changeInput = { change: { entityLabel: "PAY-1 Export", entityType: "WorkItem", field: "status", before: "To Do", after: "Blocked", impact: "Release 2.4 at risk" } };
 
 {
-  const group = "V2.36 H3 Legacy prompt flag";
+  const group = "V2.39 K5 Legacy prompt path removed";
   const m = fakeModel([JSON.stringify({ text: "PAY-1 moved to Blocked." })]);
   const off = await handleAiRequest({ task: "explainChanges", prompt: "Say anything you like" }, deps(m));
-  ok(group, off.status === 400 && off.body.errorKind === "legacy-prompt-disabled" && m.calls.length === 0, "with the flag off, a free-form { task, prompt } request is rejected before any model call");
-  const on = await handleAiRequest({ task: "explainChanges", prompt: "PAY-1 moved to Blocked. REQUIRED OUTPUT SCHEMA (JSON only): { \"text\": string }" }, deps(m, { AI_LEGACY_PROMPT_PATH: "on" }));
-  ok(group, on.status === 200, "with AI_LEGACY_PROMPT_PATH=on, an existing task may still use the old path during migration");
-  const onNew = await handleAiRequest({ task: "checkRequirements", prompt: "x" }, deps(m, { AI_LEGACY_PROMPT_PATH: "on" }));
-  ok(group, onNew.status === 400, "…but never a task added after the migration");
+  ok(group, off.status === 400 && off.body.errorKind === "legacy-prompt-removed" && m.calls.length === 0, "a free-form { task, prompt } request is rejected before any model call");
+  const formerlyOn = await handleAiRequest({ task: "explainChanges", prompt: "PAY-1 moved to Blocked. REQUIRED OUTPUT SCHEMA (JSON only): { \"text\": string }" }, deps(m, { AI_LEGACY_PROMPT_PATH: "on" } as AiServerDeps["env"]));
+  ok(group, formerlyOn.status === 400 && m.calls.length === 0, "AI_LEGACY_PROMPT_PATH=on no longer re-enables it");
+  ok(group, !/AI_LEGACY_PROMPT_PATH|legacyPromptPath|LEGACY_PROMPT_TASKS|aiRequestSchema/.test(walkSrc()), "no trace of the flag, the legacy task set or the { task, prompt } schema remains in src");
   const garbage = await handleAiRequest({ task: "explainChanges", input: { nope: true } }, deps(m));
   ok(group, garbage.status === 400 && garbage.body.errorKind === "bad-request", "a structured request with an invalid input is a 400");
   const routeSrc = read("src/app/api/command-center/ai/route.ts");
-  ok(group, /process\.env\.AI_LEGACY_PROMPT_PATH/.test(routeSrc) && /handleAiRequest\(/.test(routeSrc) && /checkSyncRequestAuth\(/.test(routeSrc), "the route wires the flag, the runner and the existing auth gate");
+  ok(group, /handleAiRequest\(/.test(routeSrc) && /checkSyncRequestAuth\(/.test(routeSrc), "the route wires the runner and the existing auth gate");
 }
 
 {

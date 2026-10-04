@@ -235,6 +235,9 @@ export interface WorkItem {
   dueDate?: string; // ISO date
   createdDate: string;
   lastUpdated: string; // ISO date
+  // K2 — Jira's full `updated` datetime (lastUpdated keeps only the day). Jira items only;
+  // undefined for data synced before V2.39 — compare with jira/updated-time.ts.
+  updatedAt?: string;
   blocked: boolean;
   blockerReason?: string;
   dependencyIds: string[];

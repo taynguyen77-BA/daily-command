@@ -21,6 +21,7 @@ import type { RequirementCheckResult } from "@/lib/command-center/ai/provider";
 import type { TicketContextInput } from "@/lib/command-center/ai/task-registry";
 import type { RedactionSession } from "@/lib/command-center/ai/redaction";
 import type { WorkItem } from "@/lib/command-center/types";
+import { workItemUpdatedStamp } from "@/lib/command-center/jira/updated-time";
 import { AiProviderIndicator, TrustLabel } from "./ui";
 
 type Phase =
@@ -74,7 +75,7 @@ export function TicketAiPanel({ item }: { item: WorkItem }) {
 
   const start = async (force = false) => {
     setPhase({ kind: "loading" });
-    const loaded = await loadIssueContext(commandCenterStore, item.key, { workItemLastUpdated: item.lastUpdated, force });
+    const loaded = await loadIssueContext(commandCenterStore, item.key, { workItemUpdated: workItemUpdatedStamp(item), force });
     if (!loaded.ok) {
       setPhase({ kind: "error", message: loaded.error });
       return;

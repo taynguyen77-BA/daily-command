@@ -2,17 +2,18 @@
 // in process.env on this server route — it is never sent to, or readable by, the browser.
 //
 // V2.36 H3 — the browser POSTs { task, input }; the SERVER builds the prompt from ai/prompts/*
-// (task-registry.ts). Everything between the request and the response — the deprecated
-// free-form path flag, the daily token cap, dedupe, prompt caching, the grounding guard and
+// (task-registry.ts); the free-form { task, prompt } path is gone (V2.39 K5). Everything
+// between the request and the response — the daily token cap, dedupe, prompt caching, the grounding guard and
 // usage logging — lives in ai/server-runner.ts so it is tested offline. This file only wires
 // auth, env and the real SDK in.
 
 import { NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
-import { aiModelStatus } from "@/lib/command-center/ai/model-config";
-import { handleAiRequest, legacyPromptPathEnabled, type AiServerEnv, type ModelCallParams, type ModelCallResult } from "@/lib/command-center/ai/server-runner";
-import { getUsageLedger, resolveDailyTokenCap } from "@/lib/command-center/ai/usage-ledger";
+import { buildAiStatusResponse } from "@/lib/command-center/ai/status-response";
+import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
+import { handleAiRequest, type AiServerEnv, type ModelCallParams, type ModelCallResult } from "@/lib/command-center/ai/server-runner";
+import { getUsageLedger } from "@/lib/command-center/ai/usage-ledger";
 
 export const runtime = "nodejs";
 
@@ -22,20 +23,16 @@ function serverEnv(): AiServerEnv {
     ANTHROPIC_MODEL_FAST: process.env.ANTHROPIC_MODEL_FAST,
     ANTHROPIC_MODEL_DEEP: process.env.ANTHROPIC_MODEL_DEEP,
     AI_DAILY_TOKEN_CAP: process.env.AI_DAILY_TOKEN_CAP,
-    AI_LEGACY_PROMPT_PATH: process.env.AI_LEGACY_PROMPT_PATH,
   };
 }
 
-export async function GET() {
-  const available = Boolean(process.env.ANTHROPIC_API_KEY);
-  const env = serverEnv();
-  // Model ids and the cap only (never a secret) — Setup Health / Data & Settings show them.
-  return NextResponse.json({
-    available,
-    ...aiModelStatus(env),
-    dailyTokenCap: resolveDailyTokenCap(env.AI_DAILY_TOKEN_CAP),
-    legacyPromptPath: legacyPromptPathEnabled(env),
-  });
+export async function GET(req: Request) {
+  const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  // Model ids, the cap and its storage (never a secret) — Setup Health / Data & Settings show
+  // them; the server AI policy only to a paired caller (status-response.ts).
+  return NextResponse.json(
+    buildAiStatusResponse({ ...serverEnv(), AI_ALLOWED_PROJECT_KEYS: process.env.AI_ALLOWED_PROJECT_KEYS }, { available: Boolean(process.env.ANTHROPIC_API_KEY), kvConfigured: isNotifyStoreConfigured(), authorized: auth.ok })
+  );
 }
 
 function anthropicCaller(apiKey: string) {

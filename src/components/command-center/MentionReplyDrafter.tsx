@@ -9,14 +9,14 @@ import { useRef, useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { loadIssueContext } from "@/lib/command-center/ai/ticket-ai-client";
-import { DEFAULT_REPLY_OPTIONS, draftMentionReplyFlow, memoryDraftCache, type MentionRef, type ReplyOptions } from "@/lib/command-center/ai/mention-reply";
+import { DEFAULT_REPLY_OPTIONS, draftMentionReplyFlow, memoryDraftCache, MENTION_NOT_FOUND_NOTICE, type MentionRef, type ReplyOptions } from "@/lib/command-center/ai/mention-reply";
 import { projectKeyOf } from "@/lib/command-center/ai/data-protection";
 import type { MentionReplyResponse } from "@/lib/command-center/ai/schemas";
 import { TrustLabel } from "./ui";
 
 const draftCache = memoryDraftCache();
 
-type Phase = { kind: "closed" } | { kind: "options" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "draft"; draft: MentionReplyResponse; mode: "mock" | "claude" } | { kind: "message"; text: string };
+type Phase = { kind: "closed" } | { kind: "options" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "draft"; draft: MentionReplyResponse; mode: "mock" | "claude"; excerptOnly: boolean } | { kind: "message"; text: string };
 
 export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
@@ -31,18 +31,25 @@ export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
     const id = ++runId.current;
     setPhase({ kind: "loading" });
     setStatus(null);
-    const loaded = await loadIssueContext(commandCenterStore, mention.issueKey);
-    if (id !== runId.current) return;
-    if (!loaded.ok) return setPhase({ kind: "message", text: loaded.error });
     if (previewConfirmed) commandCenterStore.acknowledgeAiSendPreview(projectKeyOf(mention.issueKey));
     const provider = getAIProvider();
-    const r = await draftMentionReplyFlow({ context: loaded.context, mention, options, settings: commandCenterStore.getSnapshot().aiDataProtection, provider, cache: draftCache, previewConfirmed });
+    const r = await draftMentionReplyFlow({
+      // K1 — a cached thread older than the mention (or without it) is refetched by the flow.
+      loadContext: (force) => loadIssueContext(commandCenterStore, mention.issueKey, { force }),
+      mention,
+      options,
+      settings: commandCenterStore.getSnapshot().aiDataProtection,
+      provider,
+      cache: draftCache,
+      previewConfirmed,
+    });
     if (id !== runId.current) return;
-    if (r.kind === "disabled") setPhase({ kind: "message", text: `${r.reason} — allow it in Data & Settings → AI data protection.` });
+    if (r.kind === "error") setPhase({ kind: "message", text: r.message });
+    else if (r.kind === "disabled") setPhase({ kind: "message", text: `${r.reason} — allow it in Data & Settings → AI data protection.` });
     else if (r.kind === "needs-preview") setPhase({ kind: "preview", preview: r.preview });
     else {
       setText(r.draft.reply);
-      setPhase({ kind: "draft", draft: r.draft, mode: r.mode });
+      setPhase({ kind: "draft", draft: r.draft, mode: r.mode, excerptOnly: r.excerptOnly });
     }
   };
 
@@ -107,6 +114,11 @@ export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
       {phase.kind === "draft" && (
         <div className="mt-1">
           <p className="text-text3">{phase.mode === "claude" ? "AI draft — edit before using it." : "AI unavailable — a template draft to edit."}</p>
+          {phase.excerptOnly && (
+            <p data-reply-excerpt-only className="mt-1 text-orange">
+              {MENTION_NOT_FOUND_NOTICE}
+            </p>
+          )}
           <textarea value={text} onChange={(e) => setText(e.target.value)} rows={5} aria-label="Reply draft" className="mt-1 w-full rounded border border-border bg-surface px-2 py-1 text-sm" />
           {phase.draft.unansweredPoints.length > 0 && (
             <div className="mt-1">

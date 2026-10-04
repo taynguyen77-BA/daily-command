@@ -18,7 +18,7 @@ type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; previ
 
 const CATEGORY: Record<BaRequirementCheckResponse["acceptanceCriteria"][number]["category"], string> = { "happy-path": "Happy path", validation: "Validation", error: "Errors", "edge-case": "Edge cases" };
 
-export function BaRequirementCheck({ ticketKey, workItemLastUpdated }: { ticketKey: string; workItemLastUpdated?: string }) {
+export function BaRequirementCheck({ ticketKey, workItemUpdated }: { ticketKey: string; workItemUpdated?: string }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [phase, setPhase] = useState<Phase>({ kind: "closed" });
   const [status, setStatus] = useState<string | null>(null);
@@ -27,7 +27,7 @@ export function BaRequirementCheck({ ticketKey, workItemLastUpdated }: { ticketK
   const run = async (previewConfirmed = false) => {
     setPhase({ kind: "loading" });
     setStatus(null);
-    const loaded = await loadIssueContext(commandCenterStore, ticketKey, { workItemLastUpdated });
+    const loaded = await loadIssueContext(commandCenterStore, ticketKey, { workItemUpdated });
     if (!loaded.ok) return setPhase({ kind: "message", text: loaded.error });
     if (previewConfirmed) commandCenterStore.acknowledgeAiSendPreview(projectKeyOf(ticketKey));
     const r = await runBaRequirementCheck(loaded.context, commandCenterStore.getSnapshot().aiDataProtection, getAIProvider(), { previewConfirmed });

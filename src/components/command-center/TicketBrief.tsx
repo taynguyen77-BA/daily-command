@@ -15,7 +15,7 @@ import { TrustLabel } from "./ui";
 
 type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "shown"; stored: StoredTicketBrief; stale: boolean } | { kind: "message"; text: string };
 
-export function TicketBrief({ ticketKey, workItemLastUpdated }: { ticketKey: string; workItemLastUpdated?: string }) {
+export function TicketBrief({ ticketKey, workItemUpdated }: { ticketKey: string; workItemUpdated?: string }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [phase, setPhase] = useState<Phase>({ kind: "closed" });
   const [applied, setApplied] = useState<string | null>(null);
@@ -27,13 +27,13 @@ export function TicketBrief({ ticketKey, workItemLastUpdated }: { ticketKey: str
     if (opts.previewConfirmed) commandCenterStore.acknowledgeAiSendPreview(ticketKey.split("-")[0]);
     const r = await openTicketBrief({
       key: ticketKey,
-      workItemLastUpdated,
+      workItemUpdated,
       cache: snapshot.aiBriefs,
       settings: commandCenterStore.getSnapshot().aiDataProtection,
       regenerate: opts.regenerate,
       previewConfirmed: opts.previewConfirmed,
       today: todayLocalIso(),
-      loadContext: (force) => loadIssueContext(commandCenterStore, ticketKey, { workItemLastUpdated, force }),
+      loadContext: (force) => loadIssueContext(commandCenterStore, ticketKey, { workItemUpdated, force }),
       provider: getAIProvider(),
     });
     if (r.kind === "cached") setPhase({ kind: "shown", stored: r.stored, stale: r.stale });

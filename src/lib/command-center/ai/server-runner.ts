@@ -2,8 +2,8 @@
 // is tested offline with a fake model (route.ts only wires env, auth and the real SDK in).
 //
 //   1. Request: { task, input } — the input is validated by the task's own schema and the
-//      SERVER builds the prompt (task-registry.ts). The old free-form { task, prompt } shape is
-//      served only while AI_LEGACY_PROMPT_PATH=on, and only for pre-V2.36 tasks.
+//      SERVER builds the prompt (task-registry.ts). The old free-form { task, prompt } shape
+//      and its opt-in env flag were removed in V2.39 (K5).
 //   2. Inputs get a pattern redaction pass here too (the browser already redacted them).
 //   3. Daily token cap (AI_DAILY_TOKEN_CAP) checked BEFORE any model call → 429 when used up.
 //   4. Identical requests are deduped: in flight (one model call) and for the task's cache
@@ -16,8 +16,8 @@
 //   7. Every model response — success or not — is logged to the usage ledger.
 
 import { createHash } from "node:crypto";
-import { aiRequestSchema, aiStructuredRequestSchema, type AITask } from "./schemas";
-import { buildTaskPrompt, LEGACY_PROMPT_TASKS, parseTaskInput, TASK_EXTRA_CHECKS, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
+import { aiStructuredRequestSchema, type AITask } from "./schemas";
+import { buildTaskPrompt, parseTaskInput, TASK_EXTRA_CHECKS, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
 import { isAlwaysThinkingModel, resolveAiModel, supportsDefaultFallbacks, type AiModelEnv, type AiModelTier } from "./model-config";
 import { checkGrounding } from "./evaluation";
 import { redactPatternsDeep } from "./redaction";
@@ -51,7 +51,6 @@ export interface ModelCallResult {
 
 export interface AiServerEnv extends AiModelEnv {
   AI_DAILY_TOKEN_CAP?: string;
-  AI_LEGACY_PROMPT_PATH?: string;
 }
 
 export interface AiServerDeps {
@@ -63,10 +62,6 @@ export interface AiServerDeps {
 }
 
 export type AiServerResult = { status: number; body: Record<string, unknown> };
-
-export function legacyPromptPathEnabled(env: AiServerEnv): boolean {
-  return /^(1|true|on|yes)$/i.test(env.AI_LEGACY_PROMPT_PATH?.trim() ?? "");
-}
 
 // ----- dedupe cache -----
 
@@ -116,28 +111,17 @@ const fail = (status: number, error: string, errorKind: string, extra: Record<st
 
 export async function handleAiRequest(body: unknown, deps: AiServerDeps): Promise<AiServerResult> {
   // ---- 1. shape ----
-  let task: AITask;
-  let prompt: string;
-  let parsedInput: unknown;
-  if (body && typeof body === "object" && "input" in body) {
-    const req = aiStructuredRequestSchema.safeParse(body);
-    if (!req.success) return fail(400, "Request did not match the expected shape { task, input }.", "bad-request");
-    task = req.data.task;
-    const parsed = parseTaskInput(task, req.data.input);
-    if (!parsed.ok) return fail(400, parsed.error, "bad-request");
-    parsedInput = redactPatternsDeep(parsed.input);
-    prompt = buildTaskPrompt(task, parsedInput);
-  } else if (body && typeof body === "object" && "prompt" in body) {
-    const legacy = aiRequestSchema.safeParse(body);
-    if (!legacy.success) return fail(400, "Request did not match the expected shape.", "bad-request");
-    if (!legacyPromptPathEnabled(deps.env) || !LEGACY_PROMPT_TASKS.has(legacy.data.task)) {
-      return fail(400, "Free-form prompts are not accepted. Send { task, input } — the server builds the prompt.", "legacy-prompt-disabled");
-    }
-    task = legacy.data.task;
-    prompt = legacy.data.prompt;
-  } else {
-    return fail(400, "Request did not match the expected shape { task, input }.", "bad-request");
+  const isObject = !!body && typeof body === "object";
+  if (isObject && "prompt" in body && !("input" in body)) {
+    return fail(400, "Free-form prompts are not accepted. Send { task, input } — the server builds the prompt.", "legacy-prompt-removed");
   }
+  const req = isObject && "input" in body ? aiStructuredRequestSchema.safeParse(body) : undefined;
+  if (!req?.success) return fail(400, "Request did not match the expected shape { task, input }.", "bad-request");
+  const task: AITask = req.data.task;
+  const parsed = parseTaskInput(task, req.data.input);
+  if (!parsed.ok) return fail(400, parsed.error, "bad-request");
+  const parsedInput: unknown = redactPatternsDeep(parsed.input);
+  const prompt = buildTaskPrompt(task, parsedInput);
 
   const { model, tier } = resolveAiModel(task, deps.env);
   const cap = resolveDailyTokenCap(deps.env.AI_DAILY_TOKEN_CAP);
@@ -230,7 +214,7 @@ async function callAndValidate(task: AITask, prompt: string, parsedInput: unknow
       return fail(502, "Model response failed schema validation.", "invalid-output");
     }
     const generic = checkGrounding(validated.data, prompt);
-    const extra = parsedInput !== undefined ? (TASK_EXTRA_CHECKS[task]?.(validated.data, parsedInput, prompt) ?? []) : [];
+    const extra = TASK_EXTRA_CHECKS[task]?.(validated.data, parsedInput, prompt) ?? [];
     const grounding = { ok: generic.ok && extra.length === 0, violations: [...generic.violations, ...extra] };
     if (grounding.ok) {
       await log(deps, { ...base, outcome: "ok" }, now);

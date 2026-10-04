@@ -7,7 +7,7 @@ import { emptyData } from "../../src/lib/command-center/types";
 import { evidenceForRisk, evidenceForScore, factsForWorkItem, makeEvidence } from "../../src/lib/command-center/evidence";
 import { detectGaps } from "../../src/lib/command-center/gap-detection";
 import { computeDeliveryConfidence, buildExecutiveView } from "../../src/lib/command-center/executive";
-import { reasoningResponseSchema, textResponseSchema, aiRequestSchema } from "../../src/lib/command-center/ai/schemas";
+import { reasoningResponseSchema, textResponseSchema, aiStructuredRequestSchema } from "../../src/lib/command-center/ai/schemas";
 import { MockAIProvider } from "../../src/lib/command-center/ai/provider";
 import { ClaudeProvider, checkClaudeAvailability } from "../../src/lib/command-center/ai/claude-provider";
 import { ok } from "./harness.mts";
@@ -69,8 +69,8 @@ import { TODAY, makeItem } from "./helpers.mts";
   ok("AI schema validation", textResponseSchema.safeParse({ text: "hello" }).success, "a well-formed text response validates");
   ok("AI schema validation", !textResponseSchema.safeParse({ text: "" }).success, "an empty text response is rejected");
 
-  ok("AI schema validation", aiRequestSchema.safeParse({ task: "detectRisks", prompt: "..." }).success, "a valid task name is accepted");
-  ok("AI schema validation", !aiRequestSchema.safeParse({ task: "deleteEverything", prompt: "..." }).success, "an unrecognized task name is rejected");
+  ok("AI schema validation", aiStructuredRequestSchema.safeParse({ task: "detectRisks", input: {} }).success, "a valid task name is accepted");
+  ok("AI schema validation", !aiStructuredRequestSchema.safeParse({ task: "deleteEverything", input: {} }).success, "an unrecognized task name is rejected");
 }
 
 
