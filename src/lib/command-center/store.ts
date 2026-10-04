@@ -119,7 +119,7 @@ import type { TimeBudget } from "./action-plan";
 import { rollDailySyncSummary } from "./sync-history";
 import { migrateTicketBackedActionStatuses } from "./action-migration";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
-import { planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
+import { planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
@@ -127,6 +127,8 @@ import { asAiDataProtectionSettings, DEFAULT_AI_DATA_PROTECTION, type AiDataProt
 import { asAiContextCache, putCachedContext, type AiContextCache } from "./ai/context-cache";
 import type { CustomTerm } from "./ai/redaction";
 import type { IssueContext } from "./jira/issue-context";
+import { asAiBriefCache, putBrief, type AiBriefCache, type StoredTicketBrief } from "./ai/ticket-brief";
+import { addTriageStats, asTriageStats, type TriageCategory, type TriageStatsByDay } from "./ai/smart-triage";
 export type { MyActionItemsOnlyByPage };
 
 const STORAGE_KEY = "command-center:v1";
@@ -349,6 +351,11 @@ export interface StoreState {
   /** V2.36 H1 — fetched ticket content, keyed by issue key, valid per Jira `updated`. Local-only:
    *  never synced, and left out of backups unless aiDataProtection.includeContextCacheInBackup. */
   aiContextCache: AiContextCache;
+  /** V2.37 I1 — Ticket Briefs per (issue key, Jira `updated`). Local-only; holds AI text about
+   *  ticket content, so backups leave it out like the context cache. */
+  aiBriefs: AiBriefCache;
+  /** V2.37 I2 — Smart Triage suggestions vs. accepted, per local day and category. */
+  aiTriageStats: TriageStatsByDay;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -404,6 +411,8 @@ function initialState(): StoreState {
     jiraWriteLog: [],
     aiDataProtection: { ...DEFAULT_AI_DATA_PROTECTION, previewSeenProjects: {} },
     aiContextCache: {},
+    aiBriefs: {},
+    aiTriageStats: {},
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -859,7 +868,7 @@ function asJiraWriteBackSettings(v: unknown): JiraWriteBackSettings {
 
 function isJiraWriteLogEntry(v: unknown): v is JiraWriteLogEntry {
   const e = v as Partial<JiraWriteLogEntry>;
-  return typeof e === "object" && e !== null && typeof e.id === "string" && typeof e.at === "string" && typeof e.ticketKey === "string" && typeof e.ok === "boolean" && ["comment", "flag", "transition"].includes(e.kind as string);
+  return typeof e === "object" && e !== null && typeof e.id === "string" && typeof e.at === "string" && typeof e.ticketKey === "string" && typeof e.ok === "boolean" && ["comment", "flag", "transition"].includes(e.kind as string) && (e.trigger === undefined || ["block", "done", "reply"].includes(e.trigger as string));
 }
 
 type TicketStateSlice = Pick<StoreState, "ticketWorkStates" | "dailyCommandCompletions" | "dailyCommandSkips" | "dailyCommandBlocks" | "dailyCommandTombstones">;
@@ -988,6 +997,8 @@ function parseStoredStateRaw(raw: string): StoreState {
       jiraWriteBack: asJiraWriteBackSettings(parsed.jiraWriteBack),
       aiDataProtection: asAiDataProtectionSettings(parsed.aiDataProtection),
       aiContextCache: asAiContextCache(parsed.aiContextCache),
+      aiBriefs: asAiBriefCache(parsed.aiBriefs),
+      aiTriageStats: asTriageStats(parsed.aiTriageStats),
       jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
@@ -1624,6 +1635,17 @@ export class CommandCenterStore {
     return true;
   }
 
+  /** V2.37 I3 — "Post to Jira" for a drafted mention reply: queues the SAME confirmation dialog
+   *  (editable preview, explicit confirm, server gate). False when write-back isn't allowed for
+   *  this project — then the UI offers Copy only. */
+  proposeJiraReply(ticketKey: string, text: string, mentionCommentId: string): boolean {
+    const proposal = planJiraReply({ features: this.state.features, settings: this.state.jiraWriteBack, ticketKey, text, mentionCommentId });
+    if (!proposal) return false;
+    this.pendingJiraWrite = proposal;
+    this.listeners.forEach((l) => l());
+    return true;
+  }
+
   /** F4 — the pending write-back proposal (stable reference for useSyncExternalStore). */
   getPendingJiraWrite = (): JiraWriteBackProposal | null => this.pendingJiraWrite;
   getServerPendingJiraWrite = (): JiraWriteBackProposal | null => null;
@@ -1819,7 +1841,18 @@ export class CommandCenterStore {
   }
 
   clearAiContextCache() {
-    this.set({ ...this.state, aiContextCache: {} });
+    this.set({ ...this.state, aiContextCache: {}, aiBriefs: {} });
+  }
+
+  /** V2.37 I1 — keep a generated brief (one per issue; newest replaces). */
+  saveTicketBrief(brief: StoredTicketBrief) {
+    this.set({ ...this.state, aiBriefs: putBrief(this.state.aiBriefs, brief) });
+  }
+
+  /** V2.37 I2 — how many triage suggestions per category were shown vs. applied. */
+  recordTriageAcceptance(day: string, rows: { category: TriageCategory; accepted: boolean }[]) {
+    if (rows.length === 0) return;
+    this.set({ ...this.state, aiTriageStats: addTriageStats(this.state.aiTriageStats, day, rows) });
   }
 
   setJiraWriteBackSettings(patch: Partial<JiraWriteBackSettings>) {

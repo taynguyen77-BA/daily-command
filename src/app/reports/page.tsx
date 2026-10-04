@@ -24,6 +24,7 @@ import { emailDraftUrl, slackReportText } from "@/lib/command-center/report-expo
 import { sendReportToSlack } from "@/lib/command-center/notify-client";
 import { OverdueBlockersCallout, ReportSummaryParagraph } from "@/components/command-center/ReportSummary";
 import type { NeedsDecisionGroup } from "@/lib/command-center/report-summary";
+import { ReportRewrite } from "@/components/command-center/ReportRewrite";
 
 const FORMATS: { format: ReportFormat; label: string }[] = [
   { format: "markdown", label: "Copy Markdown" },
@@ -215,6 +216,7 @@ export default function ReportsPage() {
             </label>
             <CopyButtons render={(format) => renderDailyReport(v, format, { includeTeam })} />
             {state.features.reportExport && <ShareButtons subject={`Daily Report — ${v.date}`} render={(format) => renderDailyReport(v, format, { includeTeam })} />}
+            {state.features.audienceReports && <ReportRewrite key={`d:${v.date}`} report={{ kind: "daily", view: v }} includeTeam={includeTeam} />}
           </div>
           {v.noData ? (
             <p className="text-sm text-text3" data-report-no-data>
@@ -280,6 +282,7 @@ export default function ReportsPage() {
             </div>
             <CopyButtons render={(format) => renderWeeklyReport(w, format, { includeTeam })} />
             {state.features.reportExport && <ShareButtons subject={`Weekly Report — ${w.weekStart} to ${w.weekEnd}`} render={(format) => renderWeeklyReport(w, format, { includeTeam })} />}
+            {state.features.audienceReports && <ReportRewrite key={`w:${w.weekStart}`} report={{ kind: "weekly", view: w }} includeTeam={includeTeam} />}
           </div>
           <ReportSummaryParagraph summary={weekly.summary} polished={polished[weeklyKey]} onPolished={setPolish(weeklyKey)} />
           <p className="text-xs text-text3">

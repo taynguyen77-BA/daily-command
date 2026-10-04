@@ -153,6 +153,11 @@ export const aiTaskSchema = z.enum([
   "polishReportSummary",
   // V2.36 H — task-level: requirement check over one ticket's (allow-listed, redacted) content
   "checkRequirements",
+  // V2.37 I1–I4 — task-level features
+  "generateTicketBrief",
+  "triageNewItems",
+  "draftMentionReply",
+  "rewriteReport",
 ]);
 export type AITask = z.infer<typeof aiTaskSchema>;
 
@@ -184,3 +189,46 @@ export const requirementCheckResponseSchema = z.object({
   insufficientEvidence: z.boolean().optional(),
 });
 export type RequirementCheckResponse = z.infer<typeof requirementCheckResponseSchema>;
+
+// ===== V2.37 I1–I4 =====
+
+export const BRIEF_STATUSES = ["IN_PROGRESS", "BLOCKED", "DONE", "DEFERRED", "SKIPPED"] as const;
+
+export const ticketBriefResponseSchema = z.object({
+  whatIsAsked: z.string().min(1).max(1000),
+  currentState: z.string().min(1).max(1000),
+  waitingOn: z.array(z.object({ who: z.string().min(1).max(200), what: z.string().min(1).max(500) })).max(10),
+  openQuestions: z.array(z.string().min(1).max(500)).max(10),
+  suggestedNextStep: z.string().min(1).max(500),
+  suggestedStatus: z.object({ status: z.enum(BRIEF_STATUSES), reason: z.string().min(1).max(300) }).optional(),
+});
+export type TicketBriefResponse = z.infer<typeof ticketBriefResponseSchema>;
+
+export const TRIAGE_CATEGORIES = ["Reply needed", "Review needed", "Do", "FYI"] as const;
+export const TRIAGE_ACTIONS = ["keep", "done", "defer", "block", "skip"] as const;
+
+export const triageResponseSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        key: z.string().min(1).max(40),
+        category: z.enum(TRIAGE_CATEGORIES),
+        action: z.object({ kind: z.enum(TRIAGE_ACTIONS), until: z.string().max(10).optional(), reason: z.string().max(200).optional() }),
+        confidence: z.number().min(0).max(1),
+        rationale: z.string().min(1).max(300),
+      })
+    )
+    .max(50),
+});
+export type TriageResponse = z.infer<typeof triageResponseSchema>;
+
+export const mentionReplyResponseSchema = z.object({
+  reply: z.string().min(1).max(3000),
+  unansweredPoints: z.array(z.string().min(1).max(500)).max(10),
+});
+export type MentionReplyResponse = z.infer<typeof mentionReplyResponseSchema>;
+
+export const reportRewriteResponseSchema = z.object({
+  text: z.string().min(1).max(12000),
+});
+export type ReportRewriteResponse = z.infer<typeof reportRewriteResponseSchema>;

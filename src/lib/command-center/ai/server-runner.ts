@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { aiRequestSchema, aiStructuredRequestSchema, type AITask } from "./schemas";
-import { buildTaskPrompt, LEGACY_PROMPT_TASKS, parseTaskInput, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
+import { buildTaskPrompt, LEGACY_PROMPT_TASKS, parseTaskInput, TASK_EXTRA_CHECKS, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
 import { isAlwaysThinkingModel, resolveAiModel, supportsDefaultFallbacks, type AiModelEnv, type AiModelTier } from "./model-config";
 import { checkGrounding } from "./evaluation";
 import { redactPatternsDeep } from "./redaction";
@@ -118,13 +118,15 @@ export async function handleAiRequest(body: unknown, deps: AiServerDeps): Promis
   // ---- 1. shape ----
   let task: AITask;
   let prompt: string;
+  let parsedInput: unknown;
   if (body && typeof body === "object" && "input" in body) {
     const req = aiStructuredRequestSchema.safeParse(body);
     if (!req.success) return fail(400, "Request did not match the expected shape { task, input }.", "bad-request");
     task = req.data.task;
     const parsed = parseTaskInput(task, req.data.input);
     if (!parsed.ok) return fail(400, parsed.error, "bad-request");
-    prompt = buildTaskPrompt(task, redactPatternsDeep(parsed.input));
+    parsedInput = redactPatternsDeep(parsed.input);
+    prompt = buildTaskPrompt(task, parsedInput);
   } else if (body && typeof body === "object" && "prompt" in body) {
     const legacy = aiRequestSchema.safeParse(body);
     if (!legacy.success) return fail(400, "Request did not match the expected shape.", "bad-request");
@@ -161,7 +163,7 @@ export async function handleAiRequest(body: unknown, deps: AiServerDeps): Promis
   const pending = cache.pending(key);
   if (pending) return pending;
 
-  const run = callAndValidate(task, prompt, model, tier, deps, now).then(async (r) => {
+  const run = callAndValidate(task, prompt, parsedInput, model, tier, deps, now).then(async (r) => {
     if (r.status === 200) cache.set(key, r.body.data, getUsagePolicy(task).cacheDurationMs, deps.now().getTime());
     const after = summarizeUsage(await deps.ledger.listDays(lastSevenDays(deps.now())), cap, deps.now(), deps.ledger.storage);
     return { ...r, body: { ...r.body, usage: { cap, remainingToday: after.remainingToday, model, tier } } };
@@ -187,7 +189,7 @@ async function log(deps: AiServerDeps, r: Pick<AiUsageRecord, "task" | "model" |
   }
 }
 
-async function callAndValidate(task: AITask, prompt: string, model: string, tier: AiModelTier, deps: AiServerDeps, now: Date): Promise<AiServerResult> {
+async function callAndValidate(task: AITask, prompt: string, parsedInput: unknown, model: string, tier: AiModelTier, deps: AiServerDeps, now: Date): Promise<AiServerResult> {
   const visible = visibleTokenBudget(task);
   const maxTokens = isAlwaysThinkingModel(model) ? visible + 6000 : visible;
   const messages: ModelCallParams["messages"] = [{ role: "user", content: prompt }];
@@ -227,7 +229,9 @@ async function callAndValidate(task: AITask, prompt: string, model: string, tier
       await log(deps, { ...base, outcome: "invalid-output" }, now);
       return fail(502, "Model response failed schema validation.", "invalid-output");
     }
-    const grounding = checkGrounding(validated.data, prompt);
+    const generic = checkGrounding(validated.data, prompt);
+    const extra = parsedInput !== undefined ? (TASK_EXTRA_CHECKS[task]?.(validated.data, parsedInput, prompt) ?? []) : [];
+    const grounding = { ok: generic.ok && extra.length === 0, violations: [...generic.violations, ...extra] };
     if (grounding.ok) {
       await log(deps, { ...base, outcome: "ok" }, now);
       return { status: 200, body: { ok: true, data: validated.data, ...(attempt > 0 ? { retriedForGrounding: true } : {}) } };

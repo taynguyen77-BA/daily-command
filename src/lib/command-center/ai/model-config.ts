@@ -26,6 +26,8 @@ export const SHORT_AI_TASKS: ReadonlySet<AITask> = new Set<AITask>([
   "generateEndOfDaySummary",
   "generateDailyGuidance",
   "polishReportSummary",
+  // V2.37 I2 — one batched triage call over metadata: fast tier.
+  "triageNewItems",
 ]);
 
 /** Reasoning-heavy tasks — the only ones that get the deep (most expensive) tier. A release

@@ -15,6 +15,7 @@ import { useCommandCenter } from "./use-command-center";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
 import { TicketLink } from "./TicketLink";
 import { ReactivatedBadge } from "./TaskReferenceRow";
+import { MentionReplyDrafter } from "./MentionReplyDrafter";
 
 function formatRecency(mentionedAt: string, nowMs: number): string {
   const ms = Math.max(0, nowMs - new Date(mentionedAt).getTime());
@@ -54,6 +55,11 @@ function MentionRow({ mention, nowMs, onResolve, onComplete, replied, onReplied 
       </div>
       {mention.workItem && <p className="mt-1 truncate text-sm text-text">{mention.workItem.title}</p>}
       <p className="mt-1 text-xs text-text2">{mention.commentAuthor ? `${mention.commentAuthor}: "${mention.excerpt}"` : `"${mention.excerpt}"`}</p>
+      {!replied && (
+        <div className="mt-1">
+          <MentionReplyDrafter mention={{ issueKey: mention.issueKey, commentId: mention.commentId, author: mention.commentAuthor, excerpt: mention.excerpt, mentionedAt: mention.mentionedAt }} />
+        </div>
+      )}
     </li>
   );
 }

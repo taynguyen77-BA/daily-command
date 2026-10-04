@@ -9,6 +9,7 @@ import { useEffect, useState } from "react";
 import { formatCustomTerms, parseCustomTermsText } from "@/lib/command-center/ai/redaction";
 import { contextCacheStats } from "@/lib/command-center/ai/context-cache";
 import { fetchAiUsage } from "@/lib/command-center/ai/ticket-ai-client";
+import { clearAiBudgetStatus } from "@/lib/command-center/ai/claude-provider";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import type { AiUsageSummary, AiUsageTotals } from "@/lib/command-center/ai/usage-ledger";
 import { Panel, SectionHeading } from "./ui";
@@ -41,7 +42,11 @@ export function AiDataProtectionPanel() {
   const cache = contextCacheStats(state.aiContextCache);
   const refreshUsage = () => {
     setUsage(undefined);
-    void fetchAiUsage().then(setUsage);
+    void fetchAiUsage().then((u) => {
+      setUsage(u);
+      // Budget available again (e.g. the cap was raised): let AI calls resume.
+      if (u && u.remainingToday > 0) clearAiBudgetStatus();
+    });
   };
   useEffect(refreshUsage, []);
 

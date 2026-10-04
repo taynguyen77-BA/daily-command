@@ -56,6 +56,11 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
   polishReportSummary: entry("polishReportSummary"),
   // V2.36 H — keyed by the ticket's Jira `updated`, so a changed ticket is re-checked.
   checkRequirements: entry("checkRequirements"),
+  // V2.37 — the browser also keeps briefs per (issue, updated) and drafts per option set.
+  generateTicketBrief: entry("generateTicketBrief"),
+  triageNewItems: entry("triageNewItems", { cacheDurationMs: TEN_MINUTES_MS }),
+  draftMentionReply: entry("draftMentionReply"),
+  rewriteReport: entry("rewriteReport", { cacheDurationMs: TEN_MINUTES_MS }),
 };
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {

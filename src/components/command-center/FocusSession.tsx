@@ -47,6 +47,8 @@ const SURFACE_LABEL: Partial<Record<TicketStatusSurface, string>> = {
   "recent-mentions": "Recent Mentions",
   "related-ticket": "a related-ticket card",
   keyboard: "keyboard triage",
+  "ai-brief": "an AI brief suggestion",
+  "ai-triage": "AI triage",
   "jira-sync": "a Jira sync",
   migration: "a data migration",
 };

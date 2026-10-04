@@ -115,27 +115,35 @@ export function asAiDataProtectionSettings(raw: unknown): AiDataProtectionSettin
   };
 }
 
-// ===== The whole send flow, as one testable function (TicketAiPanel calls this) =====
+// ===== The gate every task over one ticket's content goes through =====
 
-export type RequirementCheckFlow =
+export type TicketAiGate =
   | { kind: "disabled"; reason: typeof AI_DISABLED_FOR_PROJECT }
   | { kind: "needs-preview"; input: TicketContextInput; session: RedactionSession; redactions: number; preview: string }
-  | { kind: "done"; result: RequirementCheckResult };
+  | { kind: "ready"; input: TicketContextInput; session: RedactionSession };
 
-/** Allow-list → redaction → first-use preview → model (or deterministic fallback) → aliases
- *  restored. Nothing reaches `provider` for a project outside the allow-list, and nothing
- *  reaches it before the first-use preview was confirmed. */
+/** Allow-list → redaction → first-use preview. Nothing built here reaches a provider for a
+ *  project outside the allow-list, or before the first-use preview was confirmed. */
+export function gateTicketAi(context: IssueContext, settings: AiDataProtectionSettings, opts: { previewConfirmed?: boolean } = {}): TicketAiGate {
+  const built = buildTicketAiInput(context, settings);
+  if (!built.allowed) return { kind: "disabled", reason: built.reason };
+  if (needsSendPreview(settings, built.input.projectKey) && !opts.previewConfirmed) {
+    return { kind: "needs-preview", input: built.input, session: built.session, redactions: built.redactions, preview: describeTicketPayload(built.input) };
+  }
+  return { kind: "ready", input: built.input, session: built.session };
+}
+
+export type RequirementCheckFlow = Exclude<TicketAiGate, { kind: "ready" }> | { kind: "done"; result: RequirementCheckResult };
+
+/** Requirement check: gate → model (or deterministic fallback) → aliases restored. */
 export async function runRequirementCheckFlow(
   context: IssueContext,
   settings: AiDataProtectionSettings,
   provider: Pick<AIProvider, "checkRequirements">,
   opts: { previewConfirmed?: boolean } = {}
 ): Promise<RequirementCheckFlow> {
-  const built = buildTicketAiInput(context, settings);
-  if (!built.allowed) return { kind: "disabled", reason: built.reason };
-  if (needsSendPreview(settings, built.input.projectKey) && !opts.previewConfirmed) {
-    return { kind: "needs-preview", input: built.input, session: built.session, redactions: built.redactions, preview: describeTicketPayload(built.input) };
-  }
-  const raw = await provider.checkRequirements(built.input);
-  return { kind: "done", result: built.session.restoreDeep(raw) };
+  const gate = gateTicketAi(context, settings, opts);
+  if (gate.kind !== "ready") return gate;
+  const raw = await provider.checkRequirements(gate.input);
+  return { kind: "done", result: gate.session.restoreDeep(raw) };
 }

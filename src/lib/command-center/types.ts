@@ -1790,6 +1790,14 @@ export interface FeatureToggles {
   /** V2.36 H — task-level AI on one ticket's content (requirement check). OFF by default; also
    *  needs the ticket's project in the AI allow-list (Data & Settings). */
   ticketAi: boolean;
+  /** V2.37 I1 — "Brief" on every ticket row (allow-listed projects). OFF by default. */
+  ticketBrief: boolean;
+  /** V2.37 I2 — AI triage suggestions in Morning Mode step 2. OFF by default. */
+  smartTriage: boolean;
+  /** V2.37 I3 — "Draft reply" on mention rows (allow-listed projects). OFF by default. */
+  mentionReplyDrafter: boolean;
+  /** V2.37 I4 — "Rewrite for…" audiences in Reports. OFF by default. */
+  audienceReports: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1806,6 +1814,10 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   jiraWriteBack: false,
   reportSummaries: true,
   ticketAi: false,
+  ticketBrief: false,
+  smartTriage: false,
+  mentionReplyDrafter: false,
+  audienceReports: false,
 };
 
 /** F1 — one finished Morning Mode triage, per local day. */
@@ -1842,8 +1854,8 @@ export interface JiraWriteLogEntry {
   detail: string;
   ok: boolean;
   error?: string;
-  /** The ticket action that triggered it. */
-  trigger: "block" | "done";
+  /** The ticket action that triggered it ("reply" — V2.37 I3 posting a drafted mention reply). */
+  trigger: "block" | "done" | "reply";
 }
 
 /** D3 — one day's roll-up of successful Jira syncs (kept 90 days). */
@@ -1976,6 +1988,9 @@ export type TicketStatusSurface =
   | "recent-mentions"
   | "related-ticket"
   | "keyboard"
+  // V2.37 I1/I2 — a change the user applied from an AI suggestion (always a click).
+  | "ai-brief"
+  | "ai-triage"
   | "jira-sync"
   | "migration"
   | "other";

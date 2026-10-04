@@ -10,6 +10,7 @@ import { getTodayIso } from "@/lib/command-center/store";
 import { buildWeeklyReportSummary, last7DaysEnding, weeklyReportToMarkdown } from "@/lib/command-center/daily-report";
 import { buildWeeklyClientReport, clientReportToMarkdown, downloadMarkdown } from "@/lib/command-center/client-report";
 import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
+import { TriageAcceptance } from "@/components/command-center/TriageAcceptance";
 
 function renderReview(text: string) {
   const sections = text.split(/(?=^## )/m).filter(Boolean);
@@ -114,6 +115,8 @@ export default function WeeklyReviewPage() {
   return (
     <div className="space-y-4 pb-16">
       <SectionHeading level="page" title="Weekly Review" subtitle="Grounded in the daily snapshots this app has stored — never fabricated." />
+
+      {state.features.smartTriage && <TriageAcceptance stats={state.aiTriageStats} today={getTodayIso()} />}
 
       <section>
         <div className="mb-2 flex items-center justify-between gap-2">
