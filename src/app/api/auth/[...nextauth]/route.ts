@@ -9,7 +9,8 @@ import { authOptions, authSettings } from "@/lib/server/auth";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-type Ctx = { params: { nextauth: string[] } };
+// Next 15+ — route params are a Promise (next-auth v4.24.15 awaits them itself).
+type Ctx = { params: Promise<{ nextauth: string[] }> };
 
 async function handler(req: Request, ctx: Ctx) {
   const settings = authSettings();

@@ -88,14 +88,14 @@ const userRec = (email: string, over: Partial<UserRecord> = {}): UserRecord => (
 
   const layout = read("src/app/layout.tsx");
   ok(group, /authEnabled \? \(\s*<AuthGate/.test(layout) && /process\.env\.AUTH_ENABLED/.test(layout), "the layout mounts AuthGate only when AUTH_ENABLED=true — off, the app renders exactly as before");
-  const mw = read("src/middleware.ts");
-  ok(group, /AUTH_ENABLED[\s\S]*return NextResponse\.next\(\)/.test(mw) && /api\/\|_next\/\|signin/.test(mw) && !/node:crypto|auth-config/.test(mw), "middleware is a no-op when off, excludes /api, /_next, /signin and static files, and stays Edge-safe");
+  const mw = read("src/proxy.ts"); // Next 16: middleware.ts → proxy.ts
+  ok(group, /AUTH_ENABLED[\s\S]*return NextResponse\.next\(\)/.test(mw) && /api\/\|_next\/\|signin/.test(mw) && !/node:crypto|auth-config/.test(mw), "the proxy (formerly middleware) is a no-op when off, excludes /api, /_next, /signin and static files, and has no Node-only imports");
 }
 
-// ===== L1 — middleware behaviour (real module) =====
+// ===== L1 — proxy (formerly middleware) behaviour, real module =====
 {
   const group = "L1 Middleware";
-  const { middleware } = await import("../../src/middleware");
+  const { proxy: middleware } = await import("../../src/proxy");
   const { NextRequest } = await import("next/server");
   const saved = { AUTH_ENABLED: process.env.AUTH_ENABLED, NEXTAUTH_SECRET: process.env.NEXTAUTH_SECRET };
   try {
