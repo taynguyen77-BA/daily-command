@@ -52,7 +52,10 @@ import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
 import type { TaskInput, TicketContextInput } from "./task-registry";
-import type { MentionReplyResponse, TicketBriefResponse, TriageResponse } from "./schemas";
+import type { BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
+import { deGherkin } from "./ba-requirements";
+import { deterministicReleaseBrief } from "./release-brief";
+import { parseCommandDeterministic } from "./nl-commands";
 
 export interface AIProvider {
   readonly mode: "mock" | "claude";
@@ -97,6 +100,13 @@ export interface AIProvider {
   triageNewItems(input: TaskInput<"triageNewItems">): Promise<TriageResponse["items"]>;
   draftMentionReply(input: TaskInput<"draftMentionReply">): Promise<MentionReplyResponse>;
   rewriteReport(audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string>;
+  // V2.38 J1–J6
+  baRequirementCheck(ticket: TicketContextInput): Promise<BaRequirementCheckResponse>;
+  draftBlockerFollowUps(input: TaskInput<"draftBlockerFollowUps">): Promise<FollowUpsResponse>;
+  releaseGoNoGo(input: TaskInput<"releaseGoNoGo">): Promise<ReleaseBriefResponse>;
+  extractMeetingActions(input: TaskInput<"extractMeetingActions">): Promise<MeetingActionsResponse>;
+  parseCommand(input: TaskInput<"parseCommand">): Promise<CommandResponse>;
+  weeklyInsights(input: TaskInput<"weeklyInsights">): Promise<WeeklyInsightsResponse>;
 }
 
 export interface RequirementCheckResult {
@@ -432,5 +442,78 @@ export class MockAIProvider implements AIProvider {
   async rewriteReport(_audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string> {
     void _audience;
     return report;
+  }
+  // ===== V2.38 deterministic fallbacks =====
+
+  /** AC from the ticket's own requirement-like sentences (quoted), plus the standard
+   *  validation / error / edge-case checks clearly marked as assumptions. */
+  async baRequirementCheck(ticket: TicketContextInput): Promise<BaRequirementCheckResponse> {
+    const sentences = (text: string) =>
+      text
+        .split(/\n+|(?<=[.!?])\s+/)
+        .map((x) => x.replace(/^[-*•\d.)\s]+/, "").trim())
+        .filter((x) => x.length >= 12 && x.length <= 300);
+    const fromAc = ticket.acceptanceCriteria ? sentences(ticket.acceptanceCriteria).map((q) => ({ q, kind: "acceptance-criteria" as const })) : [];
+    const fromDesc = sentences(ticket.description).filter((x) => /\b(must|should|shall|can|need|needs|able to|allow|display|show|send|export|import|create|update|delete)\b/i.test(x)).map((q) => ({ q, kind: "description" as const }));
+    const sourced = [...fromAc, ...fromDesc].slice(0, 12).map(({ q, kind }) => ({ text: deGherkin(q), category: "happy-path" as const, source: { kind, quote: q } }));
+    const assumptions = [
+      { text: "Required fields are validated before saving, with a clear message per field", category: "validation" as const },
+      { text: "A failed save or service error shows an error message and keeps the user's input", category: "error" as const },
+      { text: "Empty and maximum-size data are handled without errors", category: "edge-case" as const },
+    ].map((a) => ({ ...a, source: { kind: "assumption" as const } }));
+    return {
+      acceptanceCriteria: [...sourced, ...assumptions],
+      questionsByStakeholder: sourced.length ? [] : [{ stakeholder: "Product owner", questions: [`What is the expected behaviour for ${ticket.key}? The description has no testable statements.`] }],
+      missingInformation: [...(ticket.acceptanceCriteria === undefined || !ticket.acceptanceCriteria.trim() ? ["Acceptance criteria"] : []), ...(ticket.description.trim() ? [] : ["Description"])],
+      risks: ticket.links.filter((l) => !/done|closed|resolved/i.test(l.status)).map((l) => `Linked issue ${l.key} (${l.relation}) is not done`),
+    };
+  }
+
+  async draftBlockerFollowUps(input: TaskInput<"draftBlockerFollowUps">): Promise<FollowUpsResponse> {
+    const deadline = input.deadlineOptions[0];
+    return {
+      messages: input.people.map((p) => {
+        const to = p.person === "Unknown" ? "team" : p.person;
+        const lines = p.tickets.map((t) => `- ${t.key} ${t.title}${t.reason ? ` — ${t.reason}` : ""} (blocked ${t.ageBusinessDays} business day${t.ageBusinessDays === 1 ? "" : "s"})`);
+        const text = `Hi ${to}, could you help unblock the following by ${deadline}?\n${lines.join("\n")}`;
+        return { person: to, ...(input.channel === "email" ? { subject: `Unblocking ${p.tickets.map((t) => t.key).join(", ")}` } : {}), text, suggestedDeadline: deadline };
+      }),
+    };
+  }
+
+  async releaseGoNoGo(input: TaskInput<"releaseGoNoGo">): Promise<ReleaseBriefResponse> {
+    return deterministicReleaseBrief(input);
+  }
+
+  /** Without AI: only explicit "Decision:/Action:/TODO:/?" lines, nothing inferred. */
+  async extractMeetingActions(input: TaskInput<"extractMeetingActions">): Promise<MeetingActionsResponse> {
+    const lines = input.notes.split(/\r?\n/).map((l) => l.replace(/^[-*•\s]+/, "").trim()).filter(Boolean);
+    const key = (t: string) => t.match(/\b[A-Z][A-Z0-9_]+-\d+\b/)?.[0];
+    return {
+      decisions: lines.filter((l) => /^(decision|decided|agreed)\b[:\s-]*/i.test(l)).map((l) => ({ title: l.replace(/^(decision|decided|agreed)\b[:\s-]*/i, "").slice(0, 300) })).filter((d) => d.title),
+      actions: lines
+        .filter((l) => /^(action|todo|ai|action item)\b[:\s-]*/i.test(l))
+        .map((l) => {
+          const body = l.replace(/^(action item|action|todo|ai)\b[:\s-]*/i, "");
+          const owner = /^@?([A-Z][a-z]+)\s*(?:to|will|:)\s+/.exec(body)?.[1];
+          const k = key(body);
+          return { title: body.slice(0, 300), ...(owner ? { owner } : {}), ...(k ? { relatedTicketKey: k } : {}) };
+        })
+        .filter((a) => a.title),
+      statusChanges: [],
+      openQuestions: lines.filter((l) => l.endsWith("?")).slice(0, 20),
+    };
+  }
+
+  async parseCommand(input: TaskInput<"parseCommand">): Promise<CommandResponse> {
+    return parseCommandDeterministic(input.command);
+  }
+
+  async weeklyInsights(input: TaskInput<"weeklyInsights">): Promise<WeeklyInsightsResponse> {
+    const observations = (input.facts.length ? input.facts : ["No facts recorded this week."]).slice(0, 5).map((f) => ({ text: f, evidence: [f] }));
+    return {
+      observations,
+      suggestions: ["Review blocked tickets with the people they wait on early in the week.", "Give every skip a reason so patterns become visible.", "Run Morning Mode triage daily so New stays small."],
+    };
   }
 }

@@ -147,7 +147,7 @@ function fakeStatusStore() {
   const mock = await new MockAIProvider().generateTicketBrief(built.allowed ? built.input : (undefined as never), TODAY);
   ok(group, mock.openQuestions.some((q) => q.includes("Is PDF in scope too?")) && mock.waitingOn.length === 0 && !mock.suggestedStatus, "the deterministic brief only restates the ticket (questions from the thread, no suggestions)");
   const row = read("src/components/command-center/TaskReferenceRow.tsx");
-  ok(group, /state\.features\.ticketBrief && w\?\.sourceType === "jira" \? <TicketBrief/.test(row) && /<TaskRow[^>]*ticketKey=\{candidate\.ticketKey\}/.test(read("src/components/command-center/FocusSession.tsx")), "Brief is on every Jira TaskRow (and Focus Session's ticket row)");
+  ok(group, /w\?\.sourceType === "jira" && \(state\.features\.ticketBrief/.test(row) && /state\.features\.ticketBrief && <TicketBrief/.test(row) && /<TaskRow[^>]*ticketKey=\{candidate\.ticketKey\}/.test(read("src/components/command-center/FocusSession.tsx")), "Brief is on every Jira TaskRow (and Focus Session's ticket row)");
 }
 
 // ===== I2 Smart Triage =====

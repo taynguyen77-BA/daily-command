@@ -36,7 +36,7 @@ import { MockAIProvider, type AIProvider, type CommunicationArtifactResult, type
 import { recordAiCall } from "./trace";
 import { pairedAuthHeader } from "../device-pairing";
 import { parseTaskInput, TASK_OUTPUT_SCHEMAS, type TaskInput, type TicketContextInput } from "./task-registry";
-import type { AITask, MentionReplyResponse, TicketBriefResponse, TriageResponse } from "./schemas";
+import type { AITask, BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
 import type { z } from "zod";
 
 const ENDPOINT = "/api/command-center/ai";
@@ -323,6 +323,36 @@ export class ClaudeProvider implements AIProvider {
   async rewriteReport(audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string> {
     const r = await this.call("rewriteReport", { audience, report });
     return r.ok ? r.data.text : this.mock.rewriteReport(audience, report);
+  }
+
+  async baRequirementCheck(ticket: TicketContextInput): Promise<BaRequirementCheckResponse> {
+    const r = await this.call("baRequirementCheck", { ticket });
+    return r.ok ? r.data : this.mock.baRequirementCheck(ticket);
+  }
+
+  async draftBlockerFollowUps(input: TaskInput<"draftBlockerFollowUps">): Promise<FollowUpsResponse> {
+    const r = await this.call("draftBlockerFollowUps", input);
+    return r.ok ? r.data : this.mock.draftBlockerFollowUps(input);
+  }
+
+  async releaseGoNoGo(input: TaskInput<"releaseGoNoGo">): Promise<ReleaseBriefResponse> {
+    const r = await this.call("releaseGoNoGo", input);
+    return r.ok ? r.data : this.mock.releaseGoNoGo(input);
+  }
+
+  async extractMeetingActions(input: TaskInput<"extractMeetingActions">): Promise<MeetingActionsResponse> {
+    const r = await this.call("extractMeetingActions", input);
+    return r.ok ? r.data : this.mock.extractMeetingActions(input);
+  }
+
+  async parseCommand(input: TaskInput<"parseCommand">): Promise<CommandResponse> {
+    const r = await this.call("parseCommand", input);
+    return r.ok ? r.data : this.mock.parseCommand(input);
+  }
+
+  async weeklyInsights(input: TaskInput<"weeklyInsights">): Promise<WeeklyInsightsResponse> {
+    const r = await this.call("weeklyInsights", input);
+    return r.ok ? r.data : this.mock.weeklyInsights(input);
   }
 }
 

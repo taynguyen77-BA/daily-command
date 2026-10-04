@@ -30,6 +30,12 @@ import { ticketBriefPrompt } from "./prompts/ticket-brief";
 import { triagePrompt } from "./prompts/triage";
 import { mentionReplyPrompt } from "./prompts/mention-reply";
 import { reportRewritePrompt } from "./prompts/report-rewrite";
+import { baRequirementCheckPrompt } from "./prompts/ba-requirement-check";
+import { blockerFollowUpsPrompt } from "./prompts/blocker-followups";
+import { releaseGoNoGoPrompt } from "./prompts/release-go-no-go";
+import { meetingActionsPrompt } from "./prompts/meeting-actions";
+import { commandPrompt } from "./prompts/command";
+import { weeklyInsightsPrompt } from "./prompts/weekly-insights";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
@@ -48,6 +54,13 @@ import {
   triageResponseSchema,
   mentionReplyResponseSchema,
   reportRewriteResponseSchema,
+  baRequirementCheckResponseSchema,
+  followUpsResponseSchema,
+  releaseBriefResponseSchema,
+  meetingActionsResponseSchema,
+  commandResponseSchema,
+  weeklyInsightsResponseSchema,
+  RELEASE_RECOMMENDATIONS,
   textResponseSchema,
   trendResponseSchema,
   type AITask,
@@ -162,6 +175,47 @@ export const TASK_INPUT_SCHEMAS = {
     length: z.enum(["short", "normal"]),
   }),
   rewriteReport: z.object({ audience: z.enum(["standup", "pm", "client", "vi"]), report: str(16_000) }),
+  // V2.38 J1–J6
+  baRequirementCheck: z.object({ ticket: ticketContextInputSchema }),
+  draftBlockerFollowUps: z.object({
+    today: str(10),
+    channel: z.enum(["slack", "jira", "email"]),
+    slaBusinessDays: num,
+    deadlineOptions: z.array(str(10)).min(1).max(5),
+    people: z
+      .array(
+        z.object({
+          person: str(200),
+          tickets: z.array(z.object({ key: str(40), title: str(500), reason: str(500).optional(), ageBusinessDays: num, overSla: z.boolean(), lastComment: str(300).optional() })).min(1).max(20),
+        })
+      )
+      .min(1)
+      .max(20),
+  }),
+  releaseGoNoGo: z.object({
+    fixVersion: str(200),
+    facts: z.object({
+      completionPct: num,
+      completedItems: num,
+      totalItems: num,
+      readiness: z.enum(["READY", "AT_RISK", "NOT_READY"]),
+      blockedCount: num,
+      overdueCount: num,
+      unresolvedDependenciesCount: num,
+      highPriorityIncompleteCount: num,
+      openP1BlockerCount: num,
+      deliveryConfidence: num,
+    }),
+    allowedRecommendations: z.array(z.enum(RELEASE_RECOMMENDATIONS)).min(1).max(3),
+    ruleReasons: strList(10, 300),
+    blockers: z.array(z.object({ key: str(40), title: str(500), status: str(100), priority: str(10).optional(), reason: str(500).optional() })).max(50),
+    openItems: z.array(z.object({ key: str(40), title: str(500), status: str(100), priority: str(10).optional() })).max(100),
+    drift: strList(10, 300),
+    risks: strList(10, 300),
+  }),
+  extractMeetingActions: z.object({ today: str(10), notes: str(20_000) }),
+  parseCommand: z.object({ today: str(10), command: str(500), knownProjects: z.array(z.object({ key: str(20), name: str(200).optional() })).max(200) }),
+  weeklyInsights: z.object({ weekStart: str(10), weekEnd: str(10), facts: strList(80, 400) }),
 } satisfies Record<AITask, z.ZodType>;
 
 export type TaskInput<T extends AITask> = z.infer<(typeof TASK_INPUT_SCHEMAS)[T]>;
@@ -197,6 +251,12 @@ const BUILDERS: Builders = {
   triageNewItems: (i) => triagePrompt(i),
   draftMentionReply: (i) => mentionReplyPrompt(i),
   rewriteReport: (i) => reportRewritePrompt(i),
+  baRequirementCheck: (i) => baRequirementCheckPrompt(i.ticket),
+  draftBlockerFollowUps: (i) => blockerFollowUpsPrompt(i),
+  releaseGoNoGo: (i) => releaseGoNoGoPrompt(i),
+  extractMeetingActions: (i) => meetingActionsPrompt(i),
+  parseCommand: (i) => commandPrompt(i),
+  weeklyInsights: (i) => weeklyInsightsPrompt(i),
 };
 
 export const TASK_OUTPUT_SCHEMAS = {
@@ -223,11 +283,18 @@ export const TASK_OUTPUT_SCHEMAS = {
   triageNewItems: triageResponseSchema,
   draftMentionReply: mentionReplyResponseSchema,
   rewriteReport: reportRewriteResponseSchema,
+  baRequirementCheck: baRequirementCheckResponseSchema,
+  draftBlockerFollowUps: followUpsResponseSchema,
+  releaseGoNoGo: releaseBriefResponseSchema,
+  extractMeetingActions: meetingActionsResponseSchema,
+  parseCommand: commandResponseSchema,
+  weeklyInsights: weeklyInsightsResponseSchema,
 } satisfies Record<AITask, z.ZodType>;
 
 /** Visible-output budget per task (thinking models get extra room on top, server-side). */
 export function visibleTokenBudget(task: AITask): number {
-  if (task === "rewriteReport") return 4096;
+  if (task === "rewriteReport" || task === "baRequirementCheck") return 4096;
+  if (task === "draftBlockerFollowUps" || task === "extractMeetingActions" || task === "releaseGoNoGo") return 2048;
   if (task === "triageNewItems") return 3072;
   if (task === "generateDecisionOptions" || task === "checkRequirements" || task === "generateTicketBrief" || task === "draftMentionReply") return 1536;
   return 512;
@@ -277,7 +344,60 @@ export const TASK_EXTRA_CHECKS: Partial<Record<AITask, ExtraCheck>> = {
     return v;
   },
   rewriteReport: (out, input) => lockedFactViolations((out as { text: string }).text, (input as TaskInput<"rewriteReport">).report),
+  // J1 — checklist, not Gherkin; every non-assumption item quotes the ticket.
+  baRequirementCheck: (out, _input, prompt) => {
+    const o = out as z.infer<typeof baRequirementCheckResponseSchema>;
+    const v: string[] = [];
+    for (const ac of o.acceptanceCriteria) {
+      if (isGherkin(ac.text)) v.push(`acceptance criterion "${ac.text.slice(0, 60)}" uses Given/When/Then phrasing — write a checklist item`);
+      if (ac.source.kind !== "assumption" && !quoteFound(ac.source.quote, prompt)) v.push(`acceptance criterion "${ac.text.slice(0, 60)}" quotes text that is not in the ticket — quote it verbatim or mark it an assumption`);
+    }
+    return v;
+  },
+  draftBlockerFollowUps: (out, input) => {
+    const o = out as z.infer<typeof followUpsResponseSchema>;
+    const i = input as TaskInput<"draftBlockerFollowUps">;
+    const people = new Set(i.people.map((p) => p.person.toLowerCase()));
+    const v: string[] = [];
+    for (const m of o.messages) {
+      if (!people.has(m.person.toLowerCase()) && !(m.person.toLowerCase() === "team" && people.has("unknown"))) v.push(`message to "${m.person}" — not one of the people listed`);
+      if (m.suggestedDeadline && !i.deadlineOptions.includes(m.suggestedDeadline)) v.push(`deadline ${m.suggestedDeadline} must be one of ${i.deadlineOptions.join(", ")}`);
+    }
+    return v;
+  },
+  releaseGoNoGo: (out, input) => {
+    const o = out as z.infer<typeof releaseBriefResponseSchema>;
+    const i = input as TaskInput<"releaseGoNoGo">;
+    const keys = new Set([...i.blockers, ...i.openItems].map((x) => x.key));
+    const v: string[] = [];
+    if (!i.allowedRecommendations.includes(o.recommendation)) v.push(`recommendation "${o.recommendation}" contradicts the readiness rules (allowed: ${i.allowedRecommendations.join(", ")})`);
+    for (const k of o.evidence) if (!keys.has(k)) v.push(`evidence ${k} is not one of the release's open items`);
+    return v;
+  },
+  parseCommand: (out, input) => {
+    const o = out as z.infer<typeof commandResponseSchema>;
+    const i = input as TaskInput<"parseCommand">;
+    const v: string[] = [];
+    for (const op of o.operations) {
+      if (op.op === "setTicketStatus" && !op.status) v.push("setTicketStatus needs a status");
+      if (op.target?.kind === "ticket" && (!op.target.ticketKey || !i.command.toUpperCase().includes(op.target.ticketKey.toUpperCase()))) v.push(`ticket ${op.target.ticketKey ?? "(none)"} is not in the command`);
+      if (op.target?.project && !i.command.toLowerCase().includes(op.target.project.toLowerCase())) v.push(`project "${op.target.project}" is not in the command`);
+    }
+    return v;
+  },
 };
+
+/** J1 — Given/When/Then (Gherkin) phrasing in an acceptance criterion. */
+export function isGherkin(text: string): boolean {
+  return /^\s*(given|when|then|and|but)\b/i.test(text) || /\bgiven\b[\s\S]*\bwhen\b[\s\S]*\bthen\b/i.test(text) || /\b(scenario|feature):/i.test(text);
+}
+
+const squash = (t: string) => t.toLowerCase().replace(/[“”"'‘’`*_]/g, "").replace(/\s+/g, " ").trim();
+/** The quote appears (whitespace/quote-insensitive) in the supplied text. */
+export function quoteFound(quote: string | undefined, source: string): boolean {
+  if (!quote || squash(quote).length < 8) return false;
+  return squash(source).includes(squash(quote));
+}
 
 /** The tasks the deprecated free-form `{ task, prompt }` path may still serve while
  *  AI_LEGACY_PROMPT_PATH=on — only those that existed before V2.36. New tasks never do. */

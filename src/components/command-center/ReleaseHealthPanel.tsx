@@ -6,6 +6,7 @@ import { buildReleaseUpdateDraft } from "@/lib/command-center/communicate";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
 import type { CommandCenterData, ReleaseHealth } from "@/lib/command-center/types";
 import { ArtifactEditor } from "./ArtifactEditor";
+import { ReleaseGoNoGo } from "./ReleaseGoNoGo";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
 
 const READINESS_STYLE: Record<string, string> = {
@@ -39,6 +40,7 @@ function ReleaseCard({ release, data }: { release: ReleaseHealth; data: CommandC
         <span>Confidence: {release.deliveryConfidence}%</span>
       </div>
       {release.topRiskTitle && <p className="mt-2 text-xs text-text2">Top risk: {release.topRiskTitle}</p>}
+      <ReleaseGoNoGo release={release} data={data} />
       {creatingUpdate && <ArtifactEditor draft={buildReleaseUpdateDraft(release, data)} onClose={() => setCreatingUpdate(false)} />}
     </Panel>
   );

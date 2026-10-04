@@ -1798,6 +1798,18 @@ export interface FeatureToggles {
   mentionReplyDrafter: boolean;
   /** V2.37 I4 — "Rewrite for…" audiences in Reports. OFF by default. */
   audienceReports: boolean;
+  /** V2.38 J1 — BA requirement check (AC checklist, questions, gaps) on Story/Task rows. OFF. */
+  baRequirementCheck: boolean;
+  /** V2.38 J2 — AI-drafted blocker follow-ups next to "Ask". OFF. */
+  aiBlockerFollowUp: boolean;
+  /** V2.38 J3 — Release Go/No-Go brief on Release Health cards. OFF. */
+  releaseGoNoGo: boolean;
+  /** V2.38 J4 — Meeting notes → decisions/actions in Meeting Mode. OFF. */
+  meetingNotesActions: boolean;
+  /** V2.38 J5 — natural-language commands in the Command Bar. OFF. */
+  nlCommands: boolean;
+  /** V2.38 J6 — AI weekly insights in Weekly Review (and optionally the weekly report). OFF. */
+  weeklyInsights: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1818,6 +1830,12 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   smartTriage: false,
   mentionReplyDrafter: false,
   audienceReports: false,
+  baRequirementCheck: false,
+  aiBlockerFollowUp: false,
+  releaseGoNoGo: false,
+  meetingNotesActions: false,
+  nlCommands: false,
+  weeklyInsights: false,
 };
 
 /** F1 — one finished Morning Mode triage, per local day. */
@@ -1855,7 +1873,7 @@ export interface JiraWriteLogEntry {
   ok: boolean;
   error?: string;
   /** The ticket action that triggered it ("reply" — V2.37 I3 posting a drafted mention reply). */
-  trigger: "block" | "done" | "reply";
+  trigger: "block" | "done" | "reply" | "comment";
 }
 
 /** D3 — one day's roll-up of successful Jira syncs (kept 90 days). */
@@ -1991,6 +2009,9 @@ export type TicketStatusSurface =
   // V2.37 I1/I2 — a change the user applied from an AI suggestion (always a click).
   | "ai-brief"
   | "ai-triage"
+  // V2.38 J4/J5 — applied from a reviewed meeting-notes extraction / a Command Bar command.
+  | "ai-meeting"
+  | "ai-command"
   | "jira-sync"
   | "migration"
   | "other";

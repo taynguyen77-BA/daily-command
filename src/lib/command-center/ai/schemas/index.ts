@@ -158,6 +158,13 @@ export const aiTaskSchema = z.enum([
   "triageNewItems",
   "draftMentionReply",
   "rewriteReport",
+  // V2.38 J1–J6
+  "baRequirementCheck",
+  "draftBlockerFollowUps",
+  "releaseGoNoGo",
+  "extractMeetingActions",
+  "parseCommand",
+  "weeklyInsights",
 ]);
 export type AITask = z.infer<typeof aiTaskSchema>;
 
@@ -232,3 +239,69 @@ export const reportRewriteResponseSchema = z.object({
   text: z.string().min(1).max(12000),
 });
 export type ReportRewriteResponse = z.infer<typeof reportRewriteResponseSchema>;
+
+// ===== V2.38 J1–J6 =====
+
+export const AC_CATEGORIES = ["happy-path", "validation", "error", "edge-case"] as const;
+export const AC_SOURCES = ["description", "acceptance-criteria", "comment", "assumption"] as const;
+
+export const baRequirementCheckResponseSchema = z.object({
+  acceptanceCriteria: z
+    .array(z.object({ text: z.string().min(1).max(500), category: z.enum(AC_CATEGORIES), source: z.object({ kind: z.enum(AC_SOURCES), quote: z.string().max(400).optional() }) }))
+    .min(1)
+    .max(30),
+  questionsByStakeholder: z.array(z.object({ stakeholder: z.string().min(1).max(100), questions: z.array(z.string().min(1).max(400)).min(1).max(10) })).max(8),
+  missingInformation: z.array(z.string().min(1).max(400)).max(15),
+  risks: z.array(z.string().min(1).max(400)).max(10),
+});
+export type BaRequirementCheckResponse = z.infer<typeof baRequirementCheckResponseSchema>;
+
+export const followUpsResponseSchema = z.object({
+  messages: z.array(z.object({ person: z.string().min(1).max(200), subject: z.string().max(200).optional(), text: z.string().min(1).max(3000), suggestedDeadline: z.string().max(10).optional() })).max(20),
+});
+export type FollowUpsResponse = z.infer<typeof followUpsResponseSchema>;
+
+export const RELEASE_RECOMMENDATIONS = ["Go", "Go with conditions", "No-Go"] as const;
+export const releaseBriefResponseSchema = z.object({
+  recommendation: z.enum(RELEASE_RECOMMENDATIONS),
+  conditions: z.array(z.string().min(1).max(400)).max(10),
+  evidence: z.array(z.string().min(1).max(40)).max(30),
+  risks: z.array(z.string().min(1).max(400)).max(10),
+  communicationDraft: z.string().min(1).max(3000),
+});
+export type ReleaseBriefResponse = z.infer<typeof releaseBriefResponseSchema>;
+
+export const COMMAND_STATUSES = ["TODO", "IN_PROGRESS", "BLOCKED", "SKIPPED", "DEFERRED", "DONE"] as const;
+export const meetingActionsResponseSchema = z.object({
+  decisions: z.array(z.object({ title: z.string().min(1).max(300), detail: z.string().max(1000).optional() })).max(20),
+  actions: z.array(z.object({ title: z.string().min(1).max(300), owner: z.string().max(100).optional(), due: z.string().max(40).optional(), relatedTicketKey: z.string().max(40).optional() })).max(30),
+  statusChanges: z.array(z.object({ ticketKey: z.string().min(1).max(40), status: z.enum(COMMAND_STATUSES), reason: z.string().max(300).optional(), when: z.string().max(40).optional() })).max(30),
+  openQuestions: z.array(z.string().min(1).max(400)).max(20),
+});
+export type MeetingActionsResponse = z.infer<typeof meetingActionsResponseSchema>;
+
+/** J5 — the ONLY operations a natural-language command may produce. */
+export const COMMAND_OPS = ["setTicketStatus", "addAction"] as const;
+export const COMMAND_TARGETS = ["ticket", "mentions", "blocked", "new", "in-progress"] as const;
+export const commandResponseSchema = z.object({
+  operations: z
+    .array(
+      z.object({
+        op: z.enum(COMMAND_OPS),
+        target: z.object({ kind: z.enum(COMMAND_TARGETS), ticketKey: z.string().max(40).optional(), project: z.string().max(60).optional() }).optional(),
+        status: z.enum(COMMAND_STATUSES).optional(),
+        when: z.string().max(40).optional(),
+        reason: z.string().max(300).optional(),
+        title: z.string().max(300).optional(),
+      })
+    )
+    .max(10),
+  clarification: z.string().max(400).optional(),
+});
+export type CommandResponse = z.infer<typeof commandResponseSchema>;
+
+export const weeklyInsightsResponseSchema = z.object({
+  observations: z.array(z.object({ text: z.string().min(1).max(500), evidence: z.array(z.string().min(1).max(300)).min(1).max(5) })).min(1).max(5),
+  suggestions: z.array(z.string().min(1).max(400)).min(1).max(3),
+});
+export type WeeklyInsightsResponse = z.infer<typeof weeklyInsightsResponseSchema>;

@@ -11,7 +11,7 @@
 
 import type { FeatureToggles, JiraWriteBackSettings, JiraWriteLogEntry } from "../types";
 
-export type JiraWriteTrigger = "block" | "done" | "reply";
+export type JiraWriteTrigger = "block" | "done" | "reply" | "comment";
 
 export type ProposedJiraWrite =
   | { kind: "comment"; text: string }
@@ -68,6 +68,16 @@ export function planJiraReply(input: {
   const projectKey = projectKeyOf(input.ticketKey);
   if (!projectKey || !input.settings.projects.includes(projectKey)) return null;
   return { ticketKey: input.ticketKey, projectKey, trigger: "reply", writes: [{ kind: "comment", text: input.text.trim().slice(0, 2000) }], mentionCommentId: input.mentionCommentId };
+}
+
+/** V2.38 J1/J2 — post an AI-drafted text (requirement check, blocker follow-up) as a Jira
+ *  comment: same gate as every write (feature on + allow-listed project), only a PROPOSAL for
+ *  the confirmation dialog. */
+export function planJiraComment(input: { features: Pick<FeatureToggles, "jiraWriteBack">; settings: JiraWriteBackSettings; ticketKey: string; text: string }): JiraWriteBackProposal | null {
+  if (!input.features.jiraWriteBack || !input.text.trim()) return null;
+  const projectKey = projectKeyOf(input.ticketKey);
+  if (!projectKey || !input.settings.projects.includes(projectKey)) return null;
+  return { ticketKey: input.ticketKey, projectKey, trigger: "comment", writes: [{ kind: "comment", text: input.text.trim().slice(0, 30_000) }] };
 }
 
 /** One request to the server route. */

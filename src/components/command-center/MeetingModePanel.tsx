@@ -12,6 +12,7 @@ import { formatScopeLabel, knownJiraProjects } from "@/lib/command-center/jira/p
 import { USAGE_KEYS } from "@/lib/command-center/usage";
 import { useCommandCenter, buildProjectOverrideView } from "./use-command-center";
 import { ArtifactEditor } from "./ArtifactEditor";
+import { MeetingNotesActions } from "./MeetingNotesActions";
 import { EmptyState, Panel, SectionHeading } from "./ui";
 
 export function MeetingModePanel() {
@@ -105,6 +106,8 @@ export function MeetingModePanel() {
           </button>
         )}
       </div>
+
+      <MeetingNotesActions />
 
       {editingArtifact && stakeholderDraft && (
         <ArtifactEditor draft={stakeholderDraft} onClose={() => setEditingArtifact(false)} />

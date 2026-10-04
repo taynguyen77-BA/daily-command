@@ -28,6 +28,8 @@ import { FirstSeenBadge, TicketLink } from "./TicketLink";
 import { FollowUpDraft } from "./FollowUpDraft";
 import { AskFollowUp } from "./AskFollowUp";
 import { TicketBrief } from "./TicketBrief";
+import { BaRequirementCheck } from "./BaRequirementCheck";
+import { BA_CHECK_TYPES } from "@/lib/command-center/ai/ba-requirements";
 import { blockedAgeBusinessDays, isBlockerOverdue } from "@/lib/command-center/blocker-followup";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
@@ -486,7 +488,14 @@ export function TaskReferenceRow({
       signals={signals}
       newReason={newReason}
       stacked={stacked}
-      extra={state.features.ticketBrief && w?.sourceType === "jira" ? <TicketBrief ticketKey={key} workItemLastUpdated={w.lastUpdated} /> : undefined}
+      extra={
+        w?.sourceType === "jira" && (state.features.ticketBrief || (state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type))) ? (
+          <>
+            {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemLastUpdated={w.lastUpdated} />}
+            {state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type) && <BaRequirementCheck ticketKey={key} workItemLastUpdated={w.lastUpdated} />}
+          </>
+        ) : undefined
+      }
     />
   );
 }
