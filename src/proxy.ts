@@ -1,12 +1,13 @@
 // L1 — with team sign-in on (AUTH_ENABLED=true), a page request without a session goes to
 // /signin. API routes are excluded: each checks auth itself (src/lib/server/auth.ts) and answers
-// 401/503 as JSON. With sign-in off this is a no-op. Runs on the Edge — no Node-only imports.
+// 401/503 as JSON. With sign-in off this is a no-op. Next 16 renamed middleware to "proxy"
+// (Node runtime); kept free of Node-only imports all the same.
 
 import { NextResponse, type NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 import { sessionCookieConfig } from "@/lib/command-center/auth/session-cookie";
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   if (process.env.AUTH_ENABLED?.trim().toLowerCase() !== "true") return NextResponse.next();
   const secret = process.env.NEXTAUTH_SECRET;
   // Without the secret no session can be read; /signin explains what is missing.

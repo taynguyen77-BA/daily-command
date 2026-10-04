@@ -13,7 +13,9 @@ const ERRORS: Record<string, string> = {
   OAuthAccountNotLinked: "Sign in with the same provider you used before.",
 };
 
-export default function SignInPage({ searchParams }: { searchParams: { error?: string; callbackUrl?: string } }) {
+export default async function SignInPage(props: { searchParams: Promise<{ error?: string; callbackUrl?: string }> }) {
+  // Next 16 — searchParams is a Promise.
+  const searchParams = await props.searchParams;
   const settings = readAuthSettings(process.env);
   const callbackUrl = searchParams.callbackUrl?.startsWith("/") && !searchParams.callbackUrl.startsWith("//") ? searchParams.callbackUrl : "/";
   const error = searchParams.error ? (ERRORS[searchParams.error] ?? "Sign-in failed. Try again, or ask an admin.") : null;
