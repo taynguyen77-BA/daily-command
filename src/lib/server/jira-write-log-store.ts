@@ -1,33 +1,15 @@
 // G2 — append-only server log of Jira write attempts, in Vercel KV (a list; newest kept, capped).
-// Same best-effort contract as the other KV stores: unconfigured/unreachable → no-op / empty.
+// Unconfigured/unreachable → no-op / empty. The store (rpush + ltrim, never edited) lives in
+// ../command-center/kv/kv-stores.ts (tested offline). L4 — `uid` gives each member their log.
 
 import "server-only";
-import { kv } from "@vercel/kv";
 import { isAppStateStoreConfigured } from "../command-center/app-state";
-import type { JiraWriteLogStore, JiraWriteServerLogEntry } from "../command-center/jira/write-gate";
+import type { JiraWriteLogStore } from "../command-center/jira/write-gate";
+import { createKvJiraWriteLogStore } from "../command-center/kv/kv-stores";
+import { vercelKv } from "./kv-client";
 
-const LOG_KEY = "daily-command:jira-write-log:v1";
-const MAX_ENTRIES = 1000;
+const inert: JiraWriteLogStore = { append: async () => undefined, list: async () => [] };
 
-export function createJiraWriteLogStore(): JiraWriteLogStore {
-  return {
-    async append(entry: JiraWriteServerLogEntry) {
-      if (!isAppStateStoreConfigured()) return;
-      try {
-        await kv.rpush(LOG_KEY, JSON.stringify(entry));
-        await kv.ltrim(LOG_KEY, -MAX_ENTRIES, -1);
-      } catch {
-        // best-effort — a log failure never fails or blocks the write's response
-      }
-    },
-    async list(limit: number) {
-      if (!isAppStateStoreConfigured()) return [];
-      try {
-        const raw = await kv.lrange<string | JiraWriteServerLogEntry>(LOG_KEY, -limit, -1);
-        return raw.map((r) => (typeof r === "string" ? (JSON.parse(r) as JiraWriteServerLogEntry) : r)).reverse();
-      } catch {
-        return [];
-      }
-    },
-  };
+export function createJiraWriteLogStore(uid?: string): JiraWriteLogStore {
+  return isAppStateStoreConfigured() ? createKvJiraWriteLogStore(vercelKv, uid) : inert;
 }

@@ -11,34 +11,38 @@
 import { NextResponse } from "next/server";
 import { checkAppStateAuth, syncedAppStateSchema, type SyncedAppState } from "@/lib/command-center/app-state";
 import { createAppStateStore, isAppStateStoreConfigured } from "@/lib/server/app-state-store";
+import { principalError, requestPrincipal, scopeOf } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 // Same reasoning as jira/status/route.ts and notify/route.ts's GET: without this, Next.js
 // would statically optimize this route at build time and serve a frozen response forever.
 export const dynamic = "force-dynamic";
 
-function authorize(req: Request) {
+// L2 — sign-in off: the paired APP_STATE_SECRET, as before. Sign-in on: the signed-in member,
+// whose blob lives under their own key (L4) — one member can never read or overwrite another's.
+async function authorize(req: Request) {
   const auth = checkAppStateAuth(req.headers.get("authorization"), process.env.APP_STATE_SECRET);
-  if (!auth.ok && auth.status === 503) {
+  const p = await requestPrincipal(req, { legacy: auth });
+  if (p.kind === "error" && p.status === 503 && !auth.ok) {
     // §2 — "do not silently allow open access; log a clear warning" instead.
     console.warn("[command-center] APP_STATE_SECRET is not configured — Cross-Device Sync is unavailable on this deployment.");
   }
-  return auth;
+  return p;
 }
 
 export async function GET(req: Request) {
-  const auth = authorize(req);
-  if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  const p = await authorize(req);
+  if (p.kind === "error") return principalError(p);
   if (!isAppStateStoreConfigured()) {
     return NextResponse.json({ ok: false, error: "Vercel KV is not configured on this server." }, { status: 503 });
   }
-  const state = await createAppStateStore().get();
+  const state = await createAppStateStore(scopeOf(p)).get();
   return NextResponse.json({ ok: true, state });
 }
 
 export async function POST(req: Request) {
-  const auth = authorize(req);
-  if (!auth.ok) return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
+  const p = await authorize(req);
+  if (p.kind === "error") return principalError(p);
   if (!isAppStateStoreConfigured()) {
     return NextResponse.json({ ok: false, error: "Vercel KV is not configured on this server." }, { status: 503 });
   }
@@ -55,6 +59,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Request did not match the expected shape." }, { status: 400 });
   }
 
-  await createAppStateStore().set(parsed.data as unknown as SyncedAppState);
+  await createAppStateStore(scopeOf(p)).set(parsed.data as unknown as SyncedAppState);
   return NextResponse.json({ ok: true });
 }

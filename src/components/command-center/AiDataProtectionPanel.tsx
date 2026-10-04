@@ -10,7 +10,8 @@
 import { useEffect, useState } from "react";
 import { formatCustomTerms, parseCustomTermsText } from "@/lib/command-center/ai/redaction";
 import { contextCacheStats } from "@/lib/command-center/ai/context-cache";
-import { fetchAiUsage } from "@/lib/command-center/ai/ticket-ai-client";
+import { fetchAiTeamUsage, fetchAiUsage } from "@/lib/command-center/ai/ticket-ai-client";
+import { useAuthSession } from "./AuthGate";
 import { checkAiModelStatus, clearAiBudgetStatus } from "@/lib/command-center/ai/claude-provider";
 import { knownJiraProjects } from "@/lib/command-center/jira/project-scope";
 import type { AiUsageSummary, AiUsageTotals } from "@/lib/command-center/ai/usage-ledger";
@@ -40,6 +41,12 @@ export function AiDataProtectionPanel() {
   const [acDraft, setAcDraft] = useState(settings.acceptanceCriteriaFieldId ?? "");
   const [acError, setAcError] = useState(false);
   const [usage, setUsage] = useState<AiUsageSummary | null | undefined>(undefined);
+  // L4 — team sign-in: the table is "you"; admins also see "team".
+  const authSession = useAuthSession();
+  const [team, setTeam] = useState<AiUsageSummary | null>(null);
+  useEffect(() => {
+    if (authSession?.me.user.role === "admin") void fetchAiTeamUsage().then(setTeam);
+  }, [authSession?.me.user.role]);
   const projects = knownJiraProjects(state.data);
   const cache = contextCacheStats(state.aiContextCache);
   const refreshUsage = () => {
@@ -180,8 +187,10 @@ export function AiDataProtectionPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  <TotalsRow label="Today" t={usage.today} />
-                  <TotalsRow label="Last 7 days" t={usage.last7Days} />
+                  <TotalsRow label={authSession ? "You — today" : "Today"} t={usage.today} />
+                  <TotalsRow label={authSession ? "You — last 7 days" : "Last 7 days"} t={usage.last7Days} />
+                  {team && <TotalsRow label="Team — today" t={team.today} />}
+                  {team && <TotalsRow label="Team — last 7 days" t={team.last7Days} />}
                 </tbody>
               </table>
               <p className="mt-1 text-xs text-text3">

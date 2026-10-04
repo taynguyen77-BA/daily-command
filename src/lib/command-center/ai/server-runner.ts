@@ -23,7 +23,7 @@ import { checkGrounding } from "./evaluation";
 import { redactPatternsDeep } from "./redaction";
 import { UNTRUSTED_DATA_RULE } from "./untrusted";
 import { getUsagePolicy } from "./usage-policy";
-import { lastSevenDays, resolveDailyTokenCap, summarizeUsage, utcDay, type AiUsageRecord, type UsageLedger } from "./usage-ledger";
+import { lastSevenDays, recordsOfUser, resolveDailyTokenCap, summarizeUsage, utcDay, type AiUsageRecord, type UsageLedger } from "./usage-ledger";
 
 export const AI_SYSTEM_PROMPT = `You are a reasoning engine embedded in a BA/PO/PM delivery tool. You
 receive a prompt that already contains every fact, piece of evidence, and constraint you are
@@ -59,6 +59,8 @@ export interface AiServerDeps {
   ledger: UsageLedger;
   now: () => Date;
   cache?: ResponseCache;
+  /** L4 — team sign-in: the calling member and their own daily cap (null = none). */
+  user?: { uid: string; cap: number | null };
 }
 
 export type AiServerResult = { status: number; body: Record<string, unknown> };
@@ -135,10 +137,20 @@ export async function handleAiRequest(body: unknown, deps: AiServerDeps): Promis
       usage: { cap, usedToday: summary.today.totalTokens, remainingToday: 0 },
     });
   }
+  // L4 — the member's own cap, on top of the global one: only this member is refused.
+  const user = deps.user;
+  if (user && user.cap !== null) {
+    const mine = summarizeUsage(recordsOfUser(records, user.uid), user.cap, now, deps.ledger.storage);
+    if (mine.remainingToday <= 0) {
+      return fail(429, `Your daily AI budget (${user.cap.toLocaleString("en-US")} tokens) is used up. Deterministic text is shown until it resets at midnight UTC.`, "user-budget-exhausted", {
+        usage: { cap: user.cap, usedToday: mine.today.totalTokens, remainingToday: 0 },
+      });
+    }
+  }
 
   // ---- 4. dedupe ----
   const cache = deps.cache ?? sharedCache;
-  const key = createHash("sha256").update(`${task}\u0000${model}\u0000${prompt}`).digest("hex");
+  const key = createHash("sha256").update(`${user ? `${user.uid}\u0000` : ""}${task}\u0000${model}\u0000${prompt}`).digest("hex");
   const hit = cache.get(key, now.getTime());
   if (hit !== undefined) {
     await log(deps, { task, model, tier, cached: true, outcome: "ok" }, now);
@@ -167,6 +179,7 @@ async function log(deps: AiServerDeps, r: Pick<AiUsageRecord, "task" | "model" |
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
       ...r,
+      ...(deps.user ? { uid: deps.user.uid } : {}),
     });
   } catch {
     // Logging must never turn a good answer into an error.

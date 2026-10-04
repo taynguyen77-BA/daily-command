@@ -101,7 +101,10 @@ export async function runServerSideNotifyCheck(
   config: JiraConnectionConfig,
   accountId: string,
   store: NotifyStateStore,
-  slackFetchImpl?: SlackFetchLike
+  slackFetchImpl?: SlackFetchLike,
+  /** L4 — the destination for this run (a member's own webhook, the team one, or null for
+   *  none). Omitted (team sign-in off): SLACK_WEBHOOK_URL, as before. */
+  options: { webhookUrl?: string | null } = {}
 ): Promise<ServerNotifyCheckResult> {
   const previous = await store.get();
   const today = new Date().toISOString().slice(0, 10);
@@ -161,7 +164,7 @@ export async function runServerSideNotifyCheck(
   // by the caller), this simply delivers nothing; state tracking (below) still advances so a
   // later-configured webhook starts from the real current baseline rather than re-flooding
   // every signal accumulated while unconfigured.
-  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  const webhookUrl = "webhookUrl" in options ? options.webhookUrl : process.env.SLACK_WEBHOOK_URL;
   let delivered = 0;
   if (webhookUrl) {
     for (const signal of signals) {

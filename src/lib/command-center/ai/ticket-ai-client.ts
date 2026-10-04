@@ -50,3 +50,15 @@ export async function fetchAiUsage(): Promise<AiUsageSummary | null> {
     return null;
   }
 }
+
+/** L4 — team sign-in: "you" (your own usage) plus, for admins, "team" (everyone's). */
+export async function fetchAiTeamUsage(): Promise<AiUsageSummary | null> {
+  try {
+    const res = await fetch(USAGE_ENDPOINT, { headers: { ...pairedAuthHeader() } });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { ok?: boolean; team?: AiUsageSummary };
+    return json.ok && json.team ? json.team : null;
+  } catch {
+    return null;
+  }
+}

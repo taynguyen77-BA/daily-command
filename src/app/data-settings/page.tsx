@@ -9,6 +9,9 @@ import { useCommandCenter } from "@/components/command-center/use-command-center
 import { DataImportPanel } from "@/components/command-center/DataImportPanel";
 import { BackupPanel } from "@/components/command-center/BackupPanel";
 import { JiraWriteBackPanel } from "@/components/command-center/JiraWriteBackPanel";
+import { useAuthSession } from "@/components/command-center/AuthGate";
+import { MyAccountPanel } from "@/components/command-center/MyAccountPanel";
+import { TeamAdminPanel } from "@/components/command-center/TeamAdminPanel";
 import { AiDataProtectionPanel } from "@/components/command-center/AiDataProtectionPanel";
 import { ExportBackupDialog } from "@/components/command-center/ExportBackupDialog";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
@@ -687,6 +690,7 @@ const FEATURE_TOGGLE_LABELS: { key: keyof FeatureToggles; label: string; detail:
 ];
 export default function DataSettingsPage() {
   const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
+  const authSession = useAuthSession();
   const [confirmingReset, setConfirmingReset] = useState(false);
   // E1 — Reset requires typing RESET (and offers a backup download first).
   const [resetConfirmText, setResetConfirmText] = useState("");
@@ -886,6 +890,10 @@ export default function DataSettingsPage() {
           Show advanced/rarely-used sections
         </label>
       </div>
+
+      {/* L6 — team sign-in only (both render nothing otherwise). */}
+      <MyAccountPanel />
+      <TeamAdminPanel />
 
       <Panel className="p-5">
         <SectionHeading title="Why can't I trust this?" subtitle="A quick, actionable answer for each trust dimension — composed from the signals below, never a separate blended score." />
@@ -1296,7 +1304,8 @@ export default function DataSettingsPage() {
         </div>
       </Panel>
 
-      <CrossDeviceSyncPanel />
+      {/* L6 — with team sign-in, sync follows the signed-in account: no device pairing. */}
+      {!authSession && <CrossDeviceSyncPanel />}
 
       <JiraProjectScopePanel state={state} store={store} jiraConfigured={jiraStatus?.configured} />
 

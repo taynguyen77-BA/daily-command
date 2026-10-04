@@ -12,8 +12,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { buildAiStatusResponse } from "@/lib/command-center/ai/status-response";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
+import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
+import { principalError, requestPrincipal } from "@/lib/server/auth";
 import { handleAiRequest, type AiServerEnv, type ModelCallParams, type ModelCallResult } from "@/lib/command-center/ai/server-runner";
-import { getUsageLedger } from "@/lib/command-center/ai/usage-ledger";
+import { getUsageLedger, resolveUserDailyTokenCap } from "@/lib/command-center/ai/usage-ledger";
 
 export const runtime = "nodejs";
 
@@ -28,10 +30,13 @@ function serverEnv(): AiServerEnv {
 
 export async function GET(req: Request) {
   const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
+  // Sign-in on: signed-in members only (401 / 503 otherwise, like every route).
+  const p = await requestPrincipal(req, { legacy: auth });
+  if (p.kind === "error" && isAuthEnabled(process.env)) return principalError(p);
   // Model ids, the cap and its storage (never a secret) — Setup Health / Data & Settings show
   // them; the server AI policy only to a paired caller (status-response.ts).
   return NextResponse.json(
-    buildAiStatusResponse({ ...serverEnv(), AI_ALLOWED_PROJECT_KEYS: process.env.AI_ALLOWED_PROJECT_KEYS }, { available: Boolean(process.env.ANTHROPIC_API_KEY), kvConfigured: isNotifyStoreConfigured(), authorized: auth.ok })
+    buildAiStatusResponse({ ...serverEnv(), AI_ALLOWED_PROJECT_KEYS: process.env.AI_ALLOWED_PROJECT_KEYS }, { available: Boolean(process.env.ANTHROPIC_API_KEY), kvConfigured: isNotifyStoreConfigured(), authorized: auth.ok || p.kind === "user" })
   );
 }
 
@@ -67,9 +72,8 @@ export async function POST(req: Request) {
   // V2.18 §4 — this route spends the account owner's Anthropic budget on every call. Same
   // gate/contract as jira/sync (see sync-auth.ts).
   const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
-  if (!auth.ok) {
-    return NextResponse.json({ ok: false, error: auth.error }, { status: auth.status });
-  }
+  const p = await requestPrincipal(req, { legacy: auth });
+  if (p.kind === "error") return NextResponse.json({ ok: false, error: p.error, ...(p.missing ? { missing: p.missing } : {}) }, { status: p.status });
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -83,6 +87,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "Malformed request body." }, { status: 400 });
   }
 
-  const result = await handleAiRequest(body, { env: serverEnv(), callModel: anthropicCaller(apiKey), ledger: getUsageLedger(), now: () => new Date() });
+  // L4 — sign-in on: usage is recorded per member, and AI_USER_DAILY_TOKEN_CAP applies to each.
+  const user = p.kind === "user" ? { uid: p.user.uid, cap: resolveUserDailyTokenCap(process.env.AI_USER_DAILY_TOKEN_CAP) } : undefined;
+  const result = await handleAiRequest(body, { env: serverEnv(), callModel: anthropicCaller(apiKey), ledger: getUsageLedger(), now: () => new Date(), ...(user ? { user } : {}) });
   return NextResponse.json(result.body, { status: result.status });
 }

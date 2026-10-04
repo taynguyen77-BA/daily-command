@@ -8,6 +8,7 @@
 import { NextResponse } from "next/server";
 import { fetchJiraProjects, getJiraConfig } from "@/lib/server/jira-client";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
+import { principalError, principalJira, requestPrincipal } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 // V2.2.1 §4 precedent — a parameter-less GET route must not be statically frozen at build
@@ -19,11 +20,13 @@ export async function GET(req: Request) {
   // instance's real project catalog; it had no auth at all before this pass. Same
   // gate/contract as jira/sync (see sync-auth.ts).
   const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
-  if (!auth.ok) {
-    return NextResponse.json({ ok: false, error: auth.error, errorKind: "cron-unauthorized" }, { status: auth.status });
-  }
+  // L2 — sign-in on: the signed-in member, with their own Jira connection (L3).
+  const p = await requestPrincipal(req, { legacy: auth });
+  if (p.kind === "error") return principalError(p);
 
-  const config = getJiraConfig();
+  const jira = p.kind === "user" ? await principalJira(p) : null;
+  if (jira && !jira.ok) return NextResponse.json({ ok: false, error: jira.error, errorKind: jira.errorKind }, { status: jira.status });
+  const config = jira?.ok ? jira.config : getJiraConfig();
   if (!config) {
     return NextResponse.json({ ok: false, error: "Jira is not configured on the server.", errorKind: "not-configured" }, { status: 503 });
   }

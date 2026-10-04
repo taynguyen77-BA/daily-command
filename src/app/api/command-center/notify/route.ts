@@ -26,6 +26,13 @@ import { NextResponse } from "next/server";
 import { renderSlackText, postToSlack, slackSignalSchema } from "@/lib/server/slack-notify";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
+import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
+import { jiraConfigForUser, slackWebhookForUser } from "@/lib/command-center/auth/connections";
+import type { UserRecord } from "@/lib/command-center/auth/users";
+
+// L2 — the sign-in helpers are server-only (session, KV), so they're loaded only when sign-in
+// is on; with it off this route is exactly what it was.
+const serverAuth = () => import("@/lib/server/auth");
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -54,7 +61,30 @@ function isServerSideNotifyActive(): boolean {
   return !!process.env.PERSONAL_JIRA_ACCOUNT_ID && isNotifyStoreConfigured();
 }
 
-export async function GET() {
+/** L4 — sign-in on: the member's own Slack destination and server-notify switch. */
+async function memberNotify(user: UserRecord) {
+  const { authSettings, encryptionKey, userProfile } = await serverAuth();
+  const profile = await userProfile(user.uid);
+  const key = encryptionKey();
+  const webhookUrl = slackWebhookForUser(user.uid, profile, process.env, key);
+  const jira = jiraConfigForUser(user.uid, profile, process.env, key, authSettings().allowSharedJira);
+  return {
+    webhookUrl,
+    channelLabel: profile.slack.mode === "team" ? process.env.SLACK_CHANNEL_LABEL?.trim() || undefined : profile.slack.channelLabel,
+    serverSideNotifyActive: profile.notifyEnabled && isNotifyStoreConfigured() && jira.ok && !!jira.accountId,
+  };
+}
+
+export async function GET(req: Request) {
+  if (isAuthEnabled(process.env)) {
+    const { principalError, requestPrincipal } = await serverAuth();
+    const p = await requestPrincipal(req, { legacyCheck: "open" });
+    if (p.kind === "error") return principalError(p);
+    if (p.kind === "user") {
+      const m = await memberNotify(p.user);
+      return NextResponse.json({ configured: !!m.webhookUrl, channelLabel: m.channelLabel, serverSideNotifyActive: m.serverSideNotifyActive });
+    }
+  }
   const configured = !!process.env.SLACK_WEBHOOK_URL;
   const channelLabel = process.env.SLACK_CHANNEL_LABEL?.trim() || undefined;
   return NextResponse.json({ configured, channelLabel, serverSideNotifyActive: isServerSideNotifyActive() });
@@ -64,11 +94,17 @@ export async function POST(req: Request) {
   // V2.18 §4 — this route posts to the org's real Slack webhook using an attacker-controlled
   // request body; it had no auth at all before this pass. Same gate/contract as jira/sync.
   const auth = checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET);
-  if (!auth.ok) {
+  let member: UserRecord | null = null;
+  if (isAuthEnabled(process.env)) {
+    const p = await (await serverAuth()).requestPrincipal(req, { legacy: auth });
+    if (p.kind === "error") return NextResponse.json({ sent: false, reason: p.missing ? "not-configured" : "unauthorized", ...(p.missing ? { missing: p.missing } : {}) }, { status: p.status });
+    if (p.kind === "user") member = p.user;
+  } else if (!auth.ok) {
     return NextResponse.json({ sent: false, reason: "unauthorized" }, { status: auth.status });
   }
 
-  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
+  // L4 — sign-in on: the member's own destination (their webhook, the team one, or none).
+  const webhookUrl = member ? (await memberNotify(member)).webhookUrl : process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) {
     return NextResponse.json({ sent: false, reason: "not-configured" });
   }

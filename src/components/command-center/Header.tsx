@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useCommandCenter } from "./use-command-center";
 import { BackupReminderBar } from "./BackupReminder";
 import { JiraWriteBackPrompt } from "./JiraWriteBackPrompt";
+import { UserMenu } from "./UserMenu";
 import { ensurePersistentStorage } from "@/lib/command-center/storage-persistence";
 import { computeFreshness, FRESHNESS_LABEL } from "@/lib/command-center/freshness";
 import { JIRA_ERROR_HELP } from "@/lib/command-center/jira/error-help";
@@ -126,7 +127,10 @@ export function Header() {
             </p>
           </div>
         </div>
-        <DataSourceBadge />
+        <div className="flex items-center gap-2">
+          <DataSourceBadge />
+          <UserMenu />
+        </div>
       </header>
       <SyncFailedBanner />
       <BackupReminderBar />
