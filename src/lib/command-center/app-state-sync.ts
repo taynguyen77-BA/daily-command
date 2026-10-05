@@ -179,11 +179,13 @@ export function decideInitialSync(local: SyncedAppState, localState: StoreState,
 
 type FetchOutcome<T> = { ok: true; value: T } | { ok: false; reason: "not-paired" | "unavailable" | "unauthorized" | "network" | "malformed" };
 
+// Sign-in on: the session cookie authenticates and pairedAuthHeader() is deliberately empty, so
+// "paired" must be asked of isDevicePaired() — gating on the header alone silently disabled sync
+// for every signed-in member.
 async function getServerState(): Promise<FetchOutcome<SyncedAppState | null>> {
-  const headers = pairedAuthHeader();
-  if (!headers) return { ok: false, reason: "not-paired" };
+  if (!isDevicePaired()) return { ok: false, reason: "not-paired" };
   try {
-    const res = await fetch(STATE_ENDPOINT, { method: "GET", headers });
+    const res = await fetch(STATE_ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
     if (res.status === 401) return { ok: false, reason: "unauthorized" };
     if (res.status === 503) return { ok: false, reason: "unavailable" };
     if (!res.ok) return { ok: false, reason: "network" };
@@ -196,10 +198,9 @@ async function getServerState(): Promise<FetchOutcome<SyncedAppState | null>> {
 }
 
 async function pushServerState(state: SyncedAppState): Promise<FetchOutcome<void>> {
-  const headers = pairedAuthHeader();
-  if (!headers) return { ok: false, reason: "not-paired" };
+  if (!isDevicePaired()) return { ok: false, reason: "not-paired" };
   try {
-    const res = await fetch(STATE_ENDPOINT, { method: "POST", headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(state) });
+    const res = await fetch(STATE_ENDPOINT, { method: "POST", headers: { ...pairedAuthHeader(), "Content-Type": "application/json" }, body: JSON.stringify(state) });
     if (res.status === 401) return { ok: false, reason: "unauthorized" };
     if (res.status === 503) return { ok: false, reason: "unavailable" };
     if (!res.ok) return { ok: false, reason: "network" };

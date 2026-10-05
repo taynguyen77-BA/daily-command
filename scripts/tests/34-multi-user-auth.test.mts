@@ -34,6 +34,7 @@ import { isDevicePaired, jiraWriteAuthHeader, pairedAuthHeader, setSessionAuthMo
 import { computeSetupHealthRows } from "../../src/components/command-center/SetupHealthBanner";
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import { emptyData } from "../../src/lib/command-center/types";
+import { initAppStateSync, resetAppStateSyncForNewPairing } from "../../src/lib/command-center/app-state-sync";
 
 const read = (p: string) => fs.readFileSync(path.join(process.cwd(), p), "utf8");
 const tick = () => new Promise((r) => setTimeout(r, 20));
@@ -452,6 +453,51 @@ const ctxFor = (email: string, over: Partial<AccountContext> = {}): AccountConte
 
   const me: Me = { user: { uid: A, email: "a@acme.com", name: "Alice", role: "member", canWriteJira: false }, profile: { jira: { mode: "personal", connected: true, accountId: "acc-a", displayName: "Alice Jira" }, slack: { mode: "none", configured: false }, notifyEnabled: false, dailySnapshotEnabled: false }, options: { allowSharedJira: false, teamSlackConfigured: false }, adoptLegacyData: false };
   ok(group, identityFromMe(undefined, me)?.accountId === "acc-a" && identityFromMe({ id: "i", displayName: "Alice Jira", accountId: "acc-a" }, me) === null, "AuthGate pushes the profile accountId/name into personalIdentity only when they differ");
+}
+
+// ===== L5 — cross-device sync actually runs when signed in =====
+// Regression: getServerState/pushServerState used to bail out as "not-paired" whenever
+// pairedAuthHeader() was empty — which it always is in session mode — so a signed-in member's
+// settings (Work Relevance Policy, preferences, decisions…) never left the device.
+{
+  const group = "L5 session sync";
+  const uid = "u_0123456789abcdef01234567";
+  let serverBlob: unknown = null;
+  const calls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    if (String(url).endsWith("/api/command-center/state")) {
+      calls.push(`${method} auth=${new Headers(init?.headers).has("authorization")}`);
+      if (method === "POST") serverBlob = JSON.parse(String(init!.body));
+      return new Response(JSON.stringify({ ok: true, state: method === "GET" ? serverBlob : undefined }), { status: 200 });
+    }
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+  setSessionAuthMode(true);
+  try {
+    const deviceA = new CommandCenterStore({ stateBackend: createMemoryKeyedBackend(), stateChannel: null, stateFocusTargets: [] });
+    deviceA.setUserNamespace(uid);
+    deviceA.getSnapshot();
+    await tick();
+    deviceA.setJiraStatusRelevance("In QA", "NOT_MY_WORK");
+    resetAppStateSyncForNewPairing();
+    await initAppStateSync(deviceA);
+    ok(group, calls.length > 0 && calls.every((c) => c.endsWith("auth=false")), "session mode: the state endpoint is called, with no pairing header (cookie auth)");
+    ok(group, (serverBlob as { jiraWorkRelevancePolicy?: Record<string, string> } | null)?.jiraWorkRelevancePolicy?.["In QA"] === "NOT_MY_WORK", "device A pushes its Work Relevance Policy to the member's server blob");
+
+    const deviceB = new CommandCenterStore({ stateBackend: createMemoryKeyedBackend(), stateChannel: null, stateFocusTargets: [] });
+    deviceB.setUserNamespace(uid);
+    deviceB.getSnapshot();
+    await tick();
+    resetAppStateSyncForNewPairing();
+    await initAppStateSync(deviceB);
+    ok(group, deviceB.getSnapshot().jiraWorkRelevancePolicy["In QA"] === "NOT_MY_WORK", "a fresh device B signed in as the same member receives the policy");
+  } finally {
+    resetAppStateSyncForNewPairing();
+    setSessionAuthMode(false);
+    globalThis.fetch = realFetch;
+  }
 }
 
 // ===== L6/L7 — UI wiring and docs =====
