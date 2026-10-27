@@ -17,6 +17,7 @@ import type { ProactiveIntelligence } from "@/lib/command-center/proactive";
 import { ArtifactEditor } from "./ArtifactEditor";
 import { applyCommandPlan, looksLikeCommand, planCommand, type CommandPlan } from "@/lib/command-center/ai/nl-commands";
 import { ConfidenceTag, MetaPill, Panel, TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 /** V2.4 §19-20, §22 — the data one Command Bar query actually answers against: either the
  *  current global scope (the default) or a one-time explicit-project override built by
@@ -50,6 +51,7 @@ const EXAMPLES = [
 /** V1.3 §26 — NOT a generic chatbot. Every query is routed deterministically
  *  (query-router.ts) to a known intent; Claude only narrates the retrieved facts. */
 export function CommandBar() {
+  const nlReadiness = useAiReadiness("nlCommands");
   const { state, today, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
@@ -237,6 +239,7 @@ export function CommandBar() {
           onKeyDown={(e) => {
             if (e.key === "Enter") run(query);
           }}
+          title={nlReadiness.title}
           placeholder={state.features.nlCommands ? "Ask a question — or give a command, e.g. “block ABC-12 waiting for API spec”…" : "Ask a focused project question…"}
           className="flex-1 rounded-md border border-border bg-surface2 px-3 py-2 text-sm text-text placeholder:text-text3"
         />

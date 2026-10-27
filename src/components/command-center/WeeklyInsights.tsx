@@ -11,6 +11,7 @@ import { buildWeeklyFacts, generateWeeklyInsights, type StoredWeeklyInsights } f
 import { mondayOf } from "@/lib/command-center/reports";
 import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 export function WeeklyInsightsView({ stored }: { stored: StoredWeeklyInsights }) {
   return (
@@ -32,6 +33,7 @@ export function WeeklyInsightsView({ stored }: { stored: StoredWeeklyInsights })
 export function WeeklyInsights() {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [busy, setBusy] = useState(false);
+  const readiness = useAiReadiness("weeklyInsights");
   if (!state.features.weeklyInsights) return null;
   const today = todayLocalIso();
   const weekStart = mondayOf(today);
@@ -51,7 +53,7 @@ export function WeeklyInsights() {
         title="Weekly insights"
         subtitle="Patterns in this week's ticket history, blockers, skip reasons and triage — each with its evidence."
         action={
-          <button onClick={() => void generate()} disabled={busy} className="btn btn-sm btn-secondary">
+          <button title={readiness.title} onClick={() => void generate()} disabled={busy} className="btn btn-sm btn-secondary">
             {busy ? "Thinking…" : stored ? "Refresh" : "Generate"}
           </button>
         }

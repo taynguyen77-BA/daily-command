@@ -23,6 +23,7 @@ import type { RedactionSession } from "@/lib/command-center/ai/redaction";
 import type { WorkItem } from "@/lib/command-center/types";
 import { workItemUpdatedStamp } from "@/lib/command-center/jira/updated-time";
 import { AiProviderIndicator, TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 type Phase =
   | { kind: "idle" }
@@ -49,6 +50,7 @@ function ResultList({ title, items }: { title: string; items: string[] }) {
 export function TicketAiPanel({ item }: { item: WorkItem }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
+  const readiness = useAiReadiness("ticketAi", item.key);
   if (!state.features.ticketAi || item.sourceType !== "jira") return null;
   const projectKey = projectKeyOf(item.key);
   const settings = state.aiDataProtection;
@@ -56,7 +58,7 @@ export function TicketAiPanel({ item }: { item: WorkItem }) {
   if (!isProjectAiAllowed(settings, projectKey)) {
     return (
       <p data-ticket-ai-disabled className="mt-2 text-xs text-text3">
-        {AI_DISABLED_FOR_PROJECT} ({projectKey}) — allow it in Data &amp; Settings → AI data protection.
+        {AI_DISABLED_FOR_PROJECT} ({projectKey}) — {readiness.nextStep}
       </p>
     );
   }
@@ -94,7 +96,7 @@ export function TicketAiPanel({ item }: { item: WorkItem }) {
         <TrustLabel kind="ai-assessment" />
         <span className="font-semibold text-text">Requirement check</span>
         {(phase.kind === "idle" || phase.kind === "error" || phase.kind === "done") && (
-          <button onClick={() => void start(phase.kind === "done")} className="btn btn-sm btn-secondary">
+          <button title={readiness.title} onClick={() => void start(phase.kind === "done")} className="btn btn-sm btn-secondary">
             {phase.kind === "done" ? "Refresh" : "Check requirements"}
           </button>
         )}

@@ -17,6 +17,7 @@ import { MentionReplyDrafter } from "./MentionReplyDrafter";
 import { AskFollowUp } from "./AskFollowUp";
 import { TicketLink } from "./TicketLink";
 import { useCommandCenter } from "./use-command-center";
+import { useAiReadiness } from "./use-ai-readiness";
 
 function whyContent(card: NbaCard): WhyShouldICareContent {
   return {
@@ -56,6 +57,7 @@ export function NextBestActions({ compact = false }: { compact?: boolean }) {
   const [answered, setAnswered] = useState<Record<string, "useful" | "not-now">>({});
   const [narration, setNarration] = useState<{ text: string; source: "ai" | "deterministic" } | null>(null);
   const flagOn = state.features.nextBestActionAi;
+  const readiness = useAiReadiness("nextBestActionAi");
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +102,7 @@ export function NextBestActions({ compact = false }: { compact?: boolean }) {
       ) : (
         <Panel className="space-y-3 p-4">
           {(narration ?? { text: deterministicNarration(cards), source: "deterministic" as const }).text && !compact && (
-            <p className="text-sm text-text2" data-nba-narration={narration?.source ?? "deterministic"}>
+            <p title={flagOn ? readiness.title : undefined} className="text-sm text-text2" data-nba-narration={narration?.source ?? "deterministic"}>
               {(narration ?? { text: deterministicNarration(cards) }).text}
               {narration?.source === "ai" && <span className="ml-2"><TrustLabel kind="ai-draft" /></span>}
             </p>

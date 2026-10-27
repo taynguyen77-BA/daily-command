@@ -11,6 +11,7 @@ import { getAIProvider } from "@/lib/command-center/ai";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { applyTriageSelection, buildTriageInput, defaultChecked, groupByCategory, normalizeTriage, type TriageCandidate, type TriageSuggestion } from "@/lib/command-center/ai/smart-triage";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 const ACTION_LABEL: Record<TriageSuggestion["action"]["kind"], string> = { keep: "Keep for today", done: "Done", defer: "Defer", block: "Block", skip: "Skip" };
 
@@ -25,6 +26,7 @@ export function SmartTriagePanel({ candidates, today, onApplied }: { candidates:
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
   const [metadataOnly, setMetadataOnly] = useState<string[]>([]);
+  const readiness = useAiReadiness("smartTriage");
   if (candidates.length === 0) return null;
 
   const suggest = async () => {
@@ -55,7 +57,7 @@ export function SmartTriagePanel({ candidates, today, onApplied }: { candidates:
         <TrustLabel kind="ai-recommendation" />
         <span className="font-semibold text-text">Smart triage</span>
         {!suggestions && (
-          <button onClick={() => void suggest()} disabled={busy} className="btn btn-sm btn-secondary">
+          <button title={readiness.title} onClick={() => void suggest()} disabled={busy} className="btn btn-sm btn-secondary">
             {busy ? "Thinking…" : `Suggest for ${candidates.length} item(s)`}
           </button>
         )}

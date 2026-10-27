@@ -3,6 +3,7 @@
 import { listDailySyncSummaries } from "@/lib/command-center/sync-history";
 import type { FeatureToggles } from "@/lib/command-center/types";
 import { ScoringModelControl } from "@/components/command-center/ScoringModelControl";
+import { AiReadinessPanel } from "@/components/command-center/AiReadinessPanel";
 import { LearningPanel } from "@/components/command-center/LearningPanel";
 import { NotifyPrefsPanel } from "@/components/command-center/NotifyPrefsPanel";
 import { NAV_GROUPS } from "@/components/command-center/Nav";
@@ -1058,6 +1059,8 @@ export default function DataSettingsPage() {
       </Panel>
 
       <JiraWriteBackPanel />
+
+      <AiReadinessPanel />
 
       <AiDataProtectionPanel />
 

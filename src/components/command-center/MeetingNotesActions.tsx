@@ -11,6 +11,7 @@ import { getAIProvider } from "@/lib/command-center/ai";
 import { applyMeetingReview, extractMeetingReview, type MeetingReview } from "@/lib/command-center/ai/meeting-actions";
 import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 const STATUS_LABEL = { TODO: "To do", IN_PROGRESS: "Start", BLOCKED: "Block", SKIPPED: "Skip", DEFERRED: "Defer", DONE: "Done" } as const;
 
@@ -21,6 +22,7 @@ export function MeetingNotesActions() {
   const [mode, setMode] = useState<"mock" | "claude">("mock");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+  const readiness = useAiReadiness("meetingNotesActions");
   if (!state.features.meetingNotesActions) return null;
 
   const extract = async () => {
@@ -61,7 +63,7 @@ export function MeetingNotesActions() {
         <>
           <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={6} maxLength={20000} placeholder="Paste meeting notes or a transcript…" aria-label="Meeting notes" className="w-full rounded border border-border bg-surface px-2 py-1 text-sm" />
           <div className="mt-2 flex items-center gap-2">
-            <button onClick={() => void extract()} disabled={busy || !notes.trim()} className="btn btn-sm btn-primary disabled:opacity-50">
+            <button title={readiness.title} onClick={() => void extract()} disabled={busy || !notes.trim()} className="btn btn-sm btn-primary disabled:opacity-50">
               {busy ? "Reading…" : "Extract"}
             </button>
             {done && <span className="text-xs text-green">{done}</span>}

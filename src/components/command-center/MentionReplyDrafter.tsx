@@ -13,6 +13,7 @@ import { DEFAULT_REPLY_OPTIONS, draftMentionReplyFlow, memoryDraftCache, MENTION
 import { projectKeyOf } from "@/lib/command-center/ai/data-protection";
 import type { MentionReplyResponse } from "@/lib/command-center/ai/schemas";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 const draftCache = memoryDraftCache();
 
@@ -25,6 +26,7 @@ export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
   const [text, setText] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const runId = useRef(0);
+  const readiness = useAiReadiness("mentionReplyDrafter", mention.issueKey);
   if (!state.features.mentionReplyDrafter) return null;
 
   const draft = async (options: ReplyOptions, previewConfirmed = false) => {
@@ -62,7 +64,7 @@ export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
 
   if (phase.kind === "closed") {
     return (
-      <button onClick={() => setPhase({ kind: "options" })} data-draft-reply-open={mention.commentId} className="btn btn-sm btn-secondary">
+      <button title={readiness.title} onClick={() => setPhase({ kind: "options" })} data-draft-reply-open={mention.commentId} className="btn btn-sm btn-secondary">
         Draft reply
       </button>
     );

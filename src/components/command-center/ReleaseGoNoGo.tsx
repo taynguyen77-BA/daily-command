@@ -13,6 +13,7 @@ import type { ReleaseBriefResponse } from "@/lib/command-center/ai/schemas";
 import type { CommandCenterData, ReleaseHealth } from "@/lib/command-center/types";
 import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 const TONE: Record<ReleaseBriefResponse["recommendation"], string> = { Go: "text-green", "Go with conditions": "text-orange", "No-Go": "text-red" };
 
@@ -21,6 +22,7 @@ export function ReleaseGoNoGo({ release, data }: { release: ReleaseHealth; data:
   const [result, setResult] = useState<{ brief: ReleaseBriefResponse; usedAi: boolean; notice?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const readiness = useAiReadiness("releaseGoNoGo");
   if (!state.features.releaseGoNoGo) return null;
 
   const run = async () => {
@@ -36,7 +38,7 @@ export function ReleaseGoNoGo({ release, data }: { release: ReleaseHealth; data:
     <div data-release-go-no-go={release.fixVersion} className="mt-3 rounded-md border border-border bg-surface2 p-2 text-xs text-text2">
       <div className="flex flex-wrap items-center gap-2">
         <TrustLabel kind="ai-assessment" />
-        <button onClick={() => void run()} disabled={busy} className="btn btn-sm btn-secondary">
+        <button title={readiness.title} onClick={() => void run()} disabled={busy} className="btn btn-sm btn-secondary">
           {busy ? "Preparing…" : result ? "Refresh Go/No-Go" : "Go/No-Go brief"}
         </button>
       </div>

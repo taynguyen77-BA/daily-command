@@ -13,8 +13,10 @@ import type { AITask } from "./schemas";
 export const DEFAULT_AI_MODEL = "claude-sonnet-5-5";
 /** Deep tier — only for tasks in DEEP_AI_TASKS. */
 export const DEFAULT_AI_MODEL_DEEP = "claude-opus-5-5";
-/** Default for short, single-paragraph narration tasks — cheaper and faster. */
-export const DEFAULT_AI_MODEL_FAST = "claude-haiku-4-5";
+/** Default for short, single-paragraph narration tasks — cheaper and faster. P3.7: Haiku 5.5 (the current fastest tier per Anthropic's
+ *  models overview; from $0.10 / $0.50 per MTok in/out, retirement not before 2027-10-07). Haiku 4.5 is a legacy model; set
+ *  ANTHROPIC_MODEL_FAST=claude-haiku-4-5 to keep it. */
+export const DEFAULT_AI_MODEL_FAST = "claude-haiku-5-5";
 
 /** Short tasks: one short paragraph over already-computed facts. Everything else uses the
  *  default (reasoning) model. */
@@ -75,7 +77,7 @@ export function aiModelStatus(env: AiModelEnv): { model: string; fastModel: stri
 /** Models whose thinking can't be turned off — their thinking tokens count against
  *  max_tokens, so they need a larger output budget than the visible JSON alone. */
 export function isAlwaysThinkingModel(model: string): boolean {
-  return /^claude-(opus-5-5|opus-5|sonnet-5-5|fable-5-1|fable-5)$/.test(model);
+  return /^claude-(opus-5-5|opus-5|sonnet-5-5|haiku-5-5|fable-5-1|fable-5)$/.test(model);
 }
 
 /** Models that accept the server-side refusal `fallbacks: "default"` parameter (beta

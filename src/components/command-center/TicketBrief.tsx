@@ -12,6 +12,7 @@ import { loadIssueContext } from "@/lib/command-center/ai/ticket-ai-client";
 import { applyBriefSuggestion, openTicketBrief, suggestionLabel, type StoredTicketBrief } from "@/lib/command-center/ai/ticket-brief";
 import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "shown"; stored: StoredTicketBrief; stale: boolean } | { kind: "message"; text: string };
 
@@ -19,6 +20,7 @@ export function TicketBrief({ ticketKey, workItemUpdated }: { ticketKey: string;
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [phase, setPhase] = useState<Phase>({ kind: "closed" });
   const [applied, setApplied] = useState<string | null>(null);
+  const readiness = useAiReadiness("ticketBrief", ticketKey);
   if (!state.features.ticketBrief) return null;
 
   const open = async (opts: { regenerate?: boolean; previewConfirmed?: boolean } = {}) => {
@@ -47,7 +49,7 @@ export function TicketBrief({ ticketKey, workItemUpdated }: { ticketKey: string;
 
   if (phase.kind === "closed") {
     return (
-      <button onClick={() => void open()} data-ticket-brief-open={ticketKey} className="mt-1 text-xs text-accent2 hover:underline">
+      <button title={readiness.title} onClick={() => void open()} data-ticket-brief-open={ticketKey} className="mt-1 text-xs text-accent2 hover:underline">
         Brief
       </button>
     );

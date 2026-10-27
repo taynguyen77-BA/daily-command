@@ -11,12 +11,14 @@ import { commandCenterStore } from "@/lib/command-center/store";
 import { REPORT_AUDIENCES, rewriteReportFlow, rewriteSource, type ReportAudience, type RewriteResult } from "@/lib/command-center/ai/report-rewrite";
 import type { DailyReportView, WeeklyReportView } from "@/lib/command-center/reports";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 export function ReportRewrite({ report, includeTeam }: { report: { kind: "daily"; view: DailyReportView } | { kind: "weekly"; view: WeeklyReportView }; includeTeam: boolean }) {
   const [audience, setAudience] = useState<ReportAudience | null>(null);
   const [result, setResult] = useState<RewriteResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const readiness = useAiReadiness("audienceReports");
 
   const run = async (a: ReportAudience) => {
     setAudience(a);
@@ -33,7 +35,7 @@ export function ReportRewrite({ report, includeTeam }: { report: { kind: "daily"
         <TrustLabel kind="ai-draft" />
         <span className="text-xs text-text3">Rewrite for…</span>
         {REPORT_AUDIENCES.map((a) => (
-          <button key={a.id} onClick={() => void run(a.id)} disabled={busy} className={`btn btn-sm btn-secondary ${audience === a.id ? "border-accent text-text" : ""}`}>
+          <button key={a.id} title={readiness.title} onClick={() => void run(a.id)} disabled={busy} className={`btn btn-sm btn-secondary ${audience === a.id ? "border-accent text-text" : ""}`}>
             {a.label}
           </button>
         ))}

@@ -13,6 +13,7 @@ import { baCheckToCsv, baCheckToMarkdown, runBaRequirementCheck } from "@/lib/co
 import { projectKeyOf } from "@/lib/command-center/ai/data-protection";
 import type { BaRequirementCheckResponse } from "@/lib/command-center/ai/schemas";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "done"; result: BaRequirementCheckResponse; mode: "mock" | "claude" } | { kind: "message"; text: string };
 
@@ -22,6 +23,7 @@ export function BaRequirementCheck({ ticketKey, workItemUpdated }: { ticketKey: 
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [phase, setPhase] = useState<Phase>({ kind: "closed" });
   const [status, setStatus] = useState<string | null>(null);
+  const readiness = useAiReadiness("baRequirementCheck", ticketKey);
   if (!state.features.baRequirementCheck) return null;
 
   const run = async (previewConfirmed = false) => {
@@ -38,7 +40,7 @@ export function BaRequirementCheck({ ticketKey, workItemUpdated }: { ticketKey: 
 
   if (phase.kind === "closed") {
     return (
-      <button onClick={() => void run()} data-ba-check-open={ticketKey} className="mt-1 ml-3 text-xs text-accent2 hover:underline">
+      <button title={readiness.title} onClick={() => void run()} data-ba-check-open={ticketKey} className="mt-1 ml-3 text-xs text-accent2 hover:underline">
         Requirement check
       </button>
     );

@@ -14,6 +14,7 @@ import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { emailDraftUrl, slackReportText } from "@/lib/command-center/report-export";
 import { sendReportToSlack } from "@/lib/command-center/notify-client";
 import { TrustLabel } from "./ui";
+import { useAiReadiness } from "./use-ai-readiness";
 
 export function AiFollowUpDrafter({ ticketKeys }: { ticketKeys: string[] }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
@@ -22,6 +23,7 @@ export function AiFollowUpDrafter({ ticketKeys }: { ticketKeys: string[] }) {
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [status, setStatus] = useState<Record<string, string>>({});
+  const readiness = useAiReadiness("aiBlockerFollowUp", ticketKeys[0]);
   if (!state.features.aiBlockerFollowUp || ticketKeys.length === 0) return null;
 
   const draft = async (ch: FollowUpChannel) => {
@@ -53,7 +55,7 @@ export function AiFollowUpDrafter({ ticketKeys }: { ticketKeys: string[] }) {
             <option value="email">Email</option>
           </select>
         </label>
-        <button onClick={() => void draft(channel)} disabled={busy} className="btn btn-sm btn-secondary">
+        <button title={readiness.title} onClick={() => void draft(channel)} disabled={busy} className="btn btn-sm btn-secondary">
           {busy ? "Drafting…" : drafts ? "Redraft" : "Draft with AI"}
         </button>
         {drafts && <span className="text-text3">{drafts.mode === "claude" ? "AI drafts — edit before sending." : "Template drafts (AI not used)."}</span>}
