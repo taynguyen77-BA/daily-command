@@ -15,7 +15,7 @@ import { slug } from "./attention-queue";
 import { detectChanges, toSnapshot } from "./change-detection";
 import { getAIProvider } from "./ai";
 import { addDays, todayLocalIso, toLocalIso } from "./date-utils";
-import { buildDailySnapshot } from "./memory";
+import { buildDailySnapshot, dailyCanonicalSnapshots } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
 import type { DataSourceProvider, DataSourceSyncResult } from "./datasource/types";
 import { LOCK_UNAVAILABLE, withJiraSyncLock, type JiraSyncLockManager } from "./sync-lock";
@@ -433,6 +433,17 @@ function initialState(): StoreState {
 
 export function getTodayIso(): string {
   return todayLocalIso();
+}
+
+/** Each snapshot is a full copy of the dataset, and syncs (auto-sync every ~30 min) append one
+ *  each, so appending blindly filled all MAX_SNAPSHOT_HISTORY slots within days and made every
+ *  persist/parse tens of MB (tab "Unresponsive" / "Aw, Snap!"). Every reader collapses to the
+ *  last snapshot per date anyway (dailyCanonicalSnapshots), so a same-date append replaces the
+ *  previous entry instead of stacking a new one — the history then really spans MAX days. */
+export function appendSnapshot(history: DailySnapshot[], snapshot: DailySnapshot): DailySnapshot[] {
+  const last = history[history.length - 1];
+  const base = last && last.date === snapshot.date ? history.slice(0, -1) : history;
+  return [...base, snapshot].slice(-MAX_SNAPSHOT_HISTORY);
 }
 
 export function previousSnapshotOf(state: StoreState): DailySnapshot | null {
@@ -955,7 +966,7 @@ function parseStoredStateRaw(raw: string): StoreState {
     return {
       schemaVersion: DATA_SCHEMA_VERSION,
       data: parsedData,
-      snapshotHistory: Array.isArray(snapshotHistory) ? snapshotHistory : [],
+      snapshotHistory: Array.isArray(snapshotHistory) ? dailyCanonicalSnapshots(snapshotHistory).slice(-MAX_SNAPSHOT_HISTORY) : [],
       loaded: parsed.loaded ?? false,
       isDemo: parsed.isDemo ?? false,
       eodHistory: Array.isArray(parsed.eodHistory) ? parsed.eodHistory : [],
@@ -1468,7 +1479,7 @@ export class CommandCenterStore {
     this.set({
       ...this.state,
       data: merged,
-      snapshotHistory: this.state.loaded ? [...this.state.snapshotHistory, prevSnapshot].slice(-MAX_SNAPSHOT_HISTORY) : this.state.snapshotHistory,
+      snapshotHistory: this.state.loaded ? appendSnapshot(this.state.snapshotHistory, prevSnapshot) : this.state.snapshotHistory,
       loaded: true,
       isDemo: false,
       dataSource: "local-import",
@@ -2429,7 +2440,7 @@ export class CommandCenterStore {
       dataSource: "jira",
       loaded: true,
       isDemo: false,
-      snapshotHistory: prevSnapshot ? [...this.state.snapshotHistory, prevSnapshot].slice(-MAX_SNAPSHOT_HISTORY) : this.state.snapshotHistory,
+      snapshotHistory: prevSnapshot ? appendSnapshot(this.state.snapshotHistory, prevSnapshot) : this.state.snapshotHistory,
       memoryEvents:
         newMemoryEvents.length > 0 || jiraCompletionEvents.length > 0
           ? [...this.state.memoryEvents, ...newMemoryEvents, ...jiraCompletionEvents].slice(-MAX_MEMORY_EVENTS)
@@ -3199,7 +3210,7 @@ export class CommandCenterStore {
 
     this.set({
       ...this.state,
-      snapshotHistory: [...snapshotHistory, todaySnapshot].slice(-MAX_SNAPSHOT_HISTORY),
+      snapshotHistory: appendSnapshot(snapshotHistory, todaySnapshot),
       eodHistory: [entry, ...this.state.eodHistory].slice(0, 30),
       memoryEvents: [...this.state.memoryEvents, ...newMemoryEvents].slice(-MAX_MEMORY_EVENTS),
     });
