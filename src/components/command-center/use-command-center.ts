@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { commandCenterStore, getTodayIso, previousSnapshotOf, selectDailyCommandMaps, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
 import { applyFilters } from "@/lib/command-center/filters";
@@ -35,6 +35,29 @@ function sendSlackNotifications(data: CommandCenterData, previousAttentionState:
   });
 }
 
+/** Every one of the ~45 components that calls useCommandCenter() used to run the full
+ *  scope -> filter -> derive -> proactive -> personal-focus pipeline on its own, so a single
+ *  store change recomputed it dozens of times per frame (and each copy ran the attention-commit
+ *  effect), which exhausted the tab's memory ("Aw, Snap!"). The slots below are shared across
+ *  all callers: a slot recomputes only when its deps actually change, once, whoever asks first. */
+const sharedSlots = new Map<string, { deps: readonly unknown[]; value: unknown }>();
+function sharedMemo<T>(slot: string, factory: () => T, deps: readonly unknown[]): T {
+  const hit = sharedSlots.get(slot);
+  if (hit && hit.deps.length === deps.length && hit.deps.every((d, i) => Object.is(d, deps[i]))) return hit.value as T;
+  const value = factory();
+  sharedSlots.set(slot, { deps, value });
+  return value;
+}
+
+/** The `proactive` bundle whose attention transitions were last committed/notified — the
+ *  effect below runs once per distinct bundle instead of once per mounted caller. */
+let lastHandledProactive: unknown = null;
+function claimProactive(p: unknown): boolean {
+  if (p === lastHandledProactive) return false;
+  lastHandledProactive = p;
+  return true;
+}
+
 export function useCommandCenter() {
   const state = useSyncExternalStore(
     commandCenterStore.subscribe,
@@ -65,7 +88,7 @@ export function useCommandCenter() {
   // projects enter the Command Center at all) from that filter (which already-ingested
   // projects are currently displayed). Every screen built on `derived`/`filteredData` below
   // inherits scope automatically, with no per-engine `if focusedProject` checks (§11).
-  const scopedData = useMemo(
+  const scopedData = sharedMemo("m1", 
     () => applyProjectScope(state.data, state.jiraProjectScope),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state.data, state.jiraProjectScope]
@@ -77,7 +100,7 @@ export function useCommandCenter() {
   // fetch-time half and the full reasoning). Computed right after scopedData so every
   // downstream engine gets a mention list that's already consistent with Focus Project Scope,
   // same "enforce scope at the data boundary" discipline scopedData itself follows.
-  const scopedMentionEvents = useMemo(
+  const scopedMentionEvents = sharedMemo("m2", 
     () => scopeMentionEvents(state.mentionEvents, scopedData.workItems, state.jiraProjectScope),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state.mentionEvents, scopedData.workItems, state.jiraProjectScope]
@@ -86,7 +109,7 @@ export function useCommandCenter() {
   // V1.3 §9 — the global filter is applied once here; every screen built on `derived`
   // (and `filteredData`, for anything that needs the raw filtered records) automatically
   // inherits it without configuring its own filter UI.
-  const filteredData = useMemo(
+  const filteredData = sharedMemo("m3", 
     () => applyFilters(scopedData, state.filters, today),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scopedData, state.filters, today]
@@ -96,7 +119,7 @@ export function useCommandCenter() {
   // status maps. Threaded into computeProactiveIntelligence (which uses it for First 30
   // Minutes' action-plan fallback) and exposed directly for surfaces that classify a raw
   // WorkItem themselves (Command Bar, action-plan page, Data & Settings).
-  const workRelevanceIndex = useMemo(
+  const workRelevanceIndex = sharedMemo("m4", 
     () => buildWorkRelevanceIndex(state.jiraWorkRelevancePolicy),
     [state.jiraWorkRelevancePolicy]
   );
@@ -106,7 +129,7 @@ export function useCommandCenter() {
   // population once per render. DONE → completed; BLOCKED ∪ SKIPPED ∪ DEFERRED-until-future →
   // paused (out of every active personal list). The names are the pre-TicketWorkState ones so
   // every engine and page keeps its signature; there is no second source behind them.
-  const ticketSets = useMemo(
+  const ticketSets = sharedMemo("m5", 
     () => ticketExclusionSets(state.ticketWorkStates, scopedData.workItems, today),
     [state.ticketWorkStates, scopedData.workItems, today]
   );
@@ -117,7 +140,7 @@ export function useCommandCenter() {
   const ticketInProgressWorkItemIds = ticketSets.inProgressIds;
   // The today-aware Daily Command maps (a projection of ticketWorkStates — see
   // store.ts selectDailyCommandMaps) for the engines that still take map-shaped input.
-  const dailyCommandMaps = useMemo(() => selectDailyCommandMaps(state, today), [state.ticketWorkStates, today]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dailyCommandMaps = sharedMemo("m6", () => selectDailyCommandMaps(state, today), [state.ticketWorkStates, today]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // V2.21 §3 — computed AFTER workRelevanceIndex/dailyCommandCompletedWorkItemIds (moved
   // below them, was above before V2.21) and now threaded through: `derived` is the shared
@@ -126,7 +149,7 @@ export function useCommandCenter() {
   // — otherwise a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item kept
   // inflating "needs attention"/"overdue" counts and generating fresh risks even though every
   // other surface already treated it as finished (see selectors.ts's own comment).
-  const derived = useMemo(
+  const derived = sharedMemo("m7", 
     () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds]
@@ -134,7 +157,7 @@ export function useCommandCenter() {
 
   // V1.4 — one composed bundle for every proactive engine, mirroring `derived` above.
   const sourceType = state.isDemo ? "demo" : state.dataSource === "jira" ? "jira" : "manual";
-  const proactive = useMemo(
+  const proactive = sharedMemo("m8", 
     () =>
       state.loaded
         ? computeProactiveIntelligence(
@@ -191,7 +214,7 @@ export function useCommandCenter() {
   // preventing the exact double-notification the two independent tracking systems (server KV
   // vs. browser localStorage) would otherwise cause for the same mention/assignment.
   useEffect(() => {
-    if (!proactive) return;
+    if (!proactive || !claimProactive(proactive)) return;
     commandCenterStore.commitAttentionState(proactive.nextAttentionState, proactive.attentionQueue);
     if (!serverSideNotifyActiveRef.current) sendSlackNotifications(filteredData, state.attentionState, proactive.attentionQueue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -199,7 +222,7 @@ export function useCommandCenter() {
 
   // V1.6 — deterministic Personal Focus Engine, composed the same way `proactive` is
   // composed above. No AI calls; recomputed fresh every render from live project state.
-  const personalFocus = useMemo(
+  const personalFocus = sharedMemo("m9", 
     () =>
       proactive
         ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds)
