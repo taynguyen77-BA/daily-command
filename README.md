@@ -171,6 +171,8 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 
 - **KV client** *(P2.4)*. See the KV note under Server-Side Real-Time Notify: `@upstash/redis` replaces `@vercel/kv`; both variable-name pairs are accepted.
 
+- **Live Jira smoke** *(P2.5)*. `npm run smoke:jira` (read-only; needs `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `SMOKE_ACCOUNT_ID`; optional `SMOKE_ISSUE_KEY`, `SMOKE_MENTION_ISSUE_KEY`, `JIRA_TIMEZONE_OFFSET_MINUTES`) checks auth, search paging + fields, JQL date formats (ISO rejected? finding F1), comment order (F4), the timezone offset, the mention search and rate-limit headers, prints a Markdown table and writes `smoke-report.json` (gitignored); exit 1 on any FAIL. It sends only GETs and `POST /search/jql`, never prints the token, and is not part of `npm test` or CI.
+
 ### Choosing a scheduler
 
 | Scheduler | Cadence | Cost | Failure modes | Who gets alerted |
