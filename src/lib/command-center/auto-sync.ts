@@ -16,8 +16,7 @@
 // This is why "manual Sync Now" always worked and "automatic sync" never did: manual sync
 // runs INSIDE the browser tab (data-settings/page.tsx -> store.syncJira()), which merges the
 // result directly into this app's one real persistent store — the browser's own IndexedDB/
-// localStorage (see store.ts's own "Local-only V1: no auth, no multi-tenant, no backend"
-// contract, unchanged by this pass). A cron job has no browser tab and nowhere of its own to
+// localStorage (see store.ts: the working data is local-first, with no server-side copy). A cron job has no browser tab and nowhere of its own to
 // write that main dataset without inventing a second, server-side Jira data store — which
 // section 1 of the dev prompt explicitly forbids ("Do NOT create another Jira data store").
 //

@@ -1672,9 +1672,10 @@ export default function DataSettingsPage() {
         <p className="mt-2 text-xs text-text3">
           Both API keys, when set, live only in the server environment — neither is ever sent to or readable by the browser.
           Slack notifications (V2.10) are implemented — see the Slack Notifications panel below. Confluence and email
-          integrations are not implemented — that remains a future capability. Jira write-back (updating, commenting on, or
-          transitioning issues) is also not implemented — every Jira interaction in this app is read-only; all actions on
-          real tickets remain something you do yourself.
+          integrations are not implemented — that remains a future capability. Syncing from Jira is always read-only. Jira
+          write-back (a "Blocked" comment, the Flag, a Done transition) is {state.features.jiraWriteBack ? "ON" : "OFF"}: it is off
+          unless you enable it under Features, and then works only for allow-listed projects, with a preview and your confirmation
+          for every write.
         </p>
       </Panel>
 

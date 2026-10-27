@@ -1,6 +1,6 @@
 // Local persistence layer (BUILD REQUEST §15 local persistence, §10 session learning;
 // extended in V1.2 §2 for inspectable, deletable project memory; extended in V1.3 for
-// Jira as a data source). No backend, no auth — a plain external store, consumed via React's
+// Jira as a data source). Local-first, no server-side copy of the working data — a plain external store, consumed via React's
 // useSyncExternalStore (see components/command-center/use-command-center.ts).
 //
 // V2.16 — backed by IndexedDB (see local-db.ts), not localStorage: a real Jira-scale dataset

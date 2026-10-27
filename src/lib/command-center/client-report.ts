@@ -139,7 +139,7 @@ export function clientReportToMarkdown(report: ClientReportSummary): string {
   return lines.join("\n");
 }
 
-/** Client-side-only "Save As" for a generated report — the app is local-only (no backend), so
+/** Client-side-only "Save As" for a generated report — the working data is local-first, so
  *  this is a plain Blob + anchor download, same trust boundary as clipboard export elsewhere. */
 export function downloadMarkdown(filename: string, content: string) {
   const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });

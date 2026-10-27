@@ -92,3 +92,25 @@ function walk(dir: string): string[] {
   }
   ok(group, /\*\(OFF by default\)\*/.test(section), "the README states Jira write-back is off by default");
 }
+
+// ----- P1.2 — UI/doc copy never contradicts a shipped capability -----
+{
+  const group = "P1.2 Truthful copy";
+  const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : /\.(ts|tsx)$/.test(e.name) ? [path.join(dir, e.name)] : []));
+  const files = walk(path.join(process.cwd(), "src"));
+  const stale: [string, RegExp][] = [
+    ["Jira write-back is not implemented", /write-back[^.]{0,80}is (also )?not implemented/i],
+    ["every Jira interaction is read-only", /every Jira interaction[^.]{0,40}read-only/i],
+    ["Local-only V1: no auth, no multi-tenant, no backend", /no auth, no multi-tenant, no backend/i],
+    ["No backend, no auth", /No backend, no auth/],
+    ["local-only (no backend)", /local-only \(no backend\)/i],
+  ];
+  const hits: string[] = [];
+  for (const f of files) {
+    const text = fs.readFileSync(f, "utf8").replace(/\s+/g, " ");
+    for (const [label, re] of stale) if (re.test(text)) hits.push(`${label} @ ${path.relative(process.cwd(), f)}`);
+  }
+  ok(group, hits.length === 0, `no removed stale capability phrase is back (${hits.join("; ") || "none"})`);
+  ok(group, /state\.features\.jiraWriteBack \? "ON" : "OFF"/.test(read("src/app/data-settings/page.tsx")), "the AI-provider panel derives the write-back statement from the live feature flag");
+  ok(group, !fs.existsSync(path.join(process.cwd(), "src/lib/command-center/datasource/demo-source.ts")) && !fs.existsSync(path.join(process.cwd(), "src/lib/command-center/datasource/local-import-source.ts")), "the unused Demo/Local-import data-source modules stay deleted (Demo is served by store.loadDemoData, Local import by import.ts)");
+}

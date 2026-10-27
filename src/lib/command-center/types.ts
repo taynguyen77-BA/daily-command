@@ -1,5 +1,6 @@
 // BA/PO/PM Daily Command Center — core data model.
-// Local-only V1: no auth, no multi-tenant, no backend. All state lives in the browser.
+// Local-first: all working state lives in the browser (IndexedDB). A small server side exists for opt-in features only
+// (KV: notify baseline, cross-device sync, daily snapshots, write log, AI usage; team sign-in is OFF unless AUTH_ENABLED=true).
 
 export type Severity = "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
 export type RiskLevel = "HIGH" | "MEDIUM" | "LOW";
