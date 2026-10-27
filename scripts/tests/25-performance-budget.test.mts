@@ -67,3 +67,14 @@ const s = env.store.getSnapshot();
   const copy = { ...s.data, workItems: s.data.workItems.map((w, i) => (i === 0 ? { ...w, dueDate: "2099-01-01" } : w)) };
   ok(group, workItemByIdIn(copy, s.data.workItems[0].id)?.dueDate === "2099-01-01" && workItemByIdIn(s.data, s.data.workItems[0].id)?.dueDate !== "2099-01-01", "a new dataset object gets fresh indexes (never a stale cached answer)");
 }
+
+// ----- P3.4 — the forecast layer on the same 3,000-item fixture -----
+{
+  const group = "P3.4 Forecast performance";
+  const { computeForecast } = await import("../../src/lib/command-center/forecast");
+  const today = new Date().toISOString().slice(0, 10);
+  const t0 = performance.now();
+  const bundle = computeForecast(s.data, today);
+  const ms = performance.now() - t0;
+  ok(group, ms <= perfBudget(100), `the whole forecast layer on the ${s.data.workItems.length}-item fixture: ${ms.toFixed(1)} ms (budget ${perfBudget(100)} ms; ${bundle.resolvedSamples} resolved samples — the fixture carries few resolved dates, so most answers are UNKNOWN by design)`);
+}

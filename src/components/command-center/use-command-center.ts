@@ -3,6 +3,7 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { commandCenterStore, getTodayIso, previousSnapshotOf, selectDailyCommandMaps, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
+import { computeForecast } from "@/lib/command-center/forecast";
 import { buildScoringOptions } from "@/lib/command-center/scoring-context";
 import type { ScoringOptions } from "@/lib/command-center/scoring";
 import { applyFilters } from "@/lib/command-center/filters";
@@ -158,6 +159,8 @@ export function useCommandCenter() {
   // other surface already treated it as finished (see selectors.ts's own comment).
   // P3.1 — the scoring model (a device setting; default v2) and the "waiting on me" signal v2 reads.
   const scoring = sharedMemo("m10", () => scoringOptionsFor(state, scopedMentionEvents, today), [state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket, state.learnedPriority, state.learningResetAt, state.personalPlan, state.ticketWorkStates, scopedData.workItems, today]);
+  // P3.4 — the forecast layer: derived from the scoped history (never persisted).
+  const forecast = sharedMemo("m11", () => computeForecast(scopedData, today), [scopedData, today]);
   const derived = sharedMemo("m7", 
     () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring),
     [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring]
@@ -256,6 +259,7 @@ export function useCommandCenter() {
     workRelevanceIndex,
     scopedMentionEvents,
     scoring,
+    forecast,
     dailyCommandCompletedWorkItemIds,
     dailyCommandSkippedWorkItemIds,
     dailyCommandBlockedWorkItemIds,

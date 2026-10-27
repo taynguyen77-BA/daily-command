@@ -55,6 +55,7 @@ const FILES = [
   "./43-score-v2.test.mts",
   "./44-conversation.test.mts",
   "./45-learning.test.mts",
+  "./46-forecast.test.mts",
 ];
 
 for (const file of FILES) await import(file);

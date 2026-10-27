@@ -2,6 +2,7 @@
 // Every rule here is an explicit, reproducible combination of fields — no model call.
 
 import { daysBetween } from "./scoring";
+import { computeForecast } from "./forecast";
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, Risk, RiskRuleId, WorkItem } from "./types";
 
@@ -69,6 +70,7 @@ function detectRisksUncached(
   dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
 ): Risk[] {
   const out: Risk[] = [];
+  const forecast = computeForecast(data, today);
   // V2.18 §7 — ruleId/identityKey are now part of AutoRiskInput, so every call site below is
   // compile-time required to stamp a real identity, not just documented to do so.
   const push = (r: AutoRiskInput) => out.push({ ...r, id: riskId(out.length.toString()), detectedAt: today, status: "open", auto: true });
@@ -164,6 +166,25 @@ function detectRisksUncached(
         confidence: 0.7,
         sourceWorkItemIds: [item.id],
         ruleId: "scope-unstable",
+        identityKey: item.id,
+      });
+    }
+
+    // R11 (P3.4): FORECAST — similar resolved tickets say this one is likely to miss its due date. Only with a due date
+    // and enough history (never a guess); the identity is the item, so it dedupes across syncs and goes away when Done.
+    const slip = forecast.byTicket.get(item.key)?.slip;
+    if (slip && slip.level === "HIGH") {
+      push({
+        projectId: item.projectId,
+        title: `${client} — ${item.key} likely to slip`,
+        level: slip.remainingDays < 0 ? "HIGH" : "MEDIUM",
+        reason: `Forecast: ${slip.explanation}`,
+        evidence: [`Due date: ${item.dueDate}`, `Forecast (n = ${slip.n}): typical remaining ${slip.expectedRemainingP50} day(s), slow case ${slip.expectedRemainingP85} day(s)`],
+        potentialImpact: "The committed date is unlikely to hold at the usual pace.",
+        mitigation: "Re-plan, cut scope or tell the stakeholder before the date arrives.",
+        confidence: 0.6,
+        sourceWorkItemIds: [item.id],
+        ruleId: "forecast-slip",
         identityKey: item.id,
       });
     }

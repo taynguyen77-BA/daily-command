@@ -8,6 +8,7 @@ import type { CommandCenterData, ReleaseHealth } from "@/lib/command-center/type
 import { ArtifactEditor } from "./ArtifactEditor";
 import { ReleaseGoNoGo } from "./ReleaseGoNoGo";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
+import { ReleaseForecastLine } from "./ForecastCard";
 
 const READINESS_STYLE: Record<string, string> = {
   READY: "bg-green/15 text-green border-green/30",
@@ -31,6 +32,7 @@ function ReleaseCard({ release, data }: { release: ReleaseHealth; data: CommandC
         </button>
       </div>
       <p className="font-display text-sm text-text">{release.fixVersion}</p>
+      <ReleaseForecastLine fixVersion={release.fixVersion} />
       <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-text2 sm:grid-cols-3">
         <span>Completion: {release.completionPct}%</span>
         <span>Blocked: {release.blockedCount}</span>

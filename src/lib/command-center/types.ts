@@ -64,7 +64,8 @@ export type RiskRuleId =
   | "weak-test-coverage" // R7
   | "release-readiness" // R8
   | "production-no-followup" // R9
-  | "owner-overload"; // R10
+  | "owner-overload" // R10
+  | "forecast-slip"; // R11 — P3.4: similar tickets suggest this one will miss its due date
 
 export interface Risk {
   id: string;

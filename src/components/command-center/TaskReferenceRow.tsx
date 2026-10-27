@@ -20,6 +20,7 @@
 
 import { ConversationChipView } from "./ConversationChip";
 import { LearningChip } from "./LearningChip";
+import { ForecastChip } from "./ForecastCard";
 import React, { useState, useSyncExternalStore } from "react";
 import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
 import { formatExecutionRecord, resolveTicketExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
@@ -495,6 +496,7 @@ export function TaskReferenceRow({
         <>
           <ConversationChipView conversation={state.conversationByTicket?.[key]} today={todayLocalIso()} slaBusinessDays={state.blockerSlaBusinessDays} />
           <LearningChip ticketKey={key} />
+          <ForecastChip ticketKey={key} />
           {w?.sourceType === "jira" && (state.features.ticketBrief || (state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type))) ? (
             <>
               {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}

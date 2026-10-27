@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.43
+**Current version:** V2.44
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.43.0` ↔ `V2.43`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.44.0` ↔ `V2.44`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -160,6 +160,10 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 - **Meeting notes → actions** *(J4)*. In Meeting Mode, paste notes or a transcript: decisions, action items (owner, due resolved from words like "Friday"), explicit ticket status changes and open questions, on a review screen where you edit and untick. **Create selected** is the only thing that creates decisions/actions or changes a status (history surface `ai-meeting`); ticket keys that don't exist here are listed as dropped, never created.
 - **Command Bar commands** *(J5)*. Type e.g. "defer all WF mentions to Monday" or "block MCWS-123 waiting for API spec". The command becomes operations from an allow-list (**setTicketStatus**, **addAction** — nothing else exists); the app resolves targets against real data and shows a preview diff; **Apply** runs it through the normal store (surface `ai-command`). An unknown ticket, a project name matching several projects, an unclear date or a vague target gets a question back instead of a guess. Without AI, a deterministic parser handles the same simple forms.
 - **Weekly insights** *(J6)*. Weekly Review → **Generate**: 3–5 observations, each with its evidence, and 3 suggestions for next week, from this week's ticket history, blockers by person, skip reasons and AI-triage acceptance (numbers locked). Saved per week; Reports → Weekly can add them to its copies ("Include in copies").
+
+## Smarter guidance (V2.44)
+
+- **Delivery forecast** *(P3.4)*. Label **FORECAST**, always with its sample size; with too little history it says "insufficient history", never zero or a default. `forecast/lead-time.ts`: created → resolved over the last 90 days, P50/P85/P95 per (project, type), at least 8 samples, falling back to the project, then everything, else UNKNOWN. `aging.ts`: an open ticket older than the P85 of comparable tickets ("older than 85% of similar tickets"). `slip-risk.ts`: with a due date, days left vs the expected remaining time `max(0, P50 − age)` → HIGH (overdue, or even the typical remaining time does not fit), MEDIUM (only the slow P85 case does not fit), LOW. `release-forecast.ts`: for a fix version, the remaining open tickets against the project's weekly throughput over the last 8 weeks (a seeded resample, so the same inputs always give the same dates) → P50–P85 completion dates and the probability of landing by the target (a project's entered release date, else the latest due date among its tickets). Shown in the Executive view and on each Release Health card, as a quiet chip on ticket rows (older than P85, or slip HIGH), as one line in the Weekly Review and as a new auto-risk rule **forecast-slip** (identity = the ticket, so it dedupes across syncs and disappears when the ticket is Done). Nothing is persisted. *Caveat shown in the UI:* only synced tickets exist (open + recently closed; the first sync is limited to the last 90 days). Aging compares the ticket's age since creation with the resolved lead times (time-in-status history of resolved tickets is not stored).
 
 ## Smarter ranking (V2.43)
 

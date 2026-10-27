@@ -9,6 +9,7 @@ import type { CommandCenterData, MemoryEvent, PersonalFocusResult } from "@/lib/
 import { DriftBadge, FocusCategoryBadge, HeatBadge, LoopHealthBadge, Panel, RiskBadge, SectionHeading, TrajectoryBadge, TrustLabel } from "./ui";
 import { ProjectStory } from "./ProjectStory";
 import { useCommandCenter } from "./use-command-center";
+import { ForecastCard } from "./ForecastCard";
 
 export function ExecutiveView({
   data,
@@ -26,11 +27,11 @@ export function ExecutiveView({
   // V2.4 §16-17 — `data` here is already the caller's scoped `filteredData`; `state` is
   // only needed for the full (unscoped) project list, to name any project the current scope
   // excludes, and for the scope label itself.
-  const { state, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
+  const { state, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring } = useCommandCenter();
   const view = buildExecutiveView(data, derived.scores, derived.risks, derived.changes, derived.kpis.overdue);
   const confidenceColor = view.deliveryConfidence >= 80 ? "text-green" : view.deliveryConfidence >= 60 ? "text-yellow" : view.deliveryConfidence >= 40 ? "text-orange" : "text-red";
 
-  const portfolio = computeProjectAttentionMap(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const portfolio = computeProjectAttentionMap(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
   const inScopeKeys = new Set(portfolio.map((p) => p.jiraKey));
   const excludedProjects = knownJiraProjects(state.data).filter((p) => !inScopeKeys.has(p.key));
 
@@ -49,6 +50,8 @@ export function ExecutiveView({
       <p className="text-xs text-text3">Scope: {formatScopeLabel(state.jiraProjectScope, state.data)}</p>
 
       <ProjectStory events={memoryEvents} />
+
+      <ForecastCard />
 
       {portfolio.length > 0 && (
         <section>

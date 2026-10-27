@@ -13,6 +13,7 @@ import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/comm
 import { TriageAcceptance } from "@/components/command-center/TriageAcceptance";
 import { WeeklyInsights } from "@/components/command-center/WeeklyInsights";
 import { LearningWeekly } from "@/components/command-center/LearningWeekly";
+import { WeeklyForecastLine } from "@/components/command-center/ForecastCard";
 
 function renderReview(text: string) {
   const sections = text.split(/(?=^## )/m).filter(Boolean);
@@ -119,6 +120,7 @@ export default function WeeklyReviewPage() {
       <SectionHeading level="page" title="Weekly Review" subtitle="Grounded in the daily snapshots this app has stored — never fabricated." />
 
       {state.features.smartTriage && <TriageAcceptance stats={state.aiTriageStats} today={getTodayIso()} />}
+      <WeeklyForecastLine />
       <LearningWeekly />
       <WeeklyInsights />
 
