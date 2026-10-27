@@ -7,10 +7,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "tsx scripts/tests/run.mts",
-    "check": "tsc --noEmit && eslint . && tsx scripts/tests/run.mts",
+    "check": "tsc --noEmit && eslint . --max-warnings 0 && tsx scripts/tests/run.mts",
     "smoke:jira": "tsx scripts/jira-smoke.mts"
   },
   "dependencies": {

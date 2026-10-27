@@ -57,7 +57,18 @@ export function AiDataProtectionPanel() {
       if (u && u.remainingToday > 0) clearAiBudgetStatus();
     });
   };
-  useEffect(refreshUsage, []);
+  useEffect(() => {
+    // Initial load: `usage` already starts as undefined (loading), so no synchronous reset here.
+    let cancelled = false;
+    void fetchAiUsage().then((u) => {
+      if (cancelled) return;
+      setUsage(u);
+      if (u && u.remainingToday > 0) clearAiBudgetStatus();
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // undefined = loading; "unknown" = not paired / older server; null = no server restriction.
   const [serverPolicy, setServerPolicy] = useState<string[] | null | "unknown" | undefined>(undefined);
   useEffect(() => {

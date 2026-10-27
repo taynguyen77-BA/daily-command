@@ -100,6 +100,10 @@ function useMorningBrief(pathname: string | null): boolean {
     // progress) until today's triage is done; otherwise D1's one-click brief as before.
     const morning = shouldOpenMorningMode({ enabled: state.features.morningMode, loaded: state.loaded, today, morningTriage: state.morningTriage });
     if (!shouldRunMorningBrief(state.features.morningBrief || morning, state.morningBriefLastRunDay, today) || pathname !== "/") return;
+    // One-shot orchestration on the first loaded render of the day (guarded by `ran`): it must flag
+    // the redirect before the landing-page effect runs, and it navigates in the same breath, so this
+    // is an event-like effect, not derived state.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setActive(true);
     morningBriefRedirected = true; // the landing-page redirect below must not override this
     commandCenterStore.recordMorningBriefRun(today);

@@ -7,7 +7,7 @@
 // app's identity in step with the member's verified Jira account.
 
 import { createContext, useContext, useEffect, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { setSessionAuthMode } from "@/lib/command-center/device-pairing";
 import { identityFromMe, loadMe, type Me } from "@/lib/command-center/auth/auth-client";
@@ -29,6 +29,7 @@ type Phase = { kind: "loading" } | { kind: "ready"; me: Me } | { kind: "message"
 
 export function AuthGate({ shell, children }: { shell: React.ReactNode; children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const onSignIn = pathname?.startsWith("/signin") ?? false;
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
@@ -46,7 +47,7 @@ export function AuthGate({ shell, children }: { shell: React.ReactNode; children
         }
         setPhase({ kind: "ready", me: r.me });
       } else if (r.kind === "signed-out") {
-        window.location.href = `/signin?callbackUrl=${encodeURIComponent(window.location.pathname + window.location.search)}`;
+        router.replace(`/signin?callbackUrl=${encodeURIComponent(window.location.pathname + window.location.search)}`);
       } else if (r.kind === "misconfigured") {
         setPhase({ kind: "message", title: "Setup Health — sign-in isn't fully configured", text: authMisconfiguredText(r.missing), missing: r.missing });
       } else if (r.kind === "off") {
@@ -58,7 +59,7 @@ export function AuthGate({ shell, children }: { shell: React.ReactNode; children
     return () => {
       cancelled = true;
     };
-  }, [onSignIn]);
+  }, [onSignIn, router]);
 
   // Keep the app's identity (mentions, assignments, reports) on the member's verified Jira account.
   const me = phase.kind === "ready" ? phase.me : null;

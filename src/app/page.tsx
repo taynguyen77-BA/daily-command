@@ -411,7 +411,7 @@ export default function CommandCenterPage() {
         </>
       )}
 
-      <TakeActionPanel item={selected?.item ?? null} result={selected?.result ?? null} onClose={() => setSelected(null)} />
+      <TakeActionPanel key={selected?.item.id ?? "none"} item={selected?.item ?? null} result={selected?.result ?? null} onClose={() => setSelected(null)} />
       {closingDay && <CloseDayModal onClose={() => setClosingDay(false)} />}
     </div>
   );

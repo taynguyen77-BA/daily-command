@@ -19,7 +19,8 @@ export function TakeActionPanel({
   const { state, store } = useCommandCenter();
   const [message, setMessage] = useState<string>("");
   const [messageMode, setMessageMode] = useState<"mock" | "claude" | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Callers key the panel by item id, so a new item is a fresh instance: it starts loading, with no stale message.
+  const [loading, setLoading] = useState(!!item);
   const [copied, setCopied] = useState(false);
   const [savedActionId, setSavedActionId] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -48,12 +49,7 @@ export function TakeActionPanel({
   }, [item]);
 
   useEffect(() => {
-    setMessage("");
-    setMessageMode(null);
-    setCopied(false);
-    setSavedActionId(null);
     if (!item) return;
-    setLoading(true);
     const why = result?.reasoning ?? "This item needs attention.";
     const provider = getAIProvider();
     provider

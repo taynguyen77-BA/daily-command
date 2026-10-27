@@ -726,10 +726,12 @@ export default function DataSettingsPage() {
   // visible rather than leaving a static "Syncing…" label the only sign of life.
   useEffect(() => {
     if (!syncing) return;
-    setSyncElapsedSec(0);
     const start = Date.now();
     const id = window.setInterval(() => setSyncElapsedSec(Math.floor((Date.now() - start) / 1000)), 1000);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      setSyncElapsedSec(0); // reset when the sync ends, so the next one starts from 0 (the counter is only shown while syncing)
+    };
   }, [syncing]);
 
   // aiTraceTick is a deliberate cache-buster: getRecentAiTrace() reads a module-level log
@@ -1672,7 +1674,7 @@ export default function DataSettingsPage() {
           Both API keys, when set, live only in the server environment — neither is ever sent to or readable by the browser.
           Slack notifications (V2.10) are implemented — see the Slack Notifications panel below. Confluence and email
           integrations are not implemented — that remains a future capability. Syncing from Jira is always read-only. Jira
-          write-back (a "Blocked" comment, the Flag, a Done transition) is {state.features.jiraWriteBack ? "ON" : "OFF"}: it is off
+          write-back (a &quot;Blocked&quot; comment, the Flag, a Done transition) is {state.features.jiraWriteBack ? "ON" : "OFF"}: it is off
           unless you enable it under Features, and then works only for allow-listed projects, with a preview and your confirmation
           for every write.
         </p>

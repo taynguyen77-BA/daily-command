@@ -50,6 +50,7 @@ const FILES = [
   "./39-fair-cron.test.mts",
   "./40-kv-seam.test.mts",
   "./41-jira-smoke.test.mts",
+  "./42-lint-cleanup.test.mts",
 ];
 
 for (const file of FILES) await import(file);

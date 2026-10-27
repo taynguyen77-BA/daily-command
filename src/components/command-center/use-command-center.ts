@@ -90,7 +90,7 @@ export function useCommandCenter() {
   // inherits scope automatically, with no per-engine `if focusedProject` checks (§11).
   const scopedData = sharedMemo("m1", 
     () => applyProjectScope(state.data, state.jiraProjectScope),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
     [state.data, state.jiraProjectScope]
   );
 
@@ -102,7 +102,7 @@ export function useCommandCenter() {
   // same "enforce scope at the data boundary" discipline scopedData itself follows.
   const scopedMentionEvents = sharedMemo("m2", 
     () => scopeMentionEvents(state.mentionEvents, scopedData.workItems, state.jiraProjectScope),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
     [state.mentionEvents, scopedData.workItems, state.jiraProjectScope]
   );
 
@@ -111,7 +111,7 @@ export function useCommandCenter() {
   // inherits it without configuring its own filter UI.
   const filteredData = sharedMemo("m3", 
     () => applyFilters(scopedData, state.filters, today),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
     [scopedData, state.filters, today]
   );
 
@@ -140,7 +140,7 @@ export function useCommandCenter() {
   const ticketInProgressWorkItemIds = ticketSets.inProgressIds;
   // The today-aware Daily Command maps (a projection of ticketWorkStates — see
   // store.ts selectDailyCommandMaps) for the engines that still take map-shaped input.
-  const dailyCommandMaps = sharedMemo("m6", () => selectDailyCommandMaps(state, today), [state.ticketWorkStates, today]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dailyCommandMaps = sharedMemo("m6", () => selectDailyCommandMaps(state, today), [state.ticketWorkStates, today]);  
 
   // V2.21 §3 — computed AFTER workRelevanceIndex/dailyCommandCompletedWorkItemIds (moved
   // below them, was above before V2.21) and now threaded through: `derived` is the shared
@@ -151,7 +151,7 @@ export function useCommandCenter() {
   // other surface already treated it as finished (see selectors.ts's own comment).
   const derived = sharedMemo("m7", 
     () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
     [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds]
   );
 
@@ -178,7 +178,7 @@ export function useCommandCenter() {
             state.features?.staleUseMyActivity ? state.myTicketActivity : undefined
           )
         : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
     [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, state.staleAssignedTicketThresholds, state.features?.staleUseMyActivity, state.myTicketActivity]
   );
 
@@ -227,7 +227,7 @@ export function useCommandCenter() {
       proactive
         ? computePersonalFocus(filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds)
         : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
     [filteredData, proactive, state.ownerName, today, state.personalIdentity?.accountId, workRelevanceIndex, derived.risks, scopedMentionEvents, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds]
   );
 

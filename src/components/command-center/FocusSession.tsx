@@ -177,7 +177,7 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
   const [createFollowUp, setCreateFollowUp] = useState(false);
   const [elapsedMs, setElapsedMs] = useState(0);
   const dialogRef = useRef<HTMLDivElement>(null);
-  const startedAtRef = useRef<number>(Date.now());
+  const startedAtRef = useRef<number>(0); // set when a session starts (effect below); no clock read during render
 
   useEffect(() => {
     dialogRef.current?.focus();
@@ -193,6 +193,7 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
   const relatedDecision = candidate.decisionId ? state.data.decisions.find((d) => d.id === candidate.decisionId) : undefined;
   const relatedAction = candidate.actionId ? state.data.actions.find((a) => a.id === candidate.actionId) : undefined;
 
+  const hasAttentionItem = !!attentionItem;
   const handlers = useMemo(
     () =>
       focusSessionHandlers(
@@ -200,7 +201,7 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
         { setSessionState, setRejection, setShowOutcomeCapture, setShowDecisionAssistant }
       ),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [planItemId, today, candidate, !!attentionItem, relatedAction?.relatedWorkItemId]
+    [planItemId, today, candidate, hasAttentionItem, relatedAction?.relatedWorkItemId]
   );
 
   useEffect(() => {
@@ -210,14 +211,16 @@ export function FocusSession({ candidate, planItemId, onClose }: { candidate: Pe
 
   // V2.0 §7 — a simple session-local elapsed-time display. This is a local UX aid, not a
   // persisted measured fact — never presented as anything more than "time in this session".
+  const running = sessionState === "IN_PROGRESS";
   useEffect(() => {
     startedAtRef.current = Date.now();
-    setElapsedMs(0);
-    if (sessionState !== "IN_PROGRESS") return;
+    if (!running) return;
     const interval = setInterval(() => setElapsedMs(Date.now() - startedAtRef.current), 1000);
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [planItemId, sessionState === "IN_PROGRESS"]);
+    return () => {
+      clearInterval(interval);
+      setElapsedMs(0); // a new session (or the end of this one) starts the display from 0
+    };
+  }, [planItemId, running]);
 
   // The capture panel closes either way: on success the outcome shows, on a rejection the
   // rejection notice does (nothing was written).

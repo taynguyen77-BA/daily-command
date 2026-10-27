@@ -35,7 +35,8 @@ export function JiraWriteBackDialog({
   const [flagOn, setFlagOn] = useState(!!flag);
   const [transitions, setTransitions] = useState<JiraTransition[] | null>(initialTransitions ?? null);
   const [transitionError, setTransitionError] = useState<string | null>(null);
-  const [transitionId, setTransitionId] = useState<string>("");
+  // "" until the user picks one; until then the preselected (preferred-name) transition is used.
+  const [pickedTransitionId, setTransitionId] = useState<string>("");
   const [remember, setRemember] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,11 +48,8 @@ export function JiraWriteBackDialog({
       else setTransitionError(r.error);
     });
   }, [transitionWrite, transitions, proposal.ticketKey]);
-  useEffect(() => {
-    if (!transitions || transitionWrite?.kind !== "transition") return;
-    const pre = preselectTransition(transitions, transitionWrite.preferredName);
-    if (pre) setTransitionId(pre.id);
-  }, [transitions, transitionWrite]);
+  const preselected = transitions && transitionWrite?.kind === "transition" ? preselectTransition(transitions, transitionWrite.preferredName) : undefined;
+  const transitionId = pickedTransitionId || preselected?.id || "";
 
   const chosenTransition = transitions?.find((t) => t.id === transitionId);
   const choices: JiraWriteChoices = {

@@ -62,10 +62,6 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
   const [triageKeys, setTriageKeys] = useState<string[]>([]);
   const [handled, setHandled] = useState<Record<string, Handled>>({});
   const [selected, setSelected] = useState(0);
-  useEffect(() => {
-    if (step === "triage") setTriageKeys(work.views.new.map((r) => r.ticketKey));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
   const titleOf = (key: string) => filteredData.workItems.find((w) => w.key === key)?.title;
 
   // V2.37 I2 — what Smart Triage sees per New item (the panel applies the allow-list).
@@ -121,10 +117,14 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
   // ----- Step 3: due re-checks (frozen at entry) -----
   const [rechecks, setRechecks] = useState<DueRecheck[]>([]);
   const [recheckDone, setRecheckDone] = useState<Record<string, string>>({});
-  useEffect(() => {
+  // Freeze each list at the moment its step is entered (so rows don't jump while acting): adjust
+  // state during render, guarded by the step it was last frozen for.
+  const [frozenForStep, setFrozenForStep] = useState<MorningStep | null>(null);
+  if (frozenForStep !== step) {
+    setFrozenForStep(step);
+    if (step === "triage") setTriageKeys(work.views.new.map((r) => r.ticketKey));
     if (step === "rechecks") setRechecks(dueRechecks(state.ticketWorkStates, today));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step]);
+  }
   function recheck(r: DueRecheck, kind: "reactivate" | "unblock" | "keep") {
     applyRecheck(store, r, kind);
     if (!recheckDone[r.ticketKey]) setHandledCount((n) => n + 1);

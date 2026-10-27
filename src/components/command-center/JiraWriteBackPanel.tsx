@@ -4,7 +4,7 @@
 // itself is switched on in Features (off by default); this panel holds the per-project
 // allow-list, the optional Flag, and which transition Done offers per project.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
 import { clearJiraWriteSecret, getJiraWriteSecret, isSessionAuthMode, setJiraWriteSecret } from "@/lib/command-center/device-pairing";
 import { Panel, SectionHeading } from "./ui";
@@ -19,15 +19,27 @@ export function JiraWriteBackPanel() {
   // G2 — the server gate decides what is really written.
   const [server, setServer] = useState<JiraWriteServerStatus | null | undefined>(undefined);
   const [secretDraft, setSecretDraft] = useState("");
-  const [devicePaired, setDevicePaired] = useState(false);
+  // The pairing secret lives in localStorage (no change events), so it is read as an external store;
+  // `pairTick` re-renders after this panel itself pairs/unpairs. Server render: not paired.
+  const [pairTick, setPairTick] = useState(0);
+  const devicePaired = useSyncExternalStore(
+    () => () => {},
+    () => {
+      void pairTick; // re-read after this panel changes the pairing
+      return !!getJiraWriteSecret();
+    },
+    () => false
+  );
   // L6 — team sign-in: writes use the member's own Jira account and an admin's permission; the
   // JIRA_WRITE_SECRET device pairing doesn't apply and isn't shown.
   const sessionMode = isSessionAuthMode();
   const refresh = () => {
-    setDevicePaired(!!getJiraWriteSecret());
+    setPairTick((n) => n + 1);
     void checkJiraWriteServerStatus().then(setServer);
   };
-  useEffect(refresh, []);
+  useEffect(() => {
+    void checkJiraWriteServerStatus().then(setServer);
+  }, []);
 
   return (
     <Panel className="p-5" data-jira-write-back-settings>

@@ -173,6 +173,8 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 
 - **Live Jira smoke** *(P2.5)*. `npm run smoke:jira` (read-only; needs `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `SMOKE_ACCOUNT_ID`; optional `SMOKE_ISSUE_KEY`, `SMOKE_MENTION_ISSUE_KEY`, `JIRA_TIMEZONE_OFFSET_MINUTES`) checks auth, search paging + fields, JQL date formats (ISO rejected? finding F1), comment order (F4), the timezone offset, the mention search and rate-limit headers, prints a Markdown table and writes `smoke-report.json` (gitignored); exit 1 on any FAIL. It sends only GETs and `POST /search/jql`, never prints the token, and is not part of `npm test` or CI.
 
+- **Lint** *(P2.6)*. `npm run lint` and CI now run `eslint . --max-warnings 0`: unused directives removed, the `set-state-in-effect` / purity warnings fixed by deriving state, freezing lists during render, keying `TakeActionPanel` per item and resetting timers in effect cleanups (one explained directive remains in `Nav.tsx`), and the signed-out redirect uses the router.
+
 ### Choosing a scheduler
 
 | Scheduler | Cadence | Cost | Failure modes | Who gets alerted |
