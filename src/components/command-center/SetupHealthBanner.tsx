@@ -118,7 +118,7 @@ export function computeSetupHealthRows(
     rows.push({
       id: "cross-device",
       text: !cd.status.configured
-        ? "Cross-device sync is not configured on the server (APP_STATE_SECRET + Vercel KV) — Complete/Skip/Block and reviews stay on this device only."
+        ? "Cross-device sync is not configured on the server (APP_STATE_SECRET + a Redis/KV store) — Complete/Skip/Block and reviews stay on this device only."
         : "This device is no longer paired for cross-device sync — re-pair it in Data & Settings, or changes made here won't reach your other devices.",
     });
   }
@@ -176,7 +176,7 @@ export function computeSetupHealthRows(
     rows.push({
       id: "notify",
       text: notifyStatus.configured
-        ? "Real-time notify only works while a browser tab is open — configure PERSONAL_JIRA_ACCOUNT_ID + Vercel KV for unattended (cron-driven) notifications too."
+        ? "Real-time notify only works while a browser tab is open — configure PERSONAL_JIRA_ACCOUNT_ID + a Redis/KV store (Vercel KV or Upstash) for unattended (cron-driven) notifications too."
         : "Slack notifications aren't configured at all (SLACK_WEBHOOK_URL) — you won't get mention/assignment alerts, even with a tab open.",
     });
   }

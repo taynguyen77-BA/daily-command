@@ -211,8 +211,7 @@ function CrossDeviceSyncPanel() {
 
       {status !== null && !status.configured && (
         <p className="mt-3 text-xs text-text3">
-          Not available on this deployment. Set <span className="font-mono">APP_STATE_SECRET</span> and Vercel KV (
-          <span className="font-mono">KV_REST_API_URL</span>/<span className="font-mono">KV_REST_API_TOKEN</span>) server-side, then redeploy —
+          Not available on this deployment. Set <span className="font-mono">APP_STATE_SECRET</span> and a Redis/KV store (<span className="font-mono">KV_REST_API_URL</span>/<span className="font-mono">KV_REST_API_TOKEN</span> or <span className="font-mono">UPSTASH_REDIS_REST_URL</span>/<span className="font-mono">UPSTASH_REDIS_REST_TOKEN</span>) server-side, then redeploy —
           see the README&apos;s Cross-Device Sync section.
         </p>
       )}

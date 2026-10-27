@@ -94,7 +94,7 @@ Everything above (V2.10's Slack notifications) only ever fires from a **browser 
 | Variable | Purpose | Behavior when missing |
 | --- | --- | --- |
 | `PERSONAL_JIRA_ACCOUNT_ID` | Server-only, separate from the browser-stored `PersonalIdentity.accountId` (a cron invocation has no browser session to read that from) — the Jira `accountId` the server-side check tracks assignments/mentions for. | The cron has nothing to do and makes no Jira call (V2.39 — it no longer runs the full sync either; see Review fixes (V2.39)). |
-| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | Auto-injected by Vercel once a KV store is created and linked to the project (Storage tab → Create Database → KV → Connect to Project). Required by `@vercel/kv`. | Same as above — a complete no-op; `notify-store.ts`'s `get()` returns `null` and `set()` does nothing, never an error. |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN`, or `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` (V2.42) | A Redis/KV store: auto-injected by Vercel's KV integration, or by a Redis (Upstash) integration from the Marketplace. The first complete pair wins (`KV_*` first, so existing deployments are unaffected); a half-set pair is ignored. Used through `@upstash/redis` in `src/lib/server/kv-client.ts` only. | Same as above — a complete no-op; `notify-store.ts`'s `get()` returns `null` and `set()` does nothing, never an error. |
 
 Both are required together for the server-side path to activate; either one missing means an install behaves byte-for-byte like it did before this pass (Option A/client-only). Data & Settings' "Slack Notifications" panel and `GET /api/command-center/notify` both report the live `serverSideNotifyActive` boolean so you can confirm which mode is actually active.
 
@@ -102,7 +102,7 @@ Both are required together for the server-side path to activate; either one miss
 
 The very first cron run after this is configured for an install that already has real assigned/mentioned tickets sitting in Jira establishes a baseline and sends **zero** Slack messages — the exact same cold-start discipline V2.10.1 already guarantees for the browser-tab path, now also true for the unattended one. A cron run's own connectivity failure (Jira unreachable, credentials rejected, etc.) never corrupts the persisted baseline — the next successful run still diffs correctly against the last known-good state.
 
-**A note on `@vercel/kv`:** as of this pass, npm reports `@vercel/kv` as deprecated in favor of installing a Redis integration (Upstash) directly from the Vercel Marketplace — Vercel's own KV product is being wound down, though existing KV stores and this package's `KV_REST_API_URL`/`KV_REST_API_TOKEN` contract still work today (the package is a thin wrapper over `@upstash/redis` reading those same two variables). This pass follows the dev prompt's explicit instruction to use `@vercel/kv` and those exact dashboard steps; if Vercel fully sunsets the old dashboard flow before you set this up, installing `@upstash/redis` directly against the same two env var names is a same-shape, one-file (`src/lib/server/notify-store.ts`) swap — the `NotifyStateStore` interface this pass introduced was written specifically so that swap never needs to touch `cron-notify.ts` or any caller.
+**KV client (V2.42):** `@vercel/kv` (deprecated, a thin wrapper over Upstash Redis) was replaced by `@upstash/redis` behind the single `src/lib/server/kv-client.ts` seam. Key names, value shapes, TTLs and the "unconfigured = silent no-op" behaviour are unchanged, and the old `KV_REST_API_*` variable names keep working; a Redis integration's `UPSTASH_REDIS_REST_*` names work too.
 
 ### Cross-Device Sync (V2.15, optional)
 
@@ -168,6 +168,8 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 - **Server check health** *(P2.2)*. Every cron run writes a small heartbeat to KV (global key, or per member with sign-in on). `GET /api/command-center/health` returns `{ version, kv, jira, slack, ai, cron, schedule }` (booleans and the cron judgement only, never a secret or URL); the header shows a **Server check** chip (OK / late / stale / never / failed) and Setup Health a row, both from one selector. `LATE` = last run older than 2x `CRON_EXPECTED_MINUTES` (default 20), `STALE` = older than 6x. **With only the once-a-day Vercel cron set `CRON_EXPECTED_MINUTES=1440`.** `.github/workflows/sync.yml` now calls `GET` (the method that runs notify + daily snapshot; it used to send a POST, i.e. a discarded full sync), warns visibly when its secrets are missing and tries to re-enable itself.
 
 - **Fair team cron** *(P2.3)*. With sign-in on, each member's last-processed time is kept in KV and the cron plans members longest-waiting first (never-processed first, ties by user id), so a time-budget skip no longer starves the members at the end of the list. A failed member still counts as processed. The cron response and heartbeat report `oldestWaitMinutes`. Single-user mode is unchanged.
+
+- **KV client** *(P2.4)*. See the KV note under Server-Side Real-Time Notify: `@upstash/redis` replaces `@vercel/kv`; both variable-name pairs are accepted.
 
 ### Choosing a scheduler
 

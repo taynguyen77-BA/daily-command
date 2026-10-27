@@ -48,6 +48,7 @@ const FILES = [
   "./37-jira-resilience.test.mts",
   "./38-cron-health.test.mts",
   "./39-fair-cron.test.mts",
+  "./40-kv-seam.test.mts",
 ];
 
 for (const file of FILES) await import(file);

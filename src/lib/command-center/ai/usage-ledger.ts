@@ -139,8 +139,9 @@ const KV_PREFIX = "daily-command:ai-usage:v1:";
 class KvUsageLedger implements UsageLedger {
   readonly storage = "kv" as const;
   // Loaded lazily so nothing imports the KV client unless KV is actually configured.
+  // P2.4 — through the one seam (server/kv-client.ts), never the Redis SDK directly.
   private async kv() {
-    return (await import("@vercel/kv")).kv;
+    return (await import("../../server/kv-client")).vercelKv;
   }
   async append(record: AiUsageRecord): Promise<void> {
     const kv = await this.kv();

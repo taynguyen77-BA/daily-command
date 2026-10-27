@@ -7,7 +7,6 @@ import { createInMemoryKv } from "../../src/lib/command-center/kv/kv";
 import { createInMemoryHeartbeatStore } from "../../src/lib/command-center/health";
 import { runCronForMembers, type CronMemberPlan } from "../../src/lib/command-center/jira/cron-tick";
 import { createInMemoryNotifyStore } from "../../src/lib/command-center/notify-state";
-import type { FetchLike } from "../../src/lib/command-center/jira/http";
 import { ok } from "./harness.mts";
 import { strictJiraFake } from "./helpers.mts";
 

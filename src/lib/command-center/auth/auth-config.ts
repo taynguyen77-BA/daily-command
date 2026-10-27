@@ -9,6 +9,7 @@
 // naming exactly what is missing (`missing`), and the sign-in page shows the same list.
 
 import { createHash } from "node:crypto";
+import { isKvConfigured } from "../kv/kv-credentials";
 
 export type Env = Record<string, string | undefined>;
 
@@ -72,12 +73,12 @@ export function readAuthSettings(env: Env): AuthSettings {
     dev: env.AUTH_DEV_LOGIN?.trim().toLowerCase() === "true" && !production,
   };
   const adminEmails = list(env.AUTH_ADMIN_EMAILS);
-  const kvConfigured = has(env, "KV_REST_API_URL") && has(env, "KV_REST_API_TOKEN");
+  const kvConfigured = isKvConfigured(env);
   if (enabled) {
     if (!has(env, "NEXTAUTH_SECRET")) missing.unshift("NEXTAUTH_SECRET");
     if (!providers.google && !providers.azureAd && !providers.atlassian && !providers.dev) missing.push(PROVIDER_REQUIREMENT);
     if (adminEmails.length === 0) missing.push("AUTH_ADMIN_EMAILS");
-    if (production && !kvConfigured) missing.push("KV_REST_API_URL + KV_REST_API_TOKEN (Vercel KV)");
+    if (production && !kvConfigured) missing.push("KV_REST_API_URL + KV_REST_API_TOKEN (Vercel KV), or UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN");
     if (has(env, "AUTH_ENCRYPTION_KEY") && !parseKeyMaterial(env.AUTH_ENCRYPTION_KEY!)) missing.push("AUTH_ENCRYPTION_KEY (must be 32 bytes, base64 or hex)");
   }
   return {

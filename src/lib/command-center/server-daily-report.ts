@@ -19,6 +19,7 @@ import { normalizeIssues } from "./jira/normalize";
 import { fetchAssignedIssuesWith, fetchMentionedIssuesWith, type FetchLike } from "./jira/http";
 import type { JiraConnectionConfig, JiraIssue } from "./jira/types";
 import { collectCurrentMentions } from "./cron-notify";
+import { isKvConfigured } from "./kv/kv-credentials";
 import { keysToFetch, nextRetryKeys } from "./notify-baseline";
 import type { ReportTicket } from "./reports";
 import type { ServerDailyStandup } from "./server-report-merge";
@@ -62,7 +63,7 @@ const MAX_SEEN_MENTIONS = 2000;
 /** Whether the cron should write server-side reports: KV (to store them), APP_STATE_SECRET (so
  *  the client can fetch them) and a personal Jira account (whose work they describe). */
 export function isServerDailyReportConfigured(env: Record<string, string | undefined>): boolean {
-  return !!env.KV_REST_API_URL && !!env.KV_REST_API_TOKEN && !!env.APP_STATE_SECRET?.trim() && !!env.PERSONAL_JIRA_ACCOUNT_ID?.trim();
+  return isKvConfigured(env) && !!env.APP_STATE_SECRET?.trim() && !!env.PERSONAL_JIRA_ACCOUNT_ID?.trim();
 }
 
 /** The user's local calendar date at `now`, given Jira's configured UTC offset (minutes). */

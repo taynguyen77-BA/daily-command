@@ -14,6 +14,7 @@
 // never touches.
 
 import { z } from "zod";
+import { isKvConfigured } from "./kv/kv-credentials";
 import { bearerMatches } from "./secure-compare";
 import type {
   Action,
@@ -89,7 +90,7 @@ export interface AppStateStore {
  *  boundary and be shared by both app-state-store.ts's real KV-backed store and the
  *  /api/command-center/state route's own "is sync available at all" check. */
 export function isAppStateStoreConfigured(): boolean {
-  return !!process.env.KV_REST_API_URL && !!process.env.KV_REST_API_TOKEN;
+  return isKvConfigured(process.env);
 }
 
 /** Testability — the test suite must stay fully offline; this fake is what's actually

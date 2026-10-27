@@ -6,6 +6,8 @@
 // imported directly by the offline test suite, matching this app's existing FetchLike
 // dependency-injection discipline (see jira/http.ts) rather than a mocked module boundary.
 
+import { isKvConfigured } from "./kv/kv-credentials";
+
 export interface PersonalNotifyState {
   assignedIssueKeys: string[];
   notifiedCommentIds: string[];
@@ -28,7 +30,7 @@ export interface NotifyStateStore {
  *  crash on notify-store.ts's `import "server-only"` (the same reason getJiraConfig() itself,
  *  which DOES return real secret values, stays server-only and is never imported by tests). */
 export function isNotifyStoreConfigured(): boolean {
-  return !!process.env.KV_REST_API_URL && !!process.env.KV_REST_API_TOKEN;
+  return isKvConfigured(process.env);
 }
 
 /** Testability (§1 Task 1) — the test suite must stay fully offline; this fake is what's
