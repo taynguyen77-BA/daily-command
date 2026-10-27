@@ -29,6 +29,8 @@ import { AskFollowUp } from "@/components/command-center/AskFollowUp";
 import { MorningMode } from "@/components/command-center/MorningMode";
 import { triageDoneLabel } from "@/lib/command-center/morning-mode";
 import { blockedFollowUpRows } from "@/lib/command-center/blocker-followup";
+import { NeedsNudgeGroup } from "@/components/command-center/ConversationChip";
+import { rowMatchesConversationFilter, type ConversationFilter } from "@/lib/command-center/conversation-filter";
 
 const VIEW_SUBTITLE: Record<MyWorkView, string> = {
   today: "Your focus, today's plan, and every open ticket that is yours — ranked by its strongest signal.",
@@ -53,6 +55,7 @@ function MyWorkInner() {
   const morningRequested = searchParams?.get("mode") === "morning";
   const [morning, setMorning] = useState(morningRequested);
   const [view, setView] = useState<MyWorkView>(isMyWorkView(requested) ? requested : "today");
+  const [conversationFilter, setConversationFilter] = useState<ConversationFilter>("all");
   const { state, store, work, review, now, personalFocus, proactive, today, filteredData, scopedMentionEvents, dailyCommandMaps } = useMyWork();
   const myActionItemsOnly = state.myActionItemsOnly.myDay;
   const reviewedRef = useRef(false);
@@ -157,7 +160,8 @@ function MyWorkInner() {
       )}
     </li>
   );
-  const visibleRows = myActionItemsOnly && view === "today" ? rows.filter((r) => r.sources.includes("assigned") || r.sources.includes("recorded") || isMyActionItem(personalFocus?.candidates.find((c) => c.ticketKey === r.ticketKey)?.relation)) : rows;
+  const baseRows = myActionItemsOnly && view === "today" ? rows.filter((r) => r.sources.includes("assigned") || r.sources.includes("recorded") || isMyActionItem(personalFocus?.candidates.find((c) => c.ticketKey === r.ticketKey)?.relation)) : rows;
+  const visibleRows = baseRows.filter((r) => rowMatchesConversationFilter(conversationFilter, state.conversationByTicket?.[r.ticketKey]));
 
   const viewBody = (
     <>
@@ -227,10 +231,29 @@ function MyWorkInner() {
         ))}
       </div>
 
+      {Object.values(state.conversationByTicket ?? {}).some((c) => c.awaiting !== "NONE") && (
+        <label className="flex w-fit items-center gap-2 text-xs text-text2" data-conversation-filter>
+          Conversation
+          <select value={conversationFilter} onChange={(e) => setConversationFilter(e.target.value as ConversationFilter)} className="rounded border border-border bg-surface2 px-2 py-1 text-xs" aria-label="Filter by whose turn it is">
+            <option value="all">All tickets</option>
+            <option value="awaiting-me">Awaiting you</option>
+            <option value="awaiting-them">Awaiting them</option>
+          </select>
+        </label>
+      )}
+
       {triageOn && triageRows.length > 0 && (
         <p className="hidden text-xs text-text3 md:block" data-triage-help>
           Keyboard: <kbd>J</kbd>/<kbd>K</kbd> move · <kbd>C</kbd> done · <kbd>S</kbd> skip · <kbd>B</kbd> block{view === "new" ? <> · <kbd>R</kbd> reviewed</> : null} · <kbd>O</kbd> open in Jira
         </p>
+      )}
+
+      {view === "today" && (
+        <NeedsNudgeGroup
+          conversation={state.conversationByTicket}
+          tickets={filteredData.workItems.filter((w) => w.status !== "Done").map((w) => ({ key: w.key, title: w.title, dueDate: w.dueDate, sourceUrl: w.sourceUrl }))}
+          slaBusinessDays={state.blockerSlaBusinessDays}
+        />
       )}
 
       {view === "today" && work.overdueBlockers.length > 0 && (

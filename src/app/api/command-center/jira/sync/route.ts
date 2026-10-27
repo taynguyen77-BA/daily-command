@@ -11,6 +11,7 @@ import {
   fetchJiraIssues,
   fetchJiraProjects,
   fetchMentionedIssues,
+  fetchRecentComments,
   getConfiguredProjectKeys,
   getJiraConfig,
   getJiraTimezoneOffsetMinutes,
@@ -34,6 +35,9 @@ import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/no
 import { buildMentionEvents, latestOwnCommentAt, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
 import { mapWithConcurrency, jiraBootstrapDays, jiraConcurrency } from "@/lib/command-center/jira/concurrency";
+import type { ConversationState } from "@/lib/command-center/conversation-state";
+import { conversationEnrichCap } from "@/lib/command-center/conversation-select";
+import { enrichConversations } from "@/lib/command-center/conversation-enrich";
 import { buildIncrementalSinceParam, computeResumeCursor, isValidCustomFieldId, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
 import type { MentionEvent, MyTicketActivity } from "@/lib/command-center/types";
@@ -57,6 +61,9 @@ const syncRequestSchema = z.object({
   // B4 — the sprint custom field id configured in Data & Settings. Only Jira's own
   // `customfield_<digits>` form is accepted; anything else is ignored, never sent to Jira.
   sprintFieldId: z.string().optional(),
+  // P3.2 — the client's cached conversation states as key -> the issue `updated` they were computed at (no content):
+  // a ticket whose `updated` is unchanged is not fetched again.
+  conversationCache: z.record(z.string(), z.string()).refine((o) => Object.keys(o).length <= 2000, "too many cached tickets").optional(),
 });
 
 /**
@@ -256,6 +263,33 @@ export async function POST(req: Request) {
     }
   }
 
+  // P3.2 — whose turn is it? At most CONVERSATION_ENRICH_CAP open tickets (mine / blocked / mentioned / top-scored),
+  // newest 5 comments each, through the bounded pool and inside the same deadline. Tickets whose `updated` is
+  // unchanged since the client's cached state cost no request. No accountId -> skipped entirely, as before.
+  let conversation: Record<string, ConversationState> | undefined;
+  if (requestAccountId) {
+    const issueUpdatedByKey = Object.fromEntries(issuesResult.data.map((i) => [i.key, i.fields.updated]));
+    const assigneeByKey = new Map(issuesResult.data.map((i) => [i.key, i.fields.assignee?.accountId]));
+    const enriched = await enrichConversations(
+      {
+        workItems,
+        accountId: requestAccountId,
+        mentionedKeys: Array.from(new Set((mentionEvents ?? []).map((e) => e.issueKey))),
+        topKeys: prioritizedKeys,
+        issueUpdatedByKey,
+        cache: parsedRequest.data.conversationCache,
+        cap: conversationEnrichCap(),
+        assigneeByKey,
+        today,
+        concurrency,
+        deadline,
+      },
+      (key) => fetchRecentComments(config, key, 5)
+    );
+    if (enriched.requested + enriched.skipped > 0) conversation = enriched.conversation;
+    skippedEnrichments += enriched.skipped;
+  }
+
   // P2.1 — the core issue data is always returned; enrichments that did not start before the
   // deadline make the sync `partial` (they are best-effort and refreshed by the next sync).
   const partial = skippedEnrichments > 0;
@@ -270,6 +304,7 @@ export async function POST(req: Request) {
     scopeChangesDetected,
     projectsDiscovered: jiraProjects.length,
     mentionEvents,
+    ...(conversation ? { conversation } : {}),
     ...(requestAccountId ? { myActivity } : {}),
     warnings,
     // V2.18 §5 — truncated/resumeSinceIso let the client (store.ts syncJira) distinguish a

@@ -5,6 +5,7 @@
 
 import type { CommandCenterData, JiraErrorKind, JiraProjectScopeMode, JiraProjectSummary, MentionEvent, MyTicketActivity } from "../types";
 import type { DataSourceProvider, DataSourceSyncResult } from "./types";
+import type { ConversationState } from "../conversation-state";
 import { pairedAuthHeader } from "../device-pairing";
 
 const SYNC_ENDPOINT = "/api/command-center/jira/sync";
@@ -14,7 +15,7 @@ const PROJECTS_ENDPOINT = "/api/command-center/jira/projects";
 export class JiraDataSource implements DataSourceProvider {
   readonly type = "jira" as const;
 
-  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string }): Promise<DataSourceSyncResult> {
+  async sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string; conversationCache?: Record<string, string> }): Promise<DataSourceSyncResult> {
     try {
       // V2.15 §2 — when this device is paired for Cross-Device Sync, its paired secret is
       // also accepted by jira/sync/route.ts's POST auth gate (see sync-auth.ts), so a manual
@@ -46,6 +47,7 @@ export class JiraDataSource implements DataSourceProvider {
         truncated?: boolean;
         resumeSinceIso?: string;
         partial?: boolean;
+        conversation?: Record<string, ConversationState>;
       };
       if (!res.ok || !json.ok) {
         return { ok: false, error: json.error ?? `Jira sync failed (${res.status}).`, errorKind: json.errorKind ?? "unknown" };
@@ -69,6 +71,7 @@ export class JiraDataSource implements DataSourceProvider {
         truncated: json.truncated,
         resumeSinceIso: json.resumeSinceIso,
         ...(json.partial ? { partial: true } : {}),
+        ...(json.conversation ? { conversation: json.conversation } : {}),
       };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Network error contacting the sync endpoint.", errorKind: "network-error" };

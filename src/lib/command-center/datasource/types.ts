@@ -3,6 +3,7 @@
 // the app. The store only ever talks to a DataSourceProvider, never to Jira or the import
 // pipeline directly.
 
+import type { ConversationState } from "../conversation-state";
 import type { CommandCenterData, DataSourceType, JiraErrorKind, JiraProjectScopeMode, MentionEvent, MyTicketActivity } from "../types";
 
 export interface DataSourceSyncResult {
@@ -37,9 +38,11 @@ export interface DataSourceSyncResult {
   resumeSinceIso?: string;
   /** P2.1 — core data complete, optional enrichments skipped at the time budget. */
   partial?: boolean;
+  /** P3.2 — freshly computed conversation states (only tickets that were re-fetched). */
+  conversation?: Record<string, ConversationState>;
 }
 
 export interface DataSourceProvider {
   readonly type: DataSourceType;
-  sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string }): Promise<DataSourceSyncResult>;
+  sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string; conversationCache?: Record<string, string> }): Promise<DataSourceSyncResult>;
 }

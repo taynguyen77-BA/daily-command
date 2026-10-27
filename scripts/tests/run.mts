@@ -53,6 +53,7 @@ const FILES = [
   "./41-jira-smoke.test.mts",
   "./42-lint-cleanup.test.mts",
   "./43-score-v2.test.mts",
+  "./44-conversation.test.mts",
 ];
 
 for (const file of FILES) await import(file);

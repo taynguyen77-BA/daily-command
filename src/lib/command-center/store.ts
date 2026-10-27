@@ -123,6 +123,7 @@ import { mergeServerDailyReports, type ServerDailyStandup } from "./server-repor
 import { planJiraComment, planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import { buildAwaitingMe } from "./awaiting-me";
+import { asConversationStates, conversationCacheOf, mergeConversationStates, type ConversationState } from "./conversation-store";
 import type { ScoreModel, ScoringOptions } from "./scoring";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
@@ -352,6 +353,9 @@ export interface StoreState {
   commandCenterCompact: boolean;
   /** P3.1 — priority scoring model. Absent/unknown = "v2" (the default); "v1" is the original model. */
   scoringModel?: ScoreModel;
+  /** P3.2 — derived "whose turn" per ticket, from the newest comments of the tickets that matter. Device-local and
+   *  never synced across devices; pruned to open tickets on every sync. */
+  conversationByTicket?: Record<string, ConversationState>;
   /** F1 — the Action Plan time budget, shared with Morning Mode's plan step. */
   timeBudgetMinutes?: TimeBudget;
   /** F2 — a blocked ticket older than this many business days is overdue (default 2). */
@@ -1027,6 +1031,7 @@ function parseStoredStateRaw(raw: string): StoreState {
       morningTriage: asMorningTriage(parsed.morningTriage),
       commandCenterCompact: parsed.commandCenterCompact === true,
       scoringModel: parsed.scoringModel === "v1" ? "v1" : "v2",
+      conversationByTicket: asConversationStates(parsed.conversationByTicket),
       timeBudgetMinutes: TIME_BUDGETS.includes(parsed.timeBudgetMinutes as TimeBudget) ? (parsed.timeBudgetMinutes as TimeBudget) : undefined,
       blockerSlaBusinessDays: asBlockerSla(parsed.blockerSlaBusinessDays),
       jiraWriteBack: asJiraWriteBackSettings(parsed.jiraWriteBack),
@@ -1920,7 +1925,7 @@ export class CommandCenterStore {
 
   /** P3.1 — the scoring carrier every snapshot/score computed by the store uses. */
   private scoringOptions(): ScoringOptions {
-    return { model: this.state.scoringModel ?? "v2", awaitingMeByKey: buildAwaitingMe(this.state.mentionEvents, this.state.mentionReplies) };
+    return { model: this.state.scoringModel ?? "v2", awaitingMeByKey: buildAwaitingMe(this.state.mentionEvents, this.state.mentionReplies, this.state.conversationByTicket) };
   }
 
   /** F1 — the Action Plan time budget, also Morning Mode's plan budget. */
@@ -2230,6 +2235,7 @@ export class CommandCenterStore {
         projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
         accountId: this.state.personalIdentity?.accountId,
         ...(this.state.jiraSprintFieldId ? { sprintFieldId: this.state.jiraSprintFieldId } : {}),
+        ...(this.state.personalIdentity?.accountId ? { conversationCache: conversationCacheOf(this.state.conversationByTicket) } : {}),
       });
     } catch (err) {
       // JiraDataSource already converts its own failures into { ok: false }, but a rejected
@@ -2463,6 +2469,7 @@ export class CommandCenterStore {
           ? [...this.state.memoryEvents, ...newMemoryEvents, ...jiraCompletionEvents].slice(-MAX_MEMORY_EVENTS)
           : this.state.memoryEvents,
       mentionEvents: mergedMentionEvents,
+      conversationByTicket: mergeConversationStates(this.state.conversationByTicket, result.conversation, merged.workItems),
       workItemCalibrationHistory,
       syncLog: [...this.state.syncLog, { startedAt, completedAt: observedAt, recordsCreated: created, recordsUpdated: updated, newTicketKeys }].slice(-MAX_SYNC_LOG),
       knownTicketFirstSeen: capKnownTickets(knownFirstSeen),

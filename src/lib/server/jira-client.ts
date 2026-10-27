@@ -12,6 +12,7 @@ import {
   fetchAssignedIssuesWith,
   fetchIssueChangelogWith,
   fetchIssueCommentsWith,
+  fetchRecentCommentsWith,
   fetchJiraIssuesWith,
   fetchJiraProjectsWith,
   fetchMentionedIssuesWith,
@@ -88,6 +89,11 @@ export async function fetchMentionedIssues(config: JiraConnectionConfig, account
 /** V2.10 §2 — best-effort, called only for the small set of issue keys fetchMentionedIssues returned. */
 export async function fetchIssueComments(config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraComment[]>> {
   return fetchIssueCommentsWith(fetch, config, issueKey);
+}
+
+/** P3.2 — the newest few comments of one issue (conversation state). */
+export async function fetchRecentComments(config: JiraConnectionConfig, issueKey: string, limit?: number): Promise<JiraFetchResult<JiraComment[]>> {
+  return fetchRecentCommentsWith(fetch, config, issueKey, limit);
 }
 
 /** V2.13 §2 — "which issues are currently assigned to this account?", a narrow targeted

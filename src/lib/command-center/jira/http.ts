@@ -575,6 +575,32 @@ export async function fetchIssueCommentsWith(fetchImpl: FetchLike, config: JiraC
 }
 
 /**
+ * P3.2 — the newest `limit` comments of one issue in ONE request (`orderBy=-created`, newest first),
+ * for the conversation state (whose turn is it). Unlike fetchIssueCommentsWith it never paginates:
+ * the state only needs the latest few comments.
+ */
+export async function fetchRecentCommentsWith(fetchImpl: FetchLike, config: JiraConnectionConfig, issueKey: string, limit: number = 5): Promise<JiraFetchResult<JiraComment[]>> {
+  const http = withJiraRetry(fetchImpl);
+  try {
+    const res = await http(buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, { maxResults: String(limit), orderBy: "-created" }), {
+      headers: { Authorization: authHeader(config), Accept: "application/json" },
+    });
+    if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+    }
+    const parsed = jiraCommentPageResponseSchema.safeParse(json);
+    if (!parsed.success) return { ok: false, error: "Jira's comment response did not match the expected shape.", errorKind: "malformed-response" };
+    return { ok: true, data: parsed.data.comments, recordsFetched: parsed.data.comments.length };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
+  }
+}
+
+/**
  * V1.8 §5, updated V2.2.2 — cursor-based pagination capability probe. `POST
  * /rest/api/3/search/jql` is now fetchJiraIssuesWith's PRIMARY endpoint (Atlassian has
  * sunset the classic `GET /rest/api/3/search` on Jira Cloud — it now answers 410 Gone); the

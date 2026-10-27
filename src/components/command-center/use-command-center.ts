@@ -38,8 +38,8 @@ function sendSlackNotifications(data: CommandCenterData, previousAttentionState:
 }
 
 /** P3.1 — the ScoringOptions carrier for a store state: the model (absent = v2) and the unanswered-mention signal. */
-export function scoringOptionsFor(model: ScoreModel | undefined, mentionEvents: StoreState["mentionEvents"], mentionReplies: StoreState["mentionReplies"]): ScoringOptions {
-  return { model: model ?? "v2", awaitingMeByKey: buildAwaitingMe(mentionEvents, mentionReplies) };
+export function scoringOptionsFor(model: ScoreModel | undefined, mentionEvents: StoreState["mentionEvents"], mentionReplies: StoreState["mentionReplies"], conversation?: StoreState["conversationByTicket"]): ScoringOptions {
+  return { model: model ?? "v2", awaitingMeByKey: buildAwaitingMe(mentionEvents, mentionReplies, conversation) };
 }
 
 /** Every one of the ~45 components that calls useCommandCenter() used to run the full
@@ -157,7 +157,7 @@ export function useCommandCenter() {
   // inflating "needs attention"/"overdue" counts and generating fresh risks even though every
   // other surface already treated it as finished (see selectors.ts's own comment).
   // P3.1 — the scoring model (a device setting; default v2) and the "waiting on me" signal v2 reads.
-  const scoring = sharedMemo("m10", () => scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies), [state.scoringModel, scopedMentionEvents, state.mentionReplies]);
+  const scoring = sharedMemo("m10", () => scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket), [state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket]);
   const derived = sharedMemo("m7", 
     () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring),
     [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring]
@@ -302,7 +302,7 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const dailyCommandSkippedWorkItemIds = ticketSets.skippedIds;
   const dailyCommandBlockedWorkItemIds = ticketSets.blockedIds;
   const dailyCommandPausedWorkItemIds = ticketSets.pausedIds;
-  const scoring = scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies);
+  const scoring = scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket);
   const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
   const proactive = state.loaded
     ? computeProactiveIntelligence(

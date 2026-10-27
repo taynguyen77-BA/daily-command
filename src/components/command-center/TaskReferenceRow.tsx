@@ -18,6 +18,7 @@
 // state + callbacks, renderable with react-dom/server in the offline test suite), and
 // TaskReferenceRow / TaskRow is the thin connected wrapper.
 
+import { ConversationChipView } from "./ConversationChip";
 import React, { useState, useSyncExternalStore } from "react";
 import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
 import { formatExecutionRecord, resolveTicketExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
@@ -490,12 +491,15 @@ export function TaskReferenceRow({
       newReason={newReason}
       stacked={stacked}
       extra={
-        w?.sourceType === "jira" && (state.features.ticketBrief || (state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type))) ? (
-          <>
-            {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}
-            {state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type) && <BaRequirementCheck ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}
-          </>
-        ) : undefined
+        <>
+          <ConversationChipView conversation={state.conversationByTicket?.[key]} today={todayLocalIso()} slaBusinessDays={state.blockerSlaBusinessDays} />
+          {w?.sourceType === "jira" && (state.features.ticketBrief || (state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type))) ? (
+            <>
+              {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}
+              {state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type) && <BaRequirementCheck ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}
+            </>
+          ) : undefined}
+        </>
       }
     />
   );
