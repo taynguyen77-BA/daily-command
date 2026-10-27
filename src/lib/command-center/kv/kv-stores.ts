@@ -9,12 +9,14 @@ import type { NotifyStateStore, PersonalNotifyState } from "../notify-state";
 import type { ServerReportState, ServerReportStore } from "../server-daily-report";
 import type { JiraWriteLogStore, JiraWriteServerLogEntry } from "../jira/write-gate";
 import type { CronHeartbeat, HeartbeatStore } from "../health";
+import type { CronProgressStore } from "../cron-progress";
 import { scopedKey } from "../auth/auth-config";
 import type { KvLike } from "./kv";
 
 export const APP_STATE_KEY = "daily-command:app-state:v1";
 export const NOTIFY_STATE_KEY = "daily-command:personal-notify-state:v1";
 export const SERVER_REPORTS_KEY = "daily-command:server-reports:v1";
+export const CRON_PROGRESS_KEY = "daily-command:cron-progress:v1";
 export const CRON_HEARTBEAT_KEY = "daily-command:cron-heartbeat:v1";
 export const JIRA_WRITE_LOG_KEY = "daily-command:jira-write-log:v1";
 export const JIRA_WRITE_LOG_MAX_ENTRIES = 1000;
@@ -81,6 +83,11 @@ function blobStore<T>(kv: KvLike, key: string, isValid: (v: unknown) => v is T) 
 export const createKvAppStateStore = (kv: KvLike, uid?: string): AppStateStore => blobStore(kv, scopedKey(APP_STATE_KEY, uid), isValidAppState);
 export const createKvNotifyStore = (kv: KvLike, uid?: string): NotifyStateStore => blobStore(kv, scopedKey(NOTIFY_STATE_KEY, uid), isValidNotifyState);
 export const createKvHeartbeatStore = (kv: KvLike, uid?: string): HeartbeatStore => blobStore(kv, scopedKey(CRON_HEARTBEAT_KEY, uid), isValidHeartbeat);
+/** P2.3 — a member's last-processed time ({ at }), one small blob per member. */
+export function createKvCronProgressStore(kv: KvLike, uid?: string): CronProgressStore {
+  const inner = blobStore<{ at: string }>(kv, scopedKey(CRON_PROGRESS_KEY, uid), (v): v is { at: string } => typeof v === "object" && v !== null && typeof (v as { at?: unknown }).at === "string");
+  return { get: async () => (await inner.get())?.at ?? null, set: (at) => inner.set({ at }) };
+}
 export const createKvServerReportStore = (kv: KvLike, uid?: string): ServerReportStore => blobStore(kv, scopedKey(SERVER_REPORTS_KEY, uid), isValidReportState);
 
 /** Append-only (rpush, trimmed to the newest entries, never edited). */

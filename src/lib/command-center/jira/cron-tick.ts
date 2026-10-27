@@ -11,6 +11,7 @@ import { runServerSideNotifyCheck } from "../cron-notify";
 import { runServerDailySnapshot, type ServerReportStore } from "../server-daily-report";
 import type { NotifyStateStore } from "../notify-state";
 import { buildHeartbeat, type HeartbeatStore } from "../health";
+import { oldestWaitMinutes, type CronProgressStore } from "../cron-progress";
 import type { FetchLike } from "./http";
 import type { JiraConnectionConfig } from "./types";
 
@@ -111,6 +112,8 @@ export interface CronMemberPlan {
   notify: boolean;
   snapshot: boolean;
   timezoneOffsetMinutes?: number;
+  /** P2.3 — when this member was last processed (set by planCronMembers when fairness is on). */
+  lastProcessedAt?: string;
 }
 
 export interface CronMembersResult {
@@ -120,6 +123,8 @@ export interface CronMembersResult {
   failures: { uid: string; email: string; error: string }[];
   /** Members with nothing to do here (no usable Jira connection), or not reached in time. */
   skipped: { uid: string; email: string; reason: string }[];
+  /** P2.3 — minutes the longest-waiting member (with a known last run) had waited when this run started. */
+  oldestWaitMinutes?: number;
 }
 
 export async function runCronForMembers(
@@ -134,11 +139,15 @@ export async function runCronForMembers(
     clock?: () => number;
     /** P2.2 — per-member heartbeat store (omitted: none written). */
     heartbeatFor?: (uid: string) => HeartbeatStore | undefined;
+    /** P2.3 — per-member last-processed store (omitted: not persisted). */
+    progressFor?: (uid: string) => CronProgressStore | undefined;
   }
 ): Promise<CronMembersResult> {
   const clock = deps.clock ?? Date.now;
   const started = clock();
   const result: CronMembersResult = { ok: true, cron: true, usersProcessed: 0, failures: [], skipped: [] };
+  const waited = oldestWaitMinutes(plans, deps.now());
+  if (waited !== undefined) result.oldestWaitMinutes = waited;
   for (const plan of plans) {
     if (clock() - started > deps.budgetMs) {
       result.skipped.push({ uid: plan.uid, email: plan.email, reason: "Not reached within this run's time budget." });
@@ -151,12 +160,18 @@ export async function runCronForMembers(
         webhookUrl: plan.webhookUrl,
         timezoneOffsetMinutes: plan.timezoneOffsetMinutes,
         snapshot: plan.snapshot && stores.reportStore ? { store: stores.reportStore, now: deps.now(), timezoneOffsetMinutes: plan.timezoneOffsetMinutes, snapshotHourLocal: deps.snapshotHourLocal } : undefined,
-      }, deps.heartbeatFor?.(plan.uid), clock);
+      }, deps.heartbeatFor?.(plan.uid), clock, { oldestWaitMinutes: waited });
       result.usersProcessed++;
       if (tick.warnings.length > 0) result.failures.push({ uid: plan.uid, email: plan.email, error: tick.warnings.join(" ") });
     } catch (err) {
       result.usersProcessed++;
       result.failures.push({ uid: plan.uid, email: plan.email, error: err instanceof Error ? err.message : "unknown error" });
+    }
+    // P2.3 — processed (even if it failed): it goes to the back of the queue. Best-effort.
+    try {
+      await deps.progressFor?.(plan.uid)?.set(deps.now().toISOString());
+    } catch {
+      // a progress write failure never fails the run
     }
   }
   return result;

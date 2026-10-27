@@ -167,6 +167,8 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 
 - **Server check health** *(P2.2)*. Every cron run writes a small heartbeat to KV (global key, or per member with sign-in on). `GET /api/command-center/health` returns `{ version, kv, jira, slack, ai, cron, schedule }` (booleans and the cron judgement only, never a secret or URL); the header shows a **Server check** chip (OK / late / stale / never / failed) and Setup Health a row, both from one selector. `LATE` = last run older than 2x `CRON_EXPECTED_MINUTES` (default 20), `STALE` = older than 6x. **With only the once-a-day Vercel cron set `CRON_EXPECTED_MINUTES=1440`.** `.github/workflows/sync.yml` now calls `GET` (the method that runs notify + daily snapshot; it used to send a POST, i.e. a discarded full sync), warns visibly when its secrets are missing and tries to re-enable itself.
 
+- **Fair team cron** *(P2.3)*. With sign-in on, each member's last-processed time is kept in KV and the cron plans members longest-waiting first (never-processed first, ties by user id), so a time-budget skip no longer starves the members at the end of the list. A failed member still counts as processed. The cron response and heartbeat report `oldestWaitMinutes`. Single-user mode is unchanged.
+
 ### Choosing a scheduler
 
 | Scheduler | Cadence | Cost | Failure modes | Who gets alerted |

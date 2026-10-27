@@ -22,6 +22,7 @@ import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runCronForMembers, runCronTickWithHeartbeat } from "@/lib/command-center/jira/cron-tick";
 import { createHeartbeatStore } from "@/lib/server/heartbeat-store";
+import { createCronProgressStore } from "@/lib/server/cron-progress-store";
 import { buildHeartbeat } from "@/lib/command-center/health";
 import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
 import { effectiveAccountId } from "@/lib/command-center/auth/principal";
@@ -345,11 +346,12 @@ async function memberCron(req: Request) {
   if (principal.kind !== "cron") return NextResponse.json({ ok: false, error: "The cron run needs Authorization: Bearer <CRON_SECRET>.", errorKind: "cron-unauthorized" }, { status: 401 });
   const directory = userDirectory();
   if (!directory) return NextResponse.json({ ok: false, error: "Sign-in needs Vercel KV.", errorKind: "not-configured" }, { status: 503 });
-  const { plans, skipped } = await planCronMembers(directory, process.env, encryptionKey(), authSettings().allowSharedJira);
+  const { plans, skipped } = await planCronMembers(directory, process.env, encryptionKey(), authSettings().allowSharedJira, (uid) => createCronProgressStore(uid).get());
   const budget = Number(process.env.CRON_RUN_BUDGET_MS);
   const result = await runCronForMembers(fetch, plans, {
     storesFor: (uid) => ({ notifyStore: isNotifyStoreConfigured() ? createNotifyStore(uid) : undefined, reportStore: isAppStateStoreConfigured() ? createServerReportStore(uid) : undefined }),
     heartbeatFor: (uid) => createHeartbeatStore(uid),
+    progressFor: (uid) => createCronProgressStore(uid),
     now: () => new Date(),
     snapshotHourLocal: reportSnapshotHourLocal(process.env),
     budgetMs: Number.isFinite(budget) && budget > 0 ? budget : 50_000,
