@@ -18,12 +18,16 @@
 import type { CommandCenterData, DailySnapshot, MentionEvent, WorkItem } from "./types";
 import { emptyData } from "./types";
 import { detectNewAssignments } from "./assignment-detection";
-import { buildMentionEvents, commentMentionsAccount } from "./jira/mentions";
+import { buildMentionEvents, commentMentionsAccount, latestOwnCommentAt } from "./jira/mentions";
 import { normalizeIssues } from "./jira/normalize";
 import { fetchAssignedIssuesWith, fetchIssueCommentsWith, fetchMentionedIssuesWith, type FetchLike } from "./jira/http";
 import type { JiraConnectionConfig } from "./jira/types";
 import { postToSlack, renderSlackText, type SlackFetchLike, type SlackSignal } from "../server/slack-notify";
 import type { NotifyStateStore, PersonalNotifyState } from "./notify-state";
+import { asNotifyPrefs, isDefaultNotifyPrefs, type NotifyPrefsStore } from "./notify-prefs";
+import type { DigestStore } from "./notify-digest";
+import { runSmartDelivery } from "./cron-notify-smart";
+import type { TicketUrgencyFacts } from "./notify-severity";
 import { jiraConcurrency, mapWithConcurrency } from "./jira/concurrency";
 import { fifoUnion, keysToFetch, MAX_NOTIFIED_COMMENT_IDS, nextRetryKeys } from "./notify-baseline";
 
@@ -87,9 +91,10 @@ export async function collectCurrentMentions(
   today: string,
   /** P2.1 — bounded concurrency (default JIRA_CONCURRENCY / 5); keys not started before `deadline` count as failed (retried next run). */
   options: { concurrency?: number; deadline?: number } = {}
-): Promise<{ entries: MentionEntry[]; failedKeys: string[] }> {
+): Promise<{ entries: MentionEntry[]; failedKeys: string[]; /** P3.5 — my newest own comment per issue among the comments fetched. */ ownLastAt: Record<string, string> }> {
   const entries: MentionEntry[] = [];
   const failed = new Set<string>();
+  const ownLastAt: Record<string, string> = {};
   const run = await mapWithConcurrency(
     issueKeys,
     options.concurrency ?? jiraConcurrency(),
@@ -100,6 +105,8 @@ export async function collectCurrentMentions(
           failed.add(issueKey);
           return;
         }
+        const own = latestOwnCommentAt(commentsResult.data, accountId);
+        if (own) ownLastAt[issueKey] = own;
         for (const comment of commentsResult.data) {
           if (!commentMentionsAccount(comment.body, accountId)) continue;
           const [event] = buildMentionEvents(issueKey, [comment], accountId, { baseUrl: config.baseUrl, today });
@@ -114,7 +121,7 @@ export async function collectCurrentMentions(
     { deadline: options.deadline }
   );
   for (const i of run.skipped) failed.add(issueKeys[i]);
-  return { entries, failedKeys: issueKeys.filter((k) => failed.has(k)) };
+  return { entries, failedKeys: issueKeys.filter((k) => failed.has(k)), ownLastAt };
 }
 
 export async function runServerSideNotifyCheck(
@@ -129,10 +136,15 @@ export async function runServerSideNotifyCheck(
     webhookUrl?: string | null;
     /** P1.1 — the Jira user's UTC offset, for the `updated >=` cursor (see jira/http.ts formatJqlSince). */
     timezoneOffsetMinutes?: number;
+    /** P3.5 — smart notifications: preferences + digest queue. Omitted = exactly the V2.41 behaviour (every signal at once). */
+    smart?: { prefsStore: NotifyPrefsStore; digestStore: DigestStore };
+    /** Injectable clock (tests). */
+    now?: Date;
   } = {}
 ): Promise<ServerNotifyCheckResult> {
   const previous = await store.get();
-  const today = new Date().toISOString().slice(0, 10);
+  const nowDate = options.now ?? new Date();
+  const today = nowDate.toISOString().slice(0, 10);
 
   // ----- Fetch current assigned issues (targeted JQL — never the full sync dataset) -----
   const assignedResult = await fetchAssignedIssuesWith(fetchImpl, config, accountId);
@@ -153,7 +165,7 @@ export async function runServerSideNotifyCheck(
     return { notified: 0, skippedColdStart: false, error: mentionedResult.error };
   }
   // Issues whose comments failed last run are fetched again even if the JQL no longer matches them.
-  const { entries: mentionEntries, failedKeys } = await collectCurrentMentions(fetchImpl, config, accountId, keysToFetch(mentionedResult.data.map((i) => i.key), previous?.retryIssueKeys), today);
+  const { entries: mentionEntries, failedKeys, ownLastAt } = await collectCurrentMentions(fetchImpl, config, accountId, keysToFetch(mentionedResult.data.map((i) => i.key), previous?.retryIssueKeys), today);
   const retryIssueKeys = nextRetryKeys(previous?.retryIssueKeys, failedKeys);
   const currentMentionCommentIds = mentionEntries.map((e) => e.commentId);
 
@@ -164,7 +176,7 @@ export async function runServerSideNotifyCheck(
     await store.set({
       assignedIssueKeys: currentAssignedKeys,
       notifiedCommentIds: fifoUnion([], currentMentionCommentIds, MAX_NOTIFIED_COMMENT_IDS),
-      lastCheckedAtIso: new Date().toISOString(),
+      lastCheckedAtIso: nowDate.toISOString(),
       ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
     });
     return { notified: 0, skippedColdStart: true };
@@ -198,7 +210,35 @@ export async function runServerSideNotifyCheck(
   // every signal accumulated while unconfigured.
   const webhookUrl = "webhookUrl" in options ? options.webhookUrl : process.env.SLACK_WEBHOOK_URL;
   let delivered = 0;
-  if (webhookUrl) {
+
+  // P3.5 — smart notifications. Used only when the caller supplied the stores AND the user's preferences are not the
+  // defaults, or a digest is already waiting; otherwise the loop below is exactly the V2.41 behaviour.
+  const prefs = options.smart ? asNotifyPrefs(await options.smart.prefsStore.get()) : null;
+  const digest = options.smart ? await options.smart.digestStore.get() : null;
+  let smartExtras: Pick<PersonalNotifyState, "pendingMentions" | "escalatedCommentIds"> = {};
+  if (options.smart && prefs && digest && webhookUrl && (!isDefaultNotifyPrefs(prefs) || digest.items.length > 0)) {
+    const now = nowDate;
+    const facts = new Map<string, TicketUrgencyFacts & { url?: string }>();
+    for (const w of [...assignedWorkItems, ...normalizeIssues(mentionedResult.data, { baseUrl: config.baseUrl, today }).workItems]) facts.set(w.key, { priority: w.priority, dueDate: w.dueDate, blocked: w.blocked, ...(w.sourceUrl ? { url: w.sourceUrl } : {}) });
+    const run = await runSmartDelivery({
+      prefs,
+      digest,
+      now,
+      offsetMinutes: options.timezoneOffsetMinutes ?? 0,
+      today,
+      assignments: newAssignments,
+      mentions: newMentionEntries,
+      facts,
+      previousPending: previous.pendingMentions ?? [],
+      previousEscalated: previous.escalatedCommentIds ?? [],
+      ownLastAt,
+      fetchOwnLast: async (keys) => (await collectCurrentMentions(fetchImpl, config, accountId, keys, today)).ownLastAt,
+      send: async (text) => (await postToSlack(webhookUrl, text, slackFetchImpl)).ok,
+    });
+    delivered = run.delivery.delivered;
+    await options.smart.digestStore.set(run.delivery.digest);
+    smartExtras = { ...(run.pendingMentions.length > 0 ? { pendingMentions: run.pendingMentions } : {}), ...(run.escalatedCommentIds.length > 0 ? { escalatedCommentIds: run.escalatedCommentIds } : {}) };
+  } else if (webhookUrl) {
     for (const signal of signals) {
       if ((await postToSlack(webhookUrl, renderSlackText(signal), slackFetchImpl)).ok) delivered++;
     }
@@ -209,8 +249,9 @@ export async function runServerSideNotifyCheck(
     // A UNION, not this run's ids: a run only sees issues updated since the last check, so
     // overwriting would forget older mentions and re-announce them when their ticket is touched again.
     notifiedCommentIds: fifoUnion(previous.notifiedCommentIds, currentMentionCommentIds, MAX_NOTIFIED_COMMENT_IDS),
-    lastCheckedAtIso: new Date().toISOString(),
+    lastCheckedAtIso: nowDate.toISOString(),
     ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
+    ...smartExtras,
   };
   await store.set(nextState);
 

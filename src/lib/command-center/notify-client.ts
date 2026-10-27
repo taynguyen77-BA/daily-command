@@ -5,6 +5,7 @@
 // header comment).
 
 import { pairedAuthHeader } from "./device-pairing";
+import type { NotifyPrefs } from "./notify-prefs";
 
 const NOTIFY_ENDPOINT = "/api/command-center/notify";
 
@@ -15,6 +16,8 @@ export interface SlackNotifyStatus {
   // (both PERSONAL_JIRA_ACCOUNT_ID and Vercel KV configured). use-command-center.ts's notify
   // effect uses this to defer entirely to the server path rather than double-sending.
   serverSideNotifyActive?: boolean;
+  /** P3.5 — the saved notification preferences (defaults when none were saved). */
+  prefs?: NotifyPrefs;
 }
 
 export async function checkSlackNotifyStatus(): Promise<SlackNotifyStatus> {
@@ -90,5 +93,15 @@ export async function sendReportToSlack(text: string): Promise<SlackTestNotifica
     return (await res.json()) as SlackTestNotificationResult;
   } catch {
     return { sent: false, reason: "network-error" };
+  }
+}
+
+/** P3.5 — save the notification preferences (validated on the server, stored for the cron). */
+export async function saveNotifyPrefs(prefs: NotifyPrefs): Promise<{ saved: boolean; reason?: string }> {
+  try {
+    const res = await fetch(NOTIFY_ENDPOINT, { method: "POST", headers: { "Content-Type": "application/json", ...pairedAuthHeader() }, body: JSON.stringify({ prefs }) });
+    return (await res.json()) as { saved: boolean; reason?: string };
+  } catch {
+    return { saved: false, reason: "network-error" };
   }
 }

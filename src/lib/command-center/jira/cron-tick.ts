@@ -10,6 +10,8 @@
 import { runServerSideNotifyCheck } from "../cron-notify";
 import { runServerDailySnapshot, type ServerReportStore } from "../server-daily-report";
 import type { NotifyStateStore } from "../notify-state";
+import type { NotifyPrefsStore } from "../notify-prefs";
+import type { DigestStore } from "../notify-digest";
 import { buildHeartbeat, type HeartbeatStore } from "../health";
 import { oldestWaitMinutes, type CronProgressStore } from "../cron-progress";
 import type { FetchLike } from "./http";
@@ -36,6 +38,8 @@ export async function runCronTick(
     snapshot?: { store: ServerReportStore; now: Date; timezoneOffsetMinutes?: number; snapshotHourLocal?: number };
     /** P1.1 — the Jira user's UTC offset for the notify step's `updated >=` cursor. */
     timezoneOffsetMinutes?: number;
+    /** P3.5 — notification preferences + digest queue (omitted: the V2.41 behaviour). */
+    smartNotify?: { prefsStore: NotifyPrefsStore; digestStore: DigestStore };
   }
 ): Promise<CronTickResult> {
   // A failure in either step never fails the other, and never corrupts persisted state (both
@@ -47,6 +51,7 @@ export async function runCronTick(
       const result = await runServerSideNotifyCheck(fetchImpl, config, accountId, steps.notifyStore, undefined, {
         ...("webhookUrl" in steps ? { webhookUrl: steps.webhookUrl } : {}),
         timezoneOffsetMinutes: steps.timezoneOffsetMinutes,
+        ...(steps.smartNotify ? { smart: steps.smartNotify } : {}),
       });
       notified = result.notified;
       if (result.error) warnings.push(`Server-side notify check failed: ${result.error}`);
@@ -139,6 +144,8 @@ export async function runCronForMembers(
     clock?: () => number;
     /** P2.2 — per-member heartbeat store (omitted: none written). */
     heartbeatFor?: (uid: string) => HeartbeatStore | undefined;
+    /** P3.5 — per-member notification preferences + digest queue (omitted: none). */
+    smartNotifyFor?: (uid: string) => { prefsStore: NotifyPrefsStore; digestStore: DigestStore } | undefined;
     /** P2.3 — per-member last-processed store (omitted: not persisted). */
     progressFor?: (uid: string) => CronProgressStore | undefined;
   }
@@ -159,6 +166,7 @@ export async function runCronForMembers(
         notifyStore: plan.notify ? stores.notifyStore : undefined,
         webhookUrl: plan.webhookUrl,
         timezoneOffsetMinutes: plan.timezoneOffsetMinutes,
+        ...(deps.smartNotifyFor?.(plan.uid) ? { smartNotify: deps.smartNotifyFor(plan.uid) } : {}),
         snapshot: plan.snapshot && stores.reportStore ? { store: stores.reportStore, now: deps.now(), timezoneOffsetMinutes: plan.timezoneOffsetMinutes, snapshotHourLocal: deps.snapshotHourLocal } : undefined,
       }, deps.heartbeatFor?.(plan.uid), clock, { oldestWaitMinutes: waited });
       result.usersProcessed++;

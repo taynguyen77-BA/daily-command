@@ -25,6 +25,18 @@
 import { NextResponse } from "next/server";
 import { renderSlackText, postToSlack, slackSignalSchema } from "@/lib/server/slack-notify";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
+import { asNotifyPrefs, notifyPrefsSchema } from "@/lib/command-center/notify-prefs";
+// server-only (KV): loaded when needed, so the offline tests can still import this route's helpers.
+const prefsStoreFor = async (uid?: string) => (await import("@/lib/server/notify-prefs-store")).createNotifyPrefsStore(uid);
+/** The saved preferences, or the defaults when nothing was saved / no KV is configured (then the store is never even loaded). */
+const savedPrefs = async (uid?: string) => {
+  if (!isNotifyStoreConfigured()) return asNotifyPrefs(null);
+  try {
+    return asNotifyPrefs(await (await prefsStoreFor(uid)).get());
+  } catch {
+    return asNotifyPrefs(null); // the store could not be loaded/read: the defaults, never an error on a status GET
+  }
+};
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
 import { jiraConfigForUser, slackWebhookForUser } from "@/lib/command-center/auth/connections";
@@ -51,6 +63,8 @@ const notifyRequestSchema = z.union([
   z.object({ test: z.literal(true) }),
   z.object({ signals: z.array(slackSignalSchema) }),
   z.object({ report: z.object({ text: z.string().min(1).max(40000) }) }),
+  // P3.5 — notification preferences (validated, stored in KV, read by the cron).
+  z.object({ prefs: notifyPrefsSchema }),
 ]);
 
 /** V2.13 §3 — true iff both PERSONAL_JIRA_ACCOUNT_ID and the KV env vars are present
@@ -82,12 +96,12 @@ export async function GET(req: Request) {
     if (p.kind === "error") return principalError(p);
     if (p.kind === "user") {
       const m = await memberNotify(p.user);
-      return NextResponse.json({ configured: !!m.webhookUrl, channelLabel: m.channelLabel, serverSideNotifyActive: m.serverSideNotifyActive });
+      return NextResponse.json({ configured: !!m.webhookUrl, channelLabel: m.channelLabel, serverSideNotifyActive: m.serverSideNotifyActive, prefs: await savedPrefs(p.user.uid) });
     }
   }
   const configured = !!process.env.SLACK_WEBHOOK_URL;
   const channelLabel = process.env.SLACK_CHANNEL_LABEL?.trim() || undefined;
-  return NextResponse.json({ configured, channelLabel, serverSideNotifyActive: isServerSideNotifyActive() });
+  return NextResponse.json({ configured, channelLabel, serverSideNotifyActive: isServerSideNotifyActive(), prefs: await savedPrefs() });
 }
 
 export async function POST(req: Request) {
@@ -103,20 +117,33 @@ export async function POST(req: Request) {
     return NextResponse.json({ sent: false, reason: "unauthorized" }, { status: auth.status });
   }
 
+  // The body is read once, up front, so a preferences save (which needs no webhook) can be told apart from the rest.
+  const rawText = await req.text();
+  let rawBody: unknown = {};
+  let bodyMalformed = false;
+  try {
+    if (rawText) rawBody = JSON.parse(rawText);
+  } catch {
+    bodyMalformed = true;
+  }
+
+  // P3.5 — saving notification preferences: same auth as everything above, validated, stored for the cron to read.
+  if (!bodyMalformed && typeof rawBody === "object" && rawBody !== null && "prefs" in rawBody) {
+    const prefs = z.object({ prefs: notifyPrefsSchema }).safeParse(rawBody);
+    if (!prefs.success) return NextResponse.json({ saved: false, reason: "malformed-request" }, { status: 400 });
+    if (!isNotifyStoreConfigured()) return NextResponse.json({ saved: false, reason: "not-configured" });
+    await (await prefsStoreFor(member?.uid)).set(asNotifyPrefs(prefs.data.prefs));
+    return NextResponse.json({ saved: true });
+  }
+
   // L4 — sign-in on: the member's own destination (their webhook, the team one, or none).
   const webhookUrl = member ? (await memberNotify(member)).webhookUrl : process.env.SLACK_WEBHOOK_URL;
   if (!webhookUrl) {
     return NextResponse.json({ sent: false, reason: "not-configured" });
   }
 
-  let body: unknown = {};
-  try {
-    const text = await req.text();
-    if (text) body = JSON.parse(text);
-  } catch {
-    return NextResponse.json({ sent: false, reason: "malformed-request" }, { status: 400 });
-  }
-  const parsed = notifyRequestSchema.safeParse(body);
+  if (bodyMalformed) return NextResponse.json({ sent: false, reason: "malformed-request" }, { status: 400 });
+  const parsed = notifyRequestSchema.safeParse(rawBody);
   if (!parsed.success) {
     return NextResponse.json({ sent: false, reason: "malformed-request" }, { status: 400 });
   }
@@ -125,6 +152,8 @@ export async function POST(req: Request) {
     const result = await postToSlack(webhookUrl, TEST_NOTIFICATION_TEXT);
     return NextResponse.json({ sent: result.ok, reason: result.ok ? undefined : "delivery-failed", detail: result.detail });
   }
+
+  if ("prefs" in parsed.data) return NextResponse.json({ sent: false, reason: "malformed-request" }, { status: 400 }); // handled above
 
   if ("report" in parsed.data) {
     const result = await postToSlack(webhookUrl, parsed.data.report.text);

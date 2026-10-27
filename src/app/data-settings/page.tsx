@@ -4,6 +4,7 @@ import { listDailySyncSummaries } from "@/lib/command-center/sync-history";
 import type { FeatureToggles } from "@/lib/command-center/types";
 import { ScoringModelControl } from "@/components/command-center/ScoringModelControl";
 import { LearningPanel } from "@/components/command-center/LearningPanel";
+import { NotifyPrefsPanel } from "@/components/command-center/NotifyPrefsPanel";
 import { NAV_GROUPS } from "@/components/command-center/Nav";
 import { LANDING_PAGES } from "@/lib/command-center/store";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
@@ -139,6 +140,7 @@ function SlackNotificationsPanel() {
           {!testResult.sent && testResult.detail && <p className="mt-1 font-mono text-text3">{testResult.detail}</p>}
         </div>
       )}
+      <NotifyPrefsPanel status={status} />
     </Panel>
   );
 }

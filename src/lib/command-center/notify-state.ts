@@ -15,6 +15,10 @@ export interface PersonalNotifyState {
   /** P1.1 — issues whose comment fetch failed last run; fetched again next run even when the
    *  JQL no longer returns them (<= 50, FIFO). Optional: blobs written before V2.41 lack it. */
   retryIssueKeys?: string[];
+  /** P3.5 — mentions announced and not yet answered (<= 100); only kept when escalation is switched on. */
+  pendingMentions?: { commentId: string; issueKey: string; mentionedAt: string; author?: string; excerpt: string; url?: string }[];
+  /** P3.5 — comment ids already escalated, so each mention is re-announced at most once (<= 500, FIFO). */
+  escalatedCommentIds?: string[];
 }
 
 export interface NotifyStateStore {

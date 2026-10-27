@@ -23,6 +23,7 @@ import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runCronForMembers, runCronTickWithHeartbeat } from "@/lib/command-center/jira/cron-tick";
 import { createHeartbeatStore } from "@/lib/server/heartbeat-store";
+import { createDigestStore, createNotifyPrefsStore } from "@/lib/server/notify-prefs-store";
 import { createCronProgressStore } from "@/lib/server/cron-progress-store";
 import { buildHeartbeat } from "@/lib/command-center/health";
 import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
@@ -365,6 +366,7 @@ export async function GET(req: Request) {
   const result = await runCronTickWithHeartbeat(fetch, config, accountId, {
     notifyStore: isNotifyStoreConfigured() ? createNotifyStore() : undefined,
     timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(),
+    smartNotify: { prefsStore: createNotifyPrefsStore(), digestStore: createDigestStore() },
     snapshot: isServerDailyReportConfigured(process.env)
       ? { store: createServerReportStore(), now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) }
       : undefined,
@@ -386,6 +388,7 @@ async function memberCron(req: Request) {
   const result = await runCronForMembers(fetch, plans, {
     storesFor: (uid) => ({ notifyStore: isNotifyStoreConfigured() ? createNotifyStore(uid) : undefined, reportStore: isAppStateStoreConfigured() ? createServerReportStore(uid) : undefined }),
     heartbeatFor: (uid) => createHeartbeatStore(uid),
+    smartNotifyFor: (uid) => ({ prefsStore: createNotifyPrefsStore(uid), digestStore: createDigestStore(uid) }),
     progressFor: (uid) => createCronProgressStore(uid),
     now: () => new Date(),
     snapshotHourLocal: reportSnapshotHourLocal(process.env),
