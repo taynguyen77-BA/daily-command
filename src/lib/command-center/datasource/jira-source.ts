@@ -45,6 +45,7 @@ export class JiraDataSource implements DataSourceProvider {
         myActivity?: Record<string, MyTicketActivity>;
         truncated?: boolean;
         resumeSinceIso?: string;
+        partial?: boolean;
       };
       if (!res.ok || !json.ok) {
         return { ok: false, error: json.error ?? `Jira sync failed (${res.status}).`, errorKind: json.errorKind ?? "unknown" };
@@ -67,6 +68,7 @@ export class JiraDataSource implements DataSourceProvider {
         myActivity: json.myActivity,
         truncated: json.truncated,
         resumeSinceIso: json.resumeSinceIso,
+        ...(json.partial ? { partial: true } : {}),
       };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "Network error contacting the sync endpoint.", errorKind: "network-error" };

@@ -398,8 +398,9 @@ import { TODAY, makeJiraIssue, v22Blocked, v22Data, v22Dep, v22Derived, v22Norma
     // V2.10 §2 adds one legitimate new real fetch call site (fetchIssueCommentsWith), which
     // also attaches the timeout — this count is a deliberately-updated magic number, not a
     // relaxed guard: every real fetch call site, old or new, must still attach one.
-    timeoutCallSites === 6,
-    `all 6 real Jira fetch call sites (projects, jql issue search, classic issue search fallback, changelog, capability probe, issue comments) attach the timeout signal (found ${timeoutCallSites})`
+    // P2.1 adds the retry wrapper (withJiraRetry), which gives every attempt a fresh timeout signal: 6 call sites + 1.
+    timeoutCallSites === 7,
+    `all 6 real Jira fetch call sites (projects, jql issue search, classic issue search fallback, changelog, capability probe, issue comments) attach the timeout signal, plus the retry wrapper's per-attempt signal (found ${timeoutCallSites})`
   );
 }
 

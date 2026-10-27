@@ -18,6 +18,8 @@ import { handleAiRequest, type AiServerEnv, type ModelCallParams, type ModelCall
 import { getUsageLedger, resolveUserDailyTokenCap } from "@/lib/command-center/ai/usage-ledger";
 
 export const runtime = "nodejs";
+// P2.1 — the AI client times out at 55 s; give the function room for it (plan caveat: see README, "Function duration").
+export const maxDuration = 60;
 
 function serverEnv(): AiServerEnv {
   return {

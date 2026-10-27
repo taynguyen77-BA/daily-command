@@ -24,6 +24,7 @@ import { fetchAssignedIssuesWith, fetchIssueCommentsWith, fetchMentionedIssuesWi
 import type { JiraConnectionConfig } from "./jira/types";
 import { postToSlack, renderSlackText, type SlackFetchLike, type SlackSignal } from "../server/slack-notify";
 import type { NotifyStateStore, PersonalNotifyState } from "./notify-state";
+import { jiraConcurrency, mapWithConcurrency } from "./jira/concurrency";
 import { fifoUnion, keysToFetch, MAX_NOTIFIED_COMMENT_IDS, nextRetryKeys } from "./notify-baseline";
 
 export interface ServerNotifyCheckResult {
@@ -78,15 +79,25 @@ export interface MentionEntry {
 /** Exported for server-daily-report.ts (E4), which needs the same per-comment mention list.
  *  P1.1 — also reports `failedKeys` (issues whose comment fetch failed or threw) so the caller can
  *  retry them next run instead of losing the mention once its cursor advances. */
-export async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, issueKeys: string[], today: string): Promise<{ entries: MentionEntry[]; failedKeys: string[] }> {
+export async function collectCurrentMentions(
+  fetchImpl: FetchLike,
+  config: JiraConnectionConfig,
+  accountId: string,
+  issueKeys: string[],
+  today: string,
+  /** P2.1 — bounded concurrency (default JIRA_CONCURRENCY / 5); keys not started before `deadline` count as failed (retried next run). */
+  options: { concurrency?: number; deadline?: number } = {}
+): Promise<{ entries: MentionEntry[]; failedKeys: string[] }> {
   const entries: MentionEntry[] = [];
-  const failedKeys: string[] = [];
-  await Promise.all(
-    issueKeys.map(async (issueKey) => {
+  const failed = new Set<string>();
+  const run = await mapWithConcurrency(
+    issueKeys,
+    options.concurrency ?? jiraConcurrency(),
+    async (issueKey) => {
       try {
         const commentsResult = await fetchIssueCommentsWith(fetchImpl, config, issueKey);
         if (!commentsResult.ok) {
-          failedKeys.push(issueKey);
+          failed.add(issueKey);
           return;
         }
         for (const comment of commentsResult.data) {
@@ -97,11 +108,13 @@ export async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraC
         }
       } catch {
         // best-effort — a single issue's comment fetch failure never fails the check
-        failedKeys.push(issueKey);
+        failed.add(issueKey);
       }
-    })
+    },
+    { deadline: options.deadline }
   );
-  return { entries, failedKeys: issueKeys.filter((k) => failedKeys.includes(k)) };
+  for (const i of run.skipped) failed.add(issueKeys[i]);
+  return { entries, failedKeys: issueKeys.filter((k) => failed.has(k)) };
 }
 
 export async function runServerSideNotifyCheck(

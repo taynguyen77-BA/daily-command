@@ -8,7 +8,7 @@
 // decided client-side by the per-project AI allow-list + redaction (ai/data-protection.ts).
 
 import { z } from "zod";
-import { authHeader, buildUrl, describeJiraError, fetchIssueChangelogWith, isValidCustomFieldId, JIRA_FETCH_TIMEOUT_MS, type FetchLike, type JiraFetchResult } from "./http";
+import { authHeader, buildUrl, describeJiraError, fetchIssueChangelogWith, isValidCustomFieldId, JIRA_FETCH_TIMEOUT_MS, withJiraRetry, type FetchLike, type JiraFetchResult } from "./http";
 import { jiraCommentPageResponseSchema, jiraIssueLinkSchema, jiraStatusSchema, jiraUserSchema, type JiraConnectionConfig } from "./types";
 
 export const ISSUE_KEY_RE = /^[A-Z][A-Z0-9_]{0,19}-\d{1,9}$/;
@@ -195,11 +195,12 @@ export async function fetchIssueContextWith(
   const fields = ["summary", "description", "status", "updated", "project", "issuelinks", ...(acField ? [acField] : [])].join(",");
   const headers = { Authorization: authHeader(config), Accept: "application/json" };
   const path = `/rest/api/3/issue/${encodeURIComponent(issueKey)}`;
+  const http = withJiraRetry(fetchImpl);
   try {
     const [issueRes, commentRes, changelog] = await Promise.all([
-      fetchImpl(buildUrl(config.baseUrl, path, { fields }), { headers, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }),
-      fetchImpl(buildUrl(config.baseUrl, `${path}/comment`, { orderBy: "-created", maxResults: String(ISSUE_CONTEXT_MAX_COMMENTS) }), { headers, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }),
-      fetchIssueChangelogWith(fetchImpl, config, issueKey),
+      http(buildUrl(config.baseUrl, path, { fields }), { headers, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }),
+      http(buildUrl(config.baseUrl, `${path}/comment`, { orderBy: "-created", maxResults: String(ISSUE_CONTEXT_MAX_COMMENTS) }), { headers, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }),
+      fetchIssueChangelogWith(http, config, issueKey),
     ]);
     if (!issueRes.ok) return { ok: false, ...(await describeJiraError(issueRes)) };
     let issueJson: unknown;

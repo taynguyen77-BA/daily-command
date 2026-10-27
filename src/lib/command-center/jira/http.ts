@@ -61,7 +61,63 @@ export type FetchLike = (url: string, init?: { headers?: Record<string, string>;
   ok: boolean;
   status: number;
   json: () => Promise<unknown>;
+  /** Optional: the real fetch Response has it; fakes may omit it (only Retry-After is read). */
+  headers?: { get(name: string): string | null };
 }>;
+
+// ===== P2.1 — one request wrapper: bounded retry for transient Jira failures =====
+export interface JiraRetryOptions {
+  /** Retries after the first attempt (default 3). */
+  maxRetries?: number;
+  /** Absolute epoch-ms deadline; no retry is started (or slept for) past it. */
+  deadline?: number;
+  /** Injectable for tests. */
+  sleep?: (ms: number) => Promise<void>;
+  random?: () => number;
+  now?: () => number;
+  /** Exponential backoff base (default 300 ms) and cap for any single wait (default 10 s). */
+  baseDelayMs?: number;
+  maxDelayMs?: number;
+}
+
+export const JIRA_RETRY_STATUSES: ReadonlySet<number> = new Set([429, 502, 503, 504]);
+const RETRY_MARK = Symbol.for("daily-command.jira-retry");
+
+/** Retry-After as seconds or an HTTP-date -> ms from `nowMs`, or undefined when absent/unparseable. */
+export function parseRetryAfterMs(value: string | null | undefined, nowMs: number): number | undefined {
+  if (!value) return undefined;
+  const v = value.trim();
+  if (/^\d+(\.\d+)?$/.test(v)) return Math.round(Number(v) * 1000);
+  const at = Date.parse(v);
+  return Number.isFinite(at) ? Math.max(0, at - nowMs) : undefined;
+}
+
+/** Wraps a FetchLike: retries 429/502/503/504 (never on 4xx other than 429, never on a thrown
+ *  network error — those keep today's "network-error" classification), honours Retry-After
+ *  (capped), otherwise exponential backoff with full jitter, stops at `deadline`. Every attempt
+ *  gets its own timeout signal. Wrapping an already-wrapped fetch returns it unchanged. Used by
+ *  every fetch*With function in this file; the Jira WRITE route does not go through it. */
+export function withJiraRetry(fetchImpl: FetchLike, options: JiraRetryOptions = {}): FetchLike {
+  if ((fetchImpl as unknown as Record<symbol, unknown>)[RETRY_MARK]) return fetchImpl;
+  const maxRetries = options.maxRetries ?? 3;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const random = options.random ?? Math.random;
+  const now = options.now ?? Date.now;
+  const base = options.baseDelayMs ?? 300;
+  const cap = options.maxDelayMs ?? 10_000;
+  const wrapped: FetchLike = async (url, init) => {
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
+      if (res.ok || !JIRA_RETRY_STATUSES.has(res.status) || attempt >= maxRetries) return res;
+      const retryAfter = parseRetryAfterMs(res.headers?.get("retry-after"), now());
+      const wait = Math.min(cap, retryAfter ?? Math.floor(random() * Math.min(cap, base * 2 ** attempt)));
+      if (options.deadline !== undefined && now() + wait >= options.deadline) return res;
+      await sleep(wait);
+    }
+  };
+  (wrapped as unknown as Record<symbol, unknown>)[RETRY_MARK] = true;
+  return wrapped;
+}
 
 export function authHeader(config: JiraConnectionConfig): string {
   return "Basic " + Buffer.from(`${config.email}:${config.apiToken}`).toString("base64");
@@ -168,13 +224,17 @@ export function formatJqlSince(sinceIso: string | undefined, timezoneOffsetMinut
   return buildIncrementalSinceParam(sinceIso, timezoneOffsetMinutes);
 }
 
-export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: string[]; timezoneOffsetMinutes?: number }): string {
+export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: string[]; timezoneOffsetMinutes?: number; bootstrapDays?: number }): string {
   const clauses: string[] = [];
   if (options.projectKeys && options.projectKeys.length > 0) {
     clauses.push(`project in (${options.projectKeys.map((k) => `"${k}"`).join(",")})`);
   }
   const since = formatJqlSince(options.sinceIso, options.timezoneOffsetMinutes);
   if (since) clauses.push(`updated >= "${since}"`);
+  // P2.1 — first/reset sync (no cursor): open tickets + the last N days, so the 2,000-issue cap is
+  // not spent on years of closed history. Ascending order + computeResumeCursor still work: the
+  // clause only narrows the set. Incremental syncs never get it (their JQL is unchanged).
+  else if (options.bootstrapDays && options.bootstrapDays > 0) clauses.push(`(statusCategory != Done OR updated >= -${Math.floor(options.bootstrapDays)}d)`);
   // V2.2.4 — Jira's search/jql endpoint rejects a fully unbounded query (no WHERE clause at
   // all, `order by` only) with 400 "Unbounded JQL queries are not allowed here." This hits a
   // first full sync with no JIRA_PROJECT_KEYS configured — exactly the common case, since
@@ -226,11 +286,12 @@ export const JIRA_MAX_PROJECTS = 2000; // safety cap, same philosophy as JIRA_MA
  * same as fetchJiraIssuesClassic below does for issues.
  */
 export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<JiraFetchResult<JiraProject[]>> {
+  const http = withJiraRetry(fetchImpl);
   const projects: JiraProject[] = [];
   let startAt = 0;
   try {
     while (projects.length < JIRA_MAX_PROJECTS) {
-      const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/project/search", { maxResults: String(JIRA_PROJECT_PAGE_SIZE), startAt: String(startAt) }), {
+      const res = await http(buildUrl(config.baseUrl, "/rest/api/3/project/search", { maxResults: String(JIRA_PROJECT_PAGE_SIZE), startAt: String(startAt) }), {
         headers: { Authorization: authHeader(config), Accept: "application/json" },
         signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
       });
@@ -265,6 +326,8 @@ export interface FetchIssuesOptions {
   projectKeys?: string[];
   /** B4 — extra custom fields to request (validated by isValidCustomFieldId; others dropped). */
   extraFields?: string[];
+  /** P2.1 — see buildIssuesJql. Only used when `sinceIso` is absent. */
+  bootstrapDays?: number;
 }
 
 /**
@@ -276,13 +339,14 @@ export interface FetchIssuesOptions {
  * when the replacement endpoint itself reports 404 (genuinely not present).
  */
 async function fetchJiraIssuesClassic(fetchImpl: FetchLike, config: JiraConnectionConfig, options: FetchIssuesOptions): Promise<JiraFetchResult<JiraIssue[]>> {
+  const http = withJiraRetry(fetchImpl);
   const jql = buildIssuesJql(options);
   const issues: JiraIssue[] = [];
   let startAt = 0;
   let truncated = false;
   try {
     while (true) {
-      const res = await fetchImpl(
+      const res = await http(
         buildUrl(config.baseUrl, "/rest/api/3/search", { jql, startAt: String(startAt), maxResults: String(JIRA_PAGE_SIZE), fields: withExtraFields(ISSUE_FIELDS.split(","), options.extraFields).join(",") }),
         { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
       );
@@ -346,6 +410,7 @@ async function fetchIssuesByJqlCursor(
   jql: string,
   classicFallbackOptions?: FetchIssuesOptions
 ): Promise<JiraFetchResult<JiraIssue[]>> {
+  const http = withJiraRetry(fetchImpl);
   const issues: JiraIssue[] = [];
   let nextPageToken: string | undefined;
   let firstPage = true;
@@ -354,14 +419,14 @@ async function fetchIssuesByJqlCursor(
     while (true) {
       const body: Record<string, unknown> = { jql, maxResults: JIRA_PAGE_SIZE, fields: withExtraFields(JQL_SEARCH_FIELDS, classicFallbackOptions?.extraFields) };
       if (nextPageToken) body.nextPageToken = nextPageToken;
-      const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
+      const res = await http(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
         method: "POST",
         headers: { Authorization: authHeader(config), Accept: "application/json", "Content-Type": "application/json" },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
       });
       if (!res.ok) {
-        if (firstPage && res.status === 404 && classicFallbackOptions) return fetchJiraIssuesClassic(fetchImpl, config, classicFallbackOptions);
+        if (firstPage && res.status === 404 && classicFallbackOptions) return fetchJiraIssuesClassic(http, config, classicFallbackOptions);
         return { ok: false, ...(await describeJiraError(res)) };
       }
       firstPage = false;
@@ -482,10 +547,11 @@ export const JIRA_COMMENT_MAX_PAGES = 3;
  * (the caller retries the issue) rather than silently returning a thread with a hole in it.
  */
 export async function fetchIssueCommentsWith(fetchImpl: FetchLike, config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraComment[]>> {
+  const http = withJiraRetry(fetchImpl);
   try {
     const comments: JiraComment[] = [];
     for (let page = 0; page < JIRA_COMMENT_MAX_PAGES; page++) {
-      const res = await fetchImpl(
+      const res = await http(
         buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, { maxResults: String(JIRA_COMMENT_PAGE_SIZE), startAt: String(comments.length), orderBy: "-created" }),
         { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
       );
@@ -522,8 +588,9 @@ export async function fetchIssueCommentsWith(fetchImpl: FetchLike, config: JiraC
  * §5 explicitly forbids inventing a workaround instead of admitting "we don't know yet".
  */
 export async function detectJiraSearchCapability(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<JiraCapabilityResult> {
+  const http = withJiraRetry(fetchImpl);
   try {
-    const res = await fetchImpl(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
+    const res = await http(buildUrl(config.baseUrl, "/rest/api/3/search/jql", {}), {
       method: "POST",
       headers: { Authorization: authHeader(config), Accept: "application/json", "Content-Type": "application/json" },
       // V2.2.4 — matches buildIssuesJql's own bounded-query workaround; a bare "order by"
@@ -554,8 +621,9 @@ export async function detectJiraSearchCapability(fetchImpl: FetchLike, config: J
  * (never every issue — see the sync route and jira/scope-drift.ts).
  */
 export async function fetchIssueChangelogWith(fetchImpl: FetchLike, config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraChangelogHistory[]>> {
+  const http = withJiraRetry(fetchImpl);
   try {
-    const res = await fetchImpl(buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/changelog`, { maxResults: "100" }), {
+    const res = await http(buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/changelog`, { maxResults: "100" }), {
       headers: { Authorization: authHeader(config), Accept: "application/json" },
       signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
     });

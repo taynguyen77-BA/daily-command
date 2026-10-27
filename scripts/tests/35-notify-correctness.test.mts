@@ -348,7 +348,7 @@ const noSlack = (async () => ({ ok: true, status: 200, text: async () => "" })) 
   const capped = await fetchIssueCommentsWith(endless, cfg, "JPMC-7");
   ok(group, capped.ok && requests.length === 3, "at most 3 pages are fetched");
   let calls = 0;
-  const flaky = strictJiraFake(async () => (++calls === 2 ? { ok: false, status: 503, json: async () => ({}) } : okJson({ comments: [plain("y")], startAt: 0, maxResults: 1, total: 500 })));
+  const flaky = strictJiraFake(async () => (++calls === 2 ? { ok: false, status: 500, json: async () => ({}) } : okJson({ comments: [plain("y")], startAt: 0, maxResults: 1, total: 500 })));
   ok(group, !(await fetchIssueCommentsWith(flaky, cfg, "JPMC-7")).ok, "a failing later page fails the whole fetch rather than returning a thread with a hole");
 
   // Order independence of the consumers.

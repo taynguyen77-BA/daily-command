@@ -30,11 +30,16 @@ import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
 import { normalizeIssues, normalizeProjects } from "@/lib/command-center/jira/normalize";
 import { buildMentionEvents, latestOwnCommentAt, selectRecentMentionCandidates } from "@/lib/command-center/jira/mentions";
 import { changelogToScopeSignals, selectPrioritizedIssueKeys } from "@/lib/command-center/jira/scope-drift";
+import { mapWithConcurrency, jiraBootstrapDays, jiraConcurrency } from "@/lib/command-center/jira/concurrency";
 import { buildIncrementalSinceParam, computeResumeCursor, isValidCustomFieldId, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
 import type { MentionEvent, MyTicketActivity } from "@/lib/command-center/types";
 
 export const runtime = "nodejs";
+// P2.1 — Vercel function ceiling for the sync (the optional enrichments stop at SYNC_DEADLINE_MS, before it).
+// Plan caveat: Hobby caps functions at 10-60 s depending on config; raising this needs a plan that allows it.
+export const maxDuration = 60;
+const SYNC_DEADLINE_MS = 50_000;
 
 const syncRequestSchema = z.object({
   sinceIso: z.string().optional(),
@@ -112,6 +117,8 @@ export async function POST(req: Request) {
   }
 
   const syncStartedAt = Date.now();
+  const deadline = syncStartedAt + SYNC_DEADLINE_MS;
+  const concurrency = jiraConcurrency();
   const today = new Date().toISOString().slice(0, 10);
   const projectKeys = resolveEffectiveProjectKeys(getConfiguredProjectKeys(), { mode: scopeMode, projectKeys: parsedRequest.data.projectKeys ?? [] });
   // §7 — the same "never send an unbounded query when a real restriction was intended" logic
@@ -136,7 +143,8 @@ export async function POST(req: Request) {
   const jqlSinceIso = parsedRequest.data.sinceIso ? buildIncrementalSinceParam(parsedRequest.data.sinceIso, getJiraTimezoneOffsetMinutes()) : undefined;
 
   const sprintFieldId = isValidCustomFieldId(parsedRequest.data.sprintFieldId) ? parsedRequest.data.sprintFieldId : undefined;
-  const issuesResult = await fetchJiraIssues(config, { sinceIso: jqlSinceIso, projectKeys, extraFields: sprintFieldId ? [sprintFieldId] : undefined });
+  const bootstrapDays = jqlSinceIso ? 0 : jiraBootstrapDays();
+  const issuesResult = await fetchJiraIssues(config, { sinceIso: jqlSinceIso, projectKeys, extraFields: sprintFieldId ? [sprintFieldId] : undefined, bootstrapDays });
   if (!issuesResult.ok) {
     return NextResponse.json({ ok: false, error: issuesResult.error, errorKind: issuesResult.errorKind }, { status: 502 });
   }
@@ -150,6 +158,7 @@ export async function POST(req: Request) {
   const truncated = issuesResult.truncated === true;
   const resumeSinceIso = computeResumeCursor(issuesResult.data, truncated);
   const warnings: string[] = [];
+  if (bootstrapDays > 0) warnings.push(`Initial sync limited to open tickets + last ${bootstrapDays} days (JIRA_BOOTSTRAP_DAYS; 0 disables).`);
   if (truncated) {
     warnings.push(`Result set reached the ${JIRA_MAX_ISSUES}-issue safety cap — this sync is partial. It will automatically resume from where it stopped on the next sync.`);
   }
@@ -174,8 +183,8 @@ export async function POST(req: Request) {
     if (field === "lastCommentAt" && (!cur.lastActivityAt || at > cur.lastActivityAt)) cur.lastActivityAt = at;
   };
   const requestAccountId = effectiveAccountId(memberJira?.ok ? memberJira.accountId : undefined, parsedRequest.data.accountId);
-  await Promise.all(
-    prioritizedKeys.map(async (key) => {
+  let skippedEnrichments = 0;
+  const changelogRun = await mapWithConcurrency(prioritizedKeys, concurrency, async (key) => {
       try {
         const result = await fetchJiraIssueChangelog(config, key);
         if (result.ok && requestAccountId) {
@@ -185,8 +194,8 @@ export async function POST(req: Request) {
       } catch {
         // best-effort — a changelog failure never fails the sync
       }
-    })
-  );
+  }, { deadline });
+  skippedEnrichments += changelogRun.skipped.length;
   const enrichedWorkItems = scopeChangeCounts.size === 0 ? workItems : workItems.map((w) => (scopeChangeCounts.has(w.key) ? { ...w, scopeChangeCount: scopeChangeCounts.get(w.key)! } : w));
   const scopeChangesDetected = Array.from(scopeChangeCounts.values()).reduce((s, n) => s + n, 0);
 
@@ -205,8 +214,7 @@ export async function POST(req: Request) {
       if (mentionedResult.ok) {
         const events: MentionEvent[] = [];
         const checkedKeys = new Set<string>();
-        await Promise.all(
-          mentionedResult.data.map(async (issue) => {
+        const mentionRun = await mapWithConcurrency(mentionedResult.data, concurrency, async (issue) => {
             checkedKeys.add(issue.key);
             try {
               const commentsResult = await fetchIssueComments(config, issue.key);
@@ -217,16 +225,15 @@ export async function POST(req: Request) {
             } catch {
               // best-effort — a single issue's comment fetch failure never fails the sync
             }
-          })
-        );
+        }, { deadline });
+        skippedEnrichments += mentionRun.skipped.length;
 
         // V2.17 — recency fallback: Jira's comment-search JQL above has a real indexing lag
         // for brand-new comments, so a very recent mention can be undiscoverable through it
         // for a while — see selectRecentMentionCandidates's own comment for the full
         // reasoning and the real-instance evidence behind it.
         const recentCandidates = selectRecentMentionCandidates(issuesResult.data, checkedKeys, Date.now());
-        await Promise.all(
-          recentCandidates.map(async (issue) => {
+        const recentRun = await mapWithConcurrency(recentCandidates, concurrency, async (issue) => {
             try {
               const commentsResult = await fetchIssueComments(config, issue.key);
               if (commentsResult.ok) {
@@ -236,8 +243,8 @@ export async function POST(req: Request) {
             } catch {
               // best-effort — a single issue's comment fetch failure never fails the sync
             }
-          })
-        );
+        }, { deadline });
+        skippedEnrichments += recentRun.skipped.length;
 
         mentionEvents = events;
       }
@@ -246,8 +253,13 @@ export async function POST(req: Request) {
     }
   }
 
+  // P2.1 — the core issue data is always returned; enrichments that did not start before the
+  // deadline make the sync `partial` (they are best-effort and refreshed by the next sync).
+  const partial = skippedEnrichments > 0;
+  if (partial) warnings.push(`Sync time budget reached — ${skippedEnrichments} optional enrichment request(s) (changelogs / mention comments) were skipped; the issue data is complete.`);
   return NextResponse.json({
     ok: true,
+    ...(partial ? { partial: true } : {}),
     data: { clients, projects, workItems: enrichedWorkItems, dependencies },
     recordsFetched: issuesResult.recordsFetched,
     syncedAt: new Date().toISOString(),

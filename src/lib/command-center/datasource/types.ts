@@ -35,6 +35,8 @@ export interface DataSourceSyncResult {
   // incremental cursor to this instead of syncedAt whenever a sync is partial).
   truncated?: boolean;
   resumeSinceIso?: string;
+  /** P2.1 — core data complete, optional enrichments skipped at the time budget. */
+  partial?: boolean;
 }
 
 export interface DataSourceProvider {
