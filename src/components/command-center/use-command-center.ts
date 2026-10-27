@@ -3,8 +3,8 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { commandCenterStore, getTodayIso, previousSnapshotOf, selectDailyCommandMaps, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
-import { buildAwaitingMe } from "@/lib/command-center/awaiting-me";
-import type { ScoreModel, ScoringOptions } from "@/lib/command-center/scoring";
+import { buildScoringOptions } from "@/lib/command-center/scoring-context";
+import type { ScoringOptions } from "@/lib/command-center/scoring";
 import { applyFilters } from "@/lib/command-center/filters";
 import { applyProjectScope, scopeMentionEvents } from "@/lib/command-center/jira/project-scope";
 import { buildWorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
@@ -37,9 +37,9 @@ function sendSlackNotifications(data: CommandCenterData, previousAttentionState:
   });
 }
 
-/** P3.1 — the ScoringOptions carrier for a store state: the model (absent = v2) and the unanswered-mention signal. */
-export function scoringOptionsFor(model: ScoreModel | undefined, mentionEvents: StoreState["mentionEvents"], mentionReplies: StoreState["mentionReplies"], conversation?: StoreState["conversationByTicket"]): ScoringOptions {
-  return { model: model ?? "v2", awaitingMeByKey: buildAwaitingMe(mentionEvents, mentionReplies, conversation) };
+/** P3.1-P3.3 — the ScoringOptions carrier for a store state (see scoring-context.ts). */
+export function scoringOptionsFor(state: StoreState, mentionEvents: StoreState["mentionEvents"], today: string): ScoringOptions {
+  return buildScoringOptions(state, mentionEvents, today);
 }
 
 /** Every one of the ~45 components that calls useCommandCenter() used to run the full
@@ -157,7 +157,7 @@ export function useCommandCenter() {
   // inflating "needs attention"/"overdue" counts and generating fresh risks even though every
   // other surface already treated it as finished (see selectors.ts's own comment).
   // P3.1 — the scoring model (a device setting; default v2) and the "waiting on me" signal v2 reads.
-  const scoring = sharedMemo("m10", () => scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket), [state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket]);
+  const scoring = sharedMemo("m10", () => scoringOptionsFor(state, scopedMentionEvents, today), [state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket, state.learnedPriority, state.learningResetAt, state.personalPlan, state.ticketWorkStates, scopedData.workItems, today]);
   const derived = sharedMemo("m7", 
     () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring),
     [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring]
@@ -302,7 +302,7 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const dailyCommandSkippedWorkItemIds = ticketSets.skippedIds;
   const dailyCommandBlockedWorkItemIds = ticketSets.blockedIds;
   const dailyCommandPausedWorkItemIds = ticketSets.pausedIds;
-  const scoring = scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies, state.conversationByTicket);
+  const scoring = scoringOptionsFor(state, scopedMentionEvents, today);
   const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
   const proactive = state.loaded
     ? computeProactiveIntelligence(

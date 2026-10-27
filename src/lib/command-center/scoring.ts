@@ -4,6 +4,7 @@
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { eligibilityScoreV2, scoreWorkItemV2 } from "./scoring-v2";
 import type { AwaitingMeSignal } from "./awaiting-me";
+import type { LearnedAdjustment, LearnedMode, SignalKind } from "./learned-adjustments";
 import type { CommandCenterData, PriorityFactor, PriorityScoreResult, WorkItem } from "./types";
 
 export { daysBetween, classify } from "./score-core";
@@ -18,6 +19,8 @@ export interface ScoringOptions {
   model?: ScoreModel;
   /** v2's "Awaiting you" factor: ticket key -> unanswered mention (awaiting-me.ts). */
   awaitingMeByKey?: Readonly<Record<string, AwaitingMeSignal>>;
+  /** P3.3 — the personal learning loop (v2 only). "off" / absent: nothing; "shadow": computed, shown, never changes a score; "on": a "Learned (you)" factor. */
+  learned?: { mode: LearnedMode; adjustments: readonly LearnedAdjustment[]; signalKindByKey?: Readonly<Record<string, SignalKind>> };
 }
 
 /**

@@ -337,6 +337,8 @@ export interface PriorityFactor {
   contribution: number;
   max: number;
   detail: string;
+  /** P3.3 — set on the learned factor ("LEARNED": derived from the user's own history, shows n). */
+  trust?: "LEARNED";
 }
 
 export interface PriorityScoreResult {
@@ -346,6 +348,8 @@ export interface PriorityScoreResult {
   factors: PriorityFactor[];
   confidence: number;
   reasoning: string;
+  /** P3.3 — shadow mode only: what learning WOULD add (scores and order are untouched). */
+  learnedShadow?: { delta: number; detail: string };
 }
 
 export interface CommandCenterData {
@@ -927,6 +931,8 @@ export interface MemoryEvent {
     | "LOOP_STALLED"
     | "LOOP_COMPLETED"
     | "RE_ESCALATED"
+    // P3.3 — the user pressed "Reset learning" (Data & Settings).
+    | "LEARNING_RESET"
     // V1.6 §22 — Personal Delivery Memory. Only meaningful transitions, never every click.
     | "FOCUS_STARTED"
     | "FOCUS_COMPLETED"

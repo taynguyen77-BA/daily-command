@@ -498,7 +498,7 @@ export function ReasoningTraceBlock({ trace }: { trace: ReasoningTrace }) {
  *  system state, and always distinguish a Jira-sourced or historical fact from a live one.
  *  V2.2 §5 adds "ai-draft"/"user-input"/"unknown" — the remaining three Artifact Trust
  *  Model kinds, so every artifact segment can be labeled with this one shared component. */
-export function TrustLabel({ kind }: { kind: "calculated" | "ai-assessment" | "ai-recommendation" | "evidence" | "history" | "source" | "ai-draft" | "user-input" | "unknown" }) {
+export function TrustLabel({ kind }: { kind: "calculated" | "ai-assessment" | "ai-recommendation" | "evidence" | "history" | "source" | "ai-draft" | "user-input" | "unknown" | "learned" | "forecast" }) {
   const styles: Record<typeof kind, string> = {
     calculated: "bg-surface text-text3 border-border",
     "ai-assessment": "bg-accent/10 text-accent2 border-accent/30",
@@ -509,6 +509,8 @@ export function TrustLabel({ kind }: { kind: "calculated" | "ai-assessment" | "a
     "ai-draft": "bg-accent/10 text-accent2 border-accent/30",
     "user-input": "bg-green/10 text-green border-green/30",
     unknown: "bg-yellow/10 text-yellow border-yellow/30",
+    learned: "bg-accent/10 text-accent2 border-accent/30",
+    forecast: "bg-accent/10 text-accent2 border-accent/30",
   };
   const labels: Record<typeof kind, string> = {
     calculated: "Calculated",
@@ -520,6 +522,8 @@ export function TrustLabel({ kind }: { kind: "calculated" | "ai-assessment" | "a
     "ai-draft": "AI draft",
     "user-input": "User input",
     unknown: "Unknown",
+    learned: "Learned",
+    forecast: "Forecast",
   };
   return (
     <span className={`inline-flex items-center whitespace-nowrap rounded-md border px-1.5 py-0.5 text-[10px] font-medium normal-case leading-3 tracking-normal ${styles[kind]}`}>

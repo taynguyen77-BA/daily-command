@@ -21,8 +21,10 @@
 import { awaitingMeAgeBusinessDays, awaitingMePoints, REPLY_SLA_BUSINESS_DAYS } from "./awaiting-me";
 import { classify, daysBetween } from "./score-core";
 import type { ScoringOptions } from "./scoring";
+import { LEARN_MAX_DELTA, learnedDeltaFor } from "./learned-adjustments";
 import type { CommandCenterData, PriorityFactor, PriorityScoreResult, WorkItem } from "./types";
 
+export const LEARNED_FACTOR = "Learned (you)";
 const PRIORITY_POINTS = { P1: 20, P2: 14, P3: 7, P4: 0 } as const;
 export const SCORE_V2_MAX = { priority: 20, priorityWithBusinessImpact: 10, businessImpact: 10, deadline: 20, awaitingMe: 15, blocker: 15, dependency: 5, aging: 10, change: 10, ownership: 5 } as const;
 
@@ -91,7 +93,18 @@ export function scoreWorkItemV2(item: WorkItem, data: CommandCenterData, today: 
   factors.push({ name: "Change frequency", contribution: Math.min(item.scopeChangeCount, 5) * 2, max: SCORE_V2_MAX.change, detail: `${item.scopeChangeCount} scope change(s) recorded` });
   factors.push({ name: "Ownership risk", contribution: item.owner ? 0 : 5, max: SCORE_V2_MAX.ownership, detail: item.owner ? `Owned by ${item.owner}` : "No owner assigned" });
 
-  const score = Math.round(factors.reduce((s, f) => s + f.contribution, 0));
+  // P3.3 — learned personal adjustment. Shadow: shown only. On: a LEARNED factor. Hard rules (overdue, blocked,
+  // P1, awaiting-you past SLA) stop any negative delta.
+  let learnedShadow: PriorityScoreResult["learnedShadow"];
+  if (options.learned && options.learned.mode !== "off") {
+    const look = learnedDeltaFor(item, options.learned.signalKindByKey?.[item.key] ?? "OTHER", options.learned.adjustments, { today, awaitingMe: signal });
+    if (look.delta !== 0 && look.adjustment) {
+      if (options.learned.mode === "on") factors.push({ name: LEARNED_FACTOR, contribution: look.delta, max: LEARN_MAX_DELTA, detail: look.adjustment.evidence, trust: "LEARNED" });
+      else learnedShadow = { delta: look.delta, detail: look.adjustment.evidence };
+    }
+  }
+
+  const score = Math.max(0, Math.min(100, Math.round(factors.reduce((s, f) => s + f.contribution, 0))));
 
   // Confidence = data completeness. Every missing input costs a little, none is guessed.
   let confidence = 0.95;
@@ -101,10 +114,10 @@ export function scoreWorkItemV2(item: WorkItem, data: CommandCenterData, today: 
   if (item.type === "release" && item.uatCompletionPct === undefined) confidence -= 0.1;
   confidence = Math.max(0.5, Math.round(confidence * 100) / 100);
 
-  const top = [...factors].sort((a, b) => b.contribution - a.contribution).slice(0, 2).filter((f) => f.contribution > 0);
+  const top = factors.filter((f) => f.name !== LEARNED_FACTOR).sort((a, b) => b.contribution - a.contribution).slice(0, 2).filter((f) => f.contribution > 0);
   const reasoning = top.length > 0 ? `Scored ${score}/100: ${top.map((f, i) => (i === 0 ? f.detail : lowerFirst(f.detail))).join(" and ")}.` : `Scored ${score}/100 — no significant risk factors detected.`;
 
-  return { itemId: item.id, score, classification: classify(score), factors, confidence, reasoning };
+  return { itemId: item.id, score, classification: classify(score), factors, confidence, reasoning, ...(learnedShadow ? { learnedShadow } : {}) };
 }
 
 /** Same idea as v1's eligibilityScore: rescale against only the factors this item's data can speak to. */

@@ -19,6 +19,7 @@
 // TaskReferenceRow / TaskRow is the thin connected wrapper.
 
 import { ConversationChipView } from "./ConversationChip";
+import { LearningChip } from "./LearningChip";
 import React, { useState, useSyncExternalStore } from "react";
 import { commandCenterStore, type CommandCenterStore } from "@/lib/command-center/store";
 import { formatExecutionRecord, resolveTicketExecutionState, type TaskExecutionState } from "@/lib/command-center/task-execution";
@@ -493,6 +494,7 @@ export function TaskReferenceRow({
       extra={
         <>
           <ConversationChipView conversation={state.conversationByTicket?.[key]} today={todayLocalIso()} slaBusinessDays={state.blockerSlaBusinessDays} />
+          <LearningChip ticketKey={key} />
           {w?.sourceType === "jira" && (state.features.ticketBrief || (state.features.baRequirementCheck && BA_CHECK_TYPES.has(w.type))) ? (
             <>
               {state.features.ticketBrief && <TicketBrief ticketKey={key} workItemUpdated={workItemUpdatedStamp(w)} />}

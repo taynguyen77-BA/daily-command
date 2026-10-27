@@ -122,7 +122,8 @@ import { migrateTicketBackedActionStatuses } from "./action-migration";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
 import { planJiraComment, planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
-import { buildAwaitingMe } from "./awaiting-me";
+import { buildScoringOptions } from "./scoring-context";
+import { asLearnedMode, type LearnedMode } from "./learned-adjustments";
 import { asConversationStates, conversationCacheOf, mergeConversationStates, type ConversationState } from "./conversation-store";
 import type { ScoreModel, ScoringOptions } from "./scoring";
 import type { ImportResult } from "./import";
@@ -353,6 +354,12 @@ export interface StoreState {
   commandCenterCompact: boolean;
   /** P3.1 — priority scoring model. Absent/unknown = "v2" (the default); "v1" is the original model. */
   scoringModel?: ScoreModel;
+  /** P3.3 — the personal learning loop: "off" | "shadow" (default: computed and shown, never changes a score) | "on". */
+  learnedPriority?: LearnedMode;
+  /** P3.3 — the day shadow learning started (the Weekly Review proposes "on" after 14 days). */
+  learnedShadowSince?: string;
+  /** P3.3 — "Reset learning": history planned before this day is ignored. */
+  learningResetAt?: string;
   /** P3.2 — derived "whose turn" per ticket, from the newest comments of the tickets that matter. Device-local and
    *  never synced across devices; pruned to open tickets on every sync. */
   conversationByTicket?: Record<string, ConversationState>;
@@ -426,6 +433,8 @@ function initialState(): StoreState {
     morningTriage: {},
     commandCenterCompact: false,
     scoringModel: "v2",
+    learnedPriority: "shadow",
+    learnedShadowSince: getTodayIso(),
     blockerSlaBusinessDays: DEFAULT_BLOCKER_SLA_BUSINESS_DAYS,
     jiraWriteBack: { ...DEFAULT_JIRA_WRITE_BACK_SETTINGS },
     jiraWriteLog: [],
@@ -1031,6 +1040,9 @@ function parseStoredStateRaw(raw: string): StoreState {
       morningTriage: asMorningTriage(parsed.morningTriage),
       commandCenterCompact: parsed.commandCenterCompact === true,
       scoringModel: parsed.scoringModel === "v1" ? "v1" : "v2",
+      learnedPriority: asLearnedMode(parsed.learnedPriority),
+      learnedShadowSince: typeof parsed.learnedShadowSince === "string" ? parsed.learnedShadowSince : getTodayIso(),
+      learningResetAt: typeof parsed.learningResetAt === "string" ? parsed.learningResetAt : undefined,
       conversationByTicket: asConversationStates(parsed.conversationByTicket),
       timeBudgetMinutes: TIME_BUDGETS.includes(parsed.timeBudgetMinutes as TimeBudget) ? (parsed.timeBudgetMinutes as TimeBudget) : undefined,
       blockerSlaBusinessDays: asBlockerSla(parsed.blockerSlaBusinessDays),
@@ -1923,9 +1935,23 @@ export class CommandCenterStore {
     this.set({ ...this.state, scoringModel: model });
   }
 
+  /** P3.3 — off / shadow / on. Entering "shadow" starts the 14-day clock the Weekly Review proposal uses. */
+  setLearnedPriority(mode: LearnedMode) {
+    if (mode !== "off" && mode !== "shadow" && mode !== "on") return;
+    this.set({ ...this.state, learnedPriority: mode, ...(mode === "shadow" && this.state.learnedPriority !== "shadow" ? { learnedShadowSince: getTodayIso() } : {}) });
+  }
+
+  /** P3.3 — "Reset learning": forget everything learned so far (scores return to their un-learned values) and
+   *  leave a memory event. Plans and ticket history themselves are untouched. */
+  resetLearning() {
+    const today = getTodayIso();
+    const event: MemoryEvent = { id: `memory-event-learning-reset-${Date.now()}`, date: today, kind: "LEARNING_RESET", title: "Learning reset", impact: "Learned priority adjustments were cleared; learning restarts from today.", evidence: [] };
+    this.set({ ...this.state, learningResetAt: today, learnedShadowSince: this.state.learnedPriority === "shadow" ? today : this.state.learnedShadowSince, memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS) });
+  }
+
   /** P3.1 — the scoring carrier every snapshot/score computed by the store uses. */
   private scoringOptions(): ScoringOptions {
-    return { model: this.state.scoringModel ?? "v2", awaitingMeByKey: buildAwaitingMe(this.state.mentionEvents, this.state.mentionReplies, this.state.conversationByTicket) };
+    return buildScoringOptions(this.state, this.state.mentionEvents, getTodayIso());
   }
 
   /** F1 — the Action Plan time budget, also Morning Mode's plan budget. */
