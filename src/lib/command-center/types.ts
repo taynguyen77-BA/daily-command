@@ -961,7 +961,10 @@ export interface MemoryEvent {
     // Canonical ticket work state (ticket-work-state.ts) — the two statuses the Daily Command
     // maps never had.
     | "TICKET_STARTED"
-    | "TICKET_DEFERRED";
+    | "TICKET_DEFERRED"
+    // P3.6 — Next Best Action feedback ("Useful" / "Not now"): ticketKey + the card kind (evidence[0]) + reason (impact).
+    | "NBA_ACCEPTED"
+    | "NBA_DISMISSED";
   title: string;
   impact: string;
   evidence: string[];
@@ -1831,6 +1834,8 @@ export interface FeatureToggles {
   nlCommands: boolean;
   /** V2.38 J6 — AI weekly insights in Weekly Review (and optionally the weekly report). OFF. */
   weeklyInsights: boolean;
+  /** P3.6 — let the daily-guidance AI task phrase the Next Best Action text (at most one call a day; off by default). */
+  nextBestActionAi: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1857,6 +1862,7 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   meetingNotesActions: false,
   nlCommands: false,
   weeklyInsights: false,
+  nextBestActionAi: false,
 };
 
 /** F1 — one finished Morning Mode triage, per local day. */

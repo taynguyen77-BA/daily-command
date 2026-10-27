@@ -1,5 +1,6 @@
 "use client";
 
+import { NextBestActions } from "@/components/command-center/NextBestActions";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
@@ -92,6 +93,7 @@ export default function CommandCenterPage() {
         <SetupHealthBanner />
         <SectionHeading level="page" title="Command Center" subtitle="Compact view — the numbers, your work, and release health." action={compactToggle} />
         <KpiStrip kpis={derived.kpis} />
+        <NextBestActions compact />
         <MyWorkSummary />
         <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} />
       </div>
@@ -159,6 +161,8 @@ export default function CommandCenterPage() {
       {/* V1.6 §43 — the personal layer sits on top of project intelligence, never hiding it.
           Your Delivery Focus and My Assigned Work now live in My Work; this is its compact
           summary (counts + top items, same TaskRow as everywhere). */}
+      <NextBestActions compact />
+
       <div className="grid gap-6 md:grid-cols-2">
         <MyWorkSummary />
         <RecentlyMentioned />

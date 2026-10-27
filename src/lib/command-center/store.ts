@@ -123,6 +123,8 @@ import { mergeServerDailyReports, type ServerDailyStandup } from "./server-repor
 import { planJiraComment, planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
 import { buildScoringOptions } from "./scoring-context";
+import { nbaFeedbackEvent } from "./nba-feedback";
+import type { NbaCard } from "./next-best-action";
 import { asLearnedMode, type LearnedMode } from "./learned-adjustments";
 import { asConversationStates, conversationCacheOf, mergeConversationStates, type ConversationState } from "./conversation-store";
 import type { ScoreModel, ScoringOptions } from "./scoring";
@@ -1933,6 +1935,12 @@ export class CommandCenterStore {
   setScoringModel(model: ScoreModel) {
     if (model !== "v1" && model !== "v2") return;
     this.set({ ...this.state, scoringModel: model });
+  }
+
+  /** P3.6 — "Useful" / "Not now" on a Next Best Action card, as a memory event (persists and syncs with the rest). */
+  recordNbaFeedback(card: NbaCard, accepted: boolean, reason?: string) {
+    const event = nbaFeedbackEvent(card, accepted, reason, getTodayIso(), Date.now());
+    this.set({ ...this.state, memoryEvents: [...this.state.memoryEvents, event].slice(-MAX_MEMORY_EVENTS) });
   }
 
   /** P3.3 — off / shadow / on. Entering "shadow" starts the 14-day clock the Weekly Review proposal uses. */

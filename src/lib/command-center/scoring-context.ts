@@ -6,7 +6,8 @@ import { buildAwaitingMe } from "./awaiting-me";
 import { asLearnedMode, collectAppearances, computeLearnedAdjustments, groupKeyOf, signalKindForTicket, type LearnedAdjustment, type LearnedMode, type SignalKind } from "./learned-adjustments";
 import type { ConversationState } from "./conversation-state";
 import type { ScoreModel, ScoringOptions } from "./scoring";
-import type { MentionEvent, MentionReply, PersonalPlanItem, TicketWorkState, WorkItem } from "./types";
+import { nbaSignals } from "./nba-feedback";
+import type { MemoryEvent, MentionEvent, MentionReply, PersonalPlanItem, TicketWorkState, WorkItem } from "./types";
 
 export interface ScoringContextState {
   scoringModel?: ScoreModel;
@@ -16,16 +17,17 @@ export interface ScoringContextState {
   learningResetAt?: string;
   personalPlan?: PersonalPlanItem[];
   ticketWorkStates?: Record<string, TicketWorkState>;
+  memoryEvents?: MemoryEvent[];
   data: { workItems: WorkItem[] };
 }
 
 // One-entry memo: the adjustments only depend on these inputs (a handful of plan items and histories), but the hook,
 // the override view and every TaskRow chip ask for them per render.
 let memo: { deps: unknown[]; value: LearnedAdjustment[] } | null = null;
-export function learnedAdjustmentsFor(state: Pick<ScoringContextState, "personalPlan" | "ticketWorkStates" | "learningResetAt"> & { data: { workItems: WorkItem[] } }, today: string): LearnedAdjustment[] {
-  const deps = [state.personalPlan, state.ticketWorkStates, state.data.workItems, state.learningResetAt, today];
+export function learnedAdjustmentsFor(state: Pick<ScoringContextState, "personalPlan" | "ticketWorkStates" | "learningResetAt" | "memoryEvents"> & { data: { workItems: WorkItem[] } }, today: string): LearnedAdjustment[] {
+  const deps = [state.personalPlan, state.ticketWorkStates, state.data.workItems, state.learningResetAt, state.memoryEvents, today];
   if (memo && memo.deps.length === deps.length && memo.deps.every((d, i) => Object.is(d, deps[i]))) return memo.value;
-  const value = computeLearnedAdjustments(collectAppearances({ today, planItems: state.personalPlan ?? [], ticketWorkStates: state.ticketWorkStates ?? {}, workItems: state.data.workItems, resetAt: state.learningResetAt }), today);
+  const value = computeLearnedAdjustments(collectAppearances({ today, planItems: state.personalPlan ?? [], ticketWorkStates: state.ticketWorkStates ?? {}, workItems: state.data.workItems, resetAt: state.learningResetAt, nbaSignals: nbaSignals(state.memoryEvents ?? []) }), today);
   memo = { deps, value };
   return value;
 }

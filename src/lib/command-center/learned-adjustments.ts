@@ -29,6 +29,8 @@ export const LEARN_MAX_DELTA = 8;
 export const LEARN_ACT_WITHIN_BUSINESS_DAYS = 2;
 export const LEARN_DECAY_AFTER_DAYS = 30;
 export const LEARN_SHADOW_DAYS_BEFORE_PROPOSAL = 14;
+/** Next Best Action feedback counts for less than a real status change. */
+const NBA_WEIGHT = 0.5;
 
 const KIND_LABEL: Record<SignalKind, string> = { MENTION: "mentions", OTHER: "tickets" };
 
@@ -55,6 +57,8 @@ export interface Appearance {
   priority: string;
   kind: SignalKind;
   outcome: "acted" | "ignored" | "pending";
+  /** 1 for plan appearances; lighter for Next Best Action feedback (P3.6). */
+  weight?: number;
 }
 
 export interface AppearanceInput {
@@ -64,6 +68,8 @@ export interface AppearanceInput {
   workItems: readonly Pick<WorkItem, "key" | "projectId" | "type" | "priority">[];
   /** Appearances planned before this date are ignored ("Reset learning"). */
   resetAt?: string;
+  /** P3.6 — "Useful" / "Not now" answers on Next Best Action cards: extra signals, weighted lower than real status changes. */
+  nbaSignals?: readonly { date: string; ticketKey: string; accepted: boolean; kind: SignalKind }[];
 }
 
 /** The business day on which the 2-business-day window ends. */
@@ -107,6 +113,15 @@ export function collectAppearances(input: AppearanceInput): Appearance[] {
       outcome: acted ? "acted" : ignoredExplicitly || windowOver ? "ignored" : "pending",
     });
   }
+  const nbaSeen = new Set<string>();
+  for (const n of input.nbaSignals ?? []) {
+    if (n.date < from || n.date > input.today || (input.resetAt && n.date < input.resetAt)) continue;
+    const w = byKey.get(n.ticketKey);
+    const dedupe = `${n.ticketKey}|${n.date}|${n.accepted}`;
+    if (!w || nbaSeen.has(dedupe)) continue;
+    nbaSeen.add(dedupe);
+    out.push({ ticketKey: n.ticketKey, date: n.date, projectId: w.projectId, projectLabel: n.ticketKey.split("-")[0], issueType: w.type, priority: w.priority, kind: n.kind, outcome: n.accepted ? "acted" : "ignored", weight: NBA_WEIGHT });
+  }
   return out.sort((a, b) => a.date.localeCompare(b.date) || a.ticketKey.localeCompare(b.ticketKey));
 }
 
@@ -143,7 +158,7 @@ function calendarDaysBetween(from: string, to: string): number {
 export function computeLearnedAdjustments(appearances: readonly Appearance[], today: string): LearnedAdjustment[] {
   const decided = appearances.filter((a) => a.outcome !== "pending");
   if (decided.length === 0) return [];
-  const w = (a: Appearance) => weightOf(a.date, today);
+  const w = (a: Appearance) => weightOf(a.date, today) * (a.weight ?? 1);
   const overallRate = decided.reduce((s, a) => s + (a.outcome === "acted" ? w(a) : 0), 0) / decided.reduce((s, a) => s + w(a), 0);
   const groups = new Map<string, Appearance[]>();
   for (const a of decided) groups.set(groupKeyOf(a), [...(groups.get(groupKeyOf(a)) ?? []), a]);

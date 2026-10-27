@@ -29,6 +29,7 @@ import { AskFollowUp } from "@/components/command-center/AskFollowUp";
 import { MorningMode } from "@/components/command-center/MorningMode";
 import { triageDoneLabel } from "@/lib/command-center/morning-mode";
 import { blockedFollowUpRows } from "@/lib/command-center/blocker-followup";
+import { NextBestActions } from "@/components/command-center/NextBestActions";
 import { NeedsNudgeGroup } from "@/components/command-center/ConversationChip";
 import { rowMatchesConversationFilter, type ConversationFilter } from "@/lib/command-center/conversation-filter";
 
@@ -247,6 +248,8 @@ function MyWorkInner() {
           Keyboard: <kbd>J</kbd>/<kbd>K</kbd> move · <kbd>C</kbd> done · <kbd>S</kbd> skip · <kbd>B</kbd> block{view === "new" ? <> · <kbd>R</kbd> reviewed</> : null} · <kbd>O</kbd> open in Jira
         </p>
       )}
+
+      {view === "today" && <NextBestActions />}
 
       {view === "today" && (
         <NeedsNudgeGroup

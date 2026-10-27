@@ -5,6 +5,7 @@
 // handled here shows the same status everywhere. Finishing records "Triage done in Xm" for
 // the day; leaving early records nothing (the flow is offered again next time today).
 
+import { NextBestActions } from "./NextBestActions";
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useMyWork } from "./use-my-work";
 import { Panel, SectionHeading } from "./ui";
@@ -341,6 +342,7 @@ export function MorningMode({ onExit }: { onExit: () => void }) {
 
         {step === "start" && (
           <div data-morning-start>
+            <div className="mb-4"><NextBestActions compact /></div>
             {plan[0] ? (
               <>
                 <p className="text-sm text-text2">First up:</p>
