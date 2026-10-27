@@ -8,12 +8,14 @@ import type { AppStateStore, SyncedAppState } from "../app-state";
 import type { NotifyStateStore, PersonalNotifyState } from "../notify-state";
 import type { ServerReportState, ServerReportStore } from "../server-daily-report";
 import type { JiraWriteLogStore, JiraWriteServerLogEntry } from "../jira/write-gate";
+import type { CronHeartbeat, HeartbeatStore } from "../health";
 import { scopedKey } from "../auth/auth-config";
 import type { KvLike } from "./kv";
 
 export const APP_STATE_KEY = "daily-command:app-state:v1";
 export const NOTIFY_STATE_KEY = "daily-command:personal-notify-state:v1";
 export const SERVER_REPORTS_KEY = "daily-command:server-reports:v1";
+export const CRON_HEARTBEAT_KEY = "daily-command:cron-heartbeat:v1";
 export const JIRA_WRITE_LOG_KEY = "daily-command:jira-write-log:v1";
 export const JIRA_WRITE_LOG_MAX_ENTRIES = 1000;
 
@@ -41,6 +43,12 @@ function isValidNotifyState(v: unknown): v is PersonalNotifyState {
   if (typeof v !== "object" || v === null) return false;
   const s = v as Partial<PersonalNotifyState>;
   return Array.isArray(s.assignedIssueKeys) && s.assignedIssueKeys.every((k) => typeof k === "string") && Array.isArray(s.notifiedCommentIds) && s.notifiedCommentIds.every((k) => typeof k === "string") && typeof s.lastCheckedAtIso === "string" && (s.retryIssueKeys === undefined || (Array.isArray(s.retryIssueKeys) && s.retryIssueKeys.every((k) => typeof k === "string")));
+}
+
+function isValidHeartbeat(v: unknown): v is CronHeartbeat {
+  if (typeof v !== "object" || v === null) return false;
+  const s = v as Partial<CronHeartbeat>;
+  return typeof s.lastRunAt === "string" && typeof s.durationMs === "number" && typeof s.notified === "number" && Array.isArray(s.warnings) && s.warnings.every((w) => typeof w === "string") && (s.lastOkAt === undefined || typeof s.lastOkAt === "string") && (s.lastError === undefined || typeof s.lastError === "string");
 }
 
 function isValidReportState(v: unknown): v is ServerReportState {
@@ -72,6 +80,7 @@ function blobStore<T>(kv: KvLike, key: string, isValid: (v: unknown) => v is T) 
 
 export const createKvAppStateStore = (kv: KvLike, uid?: string): AppStateStore => blobStore(kv, scopedKey(APP_STATE_KEY, uid), isValidAppState);
 export const createKvNotifyStore = (kv: KvLike, uid?: string): NotifyStateStore => blobStore(kv, scopedKey(NOTIFY_STATE_KEY, uid), isValidNotifyState);
+export const createKvHeartbeatStore = (kv: KvLike, uid?: string): HeartbeatStore => blobStore(kv, scopedKey(CRON_HEARTBEAT_KEY, uid), isValidHeartbeat);
 export const createKvServerReportStore = (kv: KvLike, uid?: string): ServerReportStore => blobStore(kv, scopedKey(SERVER_REPORTS_KEY, uid), isValidReportState);
 
 /** Append-only (rpush, trimmed to the newest entries, never edited). */

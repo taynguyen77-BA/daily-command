@@ -20,7 +20,9 @@ import { createServerReportStore } from "@/lib/server/server-report-store";
 import { isServerDailyReportConfigured, reportSnapshotHourLocal } from "@/lib/command-center/server-daily-report";
 import { createNotifyStore } from "@/lib/server/notify-store";
 import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
-import { runCronForMembers, runCronTick } from "@/lib/command-center/jira/cron-tick";
+import { runCronForMembers, runCronTickWithHeartbeat } from "@/lib/command-center/jira/cron-tick";
+import { createHeartbeatStore } from "@/lib/server/heartbeat-store";
+import { buildHeartbeat } from "@/lib/command-center/health";
 import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
 import { effectiveAccountId } from "@/lib/command-center/auth/principal";
 import { planCronMembers } from "@/lib/command-center/auth/cron-plan";
@@ -314,15 +316,23 @@ export async function GET(req: Request) {
   }
   const accountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
   if (!accountId) {
-    return NextResponse.json({ ok: true, cron: true, ran: { notify: false, snapshot: false }, warnings: ["PERSONAL_JIRA_ACCOUNT_ID is not set — the cron has nothing to do (notify and the daily snapshot both need it)."] });
+    const warnings = ["PERSONAL_JIRA_ACCOUNT_ID is not set — the cron has nothing to do (notify and the daily snapshot both need it)."];
+    // P2.2 — still a heartbeat, so the health chip says why instead of "never ran".
+    const store = createHeartbeatStore();
+    try {
+      await store.set(buildHeartbeat({ startedAt: Date.now(), finishedAt: Date.now(), notified: 0, warnings, previous: await store.get() }));
+    } catch {
+      // best-effort
+    }
+    return NextResponse.json({ ok: true, cron: true, ran: { notify: false, snapshot: false }, warnings });
   }
-  const result = await runCronTick(fetch, config, accountId, {
+  const result = await runCronTickWithHeartbeat(fetch, config, accountId, {
     notifyStore: isNotifyStoreConfigured() ? createNotifyStore() : undefined,
     timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(),
     snapshot: isServerDailyReportConfigured(process.env)
       ? { store: createServerReportStore(), now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) }
       : undefined,
-  });
+  }, createHeartbeatStore());
   return NextResponse.json(result);
 }
 
@@ -339,6 +349,7 @@ async function memberCron(req: Request) {
   const budget = Number(process.env.CRON_RUN_BUDGET_MS);
   const result = await runCronForMembers(fetch, plans, {
     storesFor: (uid) => ({ notifyStore: isNotifyStoreConfigured() ? createNotifyStore(uid) : undefined, reportStore: isAppStateStoreConfigured() ? createServerReportStore(uid) : undefined }),
+    heartbeatFor: (uid) => createHeartbeatStore(uid),
     now: () => new Date(),
     snapshotHourLocal: reportSnapshotHourLocal(process.env),
     budgetMs: Number.isFinite(budget) && budget > 0 ? budget : 50_000,

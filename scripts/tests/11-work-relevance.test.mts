@@ -760,7 +760,7 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
   const syncRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
   ok("V2.13 Sync route wiring", /process\.env\.PERSONAL_JIRA_ACCOUNT_ID/.test(syncRouteSrc), "the sync route's GET handler reads PERSONAL_JIRA_ACCOUNT_ID");
   const cronTickSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/jira/cron-tick.ts"), "utf8");
-  ok("V2.13 Sync route wiring", /runCronTick\(fetch, config, accountId/.test(syncRouteSrc) && /runServerSideNotifyCheck\(fetchImpl, config, accountId, steps\.notifyStore,/.test(cronTickSrc), "the GET handler calls the real runServerSideNotifyCheck (via jira/cron-tick.ts), never a second implementation");
+  ok("V2.13 Sync route wiring", /runCronTickWithHeartbeat\(fetch, config, accountId/.test(syncRouteSrc) && /runServerSideNotifyCheck\(fetchImpl, config, accountId, steps\.notifyStore,/.test(cronTickSrc), "the GET handler calls the real runServerSideNotifyCheck (via jira/cron-tick.ts), never a second implementation");
   ok("V2.13 Sync route wiring", /createNotifyStore/.test(syncRouteSrc), "the GET handler wires the real KV-backed store, not the in-memory test fake");
   ok("V2.13 Sync route wiring", /isNotifyStoreConfigured/.test(syncRouteSrc), "the GET handler gates on the shared isNotifyStoreConfigured() check, not a duplicated env-var check");
   // K3 — the GET no longer runs the full sync first; every step is gated: no account → nothing

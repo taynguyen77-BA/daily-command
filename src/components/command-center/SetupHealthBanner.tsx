@@ -37,6 +37,7 @@ import { useCrossDeviceSyncActive } from "./BackupReminder";
 import { latestSnapshotRunLocal, localHourOf } from "@/lib/command-center/report-schedule";
 import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
 import { getJiraWriteSecret, isSessionAuthMode } from "@/lib/command-center/device-pairing";
+import { fetchServerHealthCached, selectServerCheck } from "@/lib/command-center/health-client";
 import type { CommandCenterData, DataSourceType, PersonalIdentity } from "@/lib/command-center/types";
 
 /** C4 — additional, independently-loaded facts. Every field optional: undefined/null means
@@ -59,6 +60,8 @@ export interface SetupHealthExtras {
   authMissing?: string[];
   /** G3 — the sync cron's UTC hours, Jira's offset (minutes) and the snapshot hour, when known. */
   snapshotSchedule?: { cronHoursUtc: number[]; offsetMinutes?: number; snapshotHourLocal: number };
+  /** P2.2 — the scheduled server check, via selectServerCheck (null/undefined: unknown or not in use). */
+  serverCheck?: { tone: "green" | "amber" | "red"; tooltip: string } | null;
 }
 
 export function authMisconfiguredText(missing: string[]): string {
@@ -119,6 +122,8 @@ export function computeSetupHealthRows(
         : "This device is no longer paired for cross-device sync — re-pair it in Data & Settings, or changes made here won't reach your other devices.",
     });
   }
+
+  if (dataSource === "jira" && extras.serverCheck && extras.serverCheck.tone !== "green") rows.push({ id: "server-check", text: extras.serverCheck.tooltip });
 
   if (dataSource === "jira" && extras.sprintFieldMapped === false) {
     rows.push({ id: "sprint-field", text: "Sprint field not mapped (optional) — set your Jira sprint field id in Data & Settings to group reports by sprint." });
@@ -231,6 +236,17 @@ export function SetupHealthBanner() {
       cancelled = true;
     };
   }, [writeOn]);
+  // P2.2 — the scheduled server check (same selector as the header chip).
+  const [serverCheck, setServerCheck] = useState<ReturnType<typeof selectServerCheck>>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void fetchServerHealthCached().then((h) => {
+      if (!cancelled) setServerCheck(selectServerCheck(h));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // G3 — when the server snapshot runs (only matters once server reports are in use).
   const [schedule, setSchedule] = useState<SetupHealthExtras["snapshotSchedule"]>(undefined);
   const serverReportsInUse = Object.values(state.dailyReports).some((r) => !!r.server);
@@ -257,6 +273,7 @@ export function SetupHealthBanner() {
     backup: { lastBackupAt: state.lastBackupAt, crossDeviceActive, isDemo: state.isDemo, now: new Date() },
     jiraWrite: { clientOn: writeOn, server: jiraWriteServer, devicePaired: isSessionAuthMode() || !!getJiraWriteSecret() },
     snapshotSchedule: schedule,
+    serverCheck,
   });
   if (rows.length === 0) return null;
 

@@ -10,6 +10,7 @@
 import { runServerSideNotifyCheck } from "../cron-notify";
 import { runServerDailySnapshot, type ServerReportStore } from "../server-daily-report";
 import type { NotifyStateStore } from "../notify-state";
+import { buildHeartbeat, type HeartbeatStore } from "../health";
 import type { FetchLike } from "./http";
 import type { JiraConnectionConfig } from "./types";
 
@@ -19,6 +20,8 @@ export interface CronTickResult {
   /** Which steps ran (a step whose store isn't configured is skipped, not an error). */
   ran: { notify: boolean; snapshot: boolean };
   warnings: string[];
+  /** P2.2 — Slack messages delivered by the notify step this run (0 when it did not run). */
+  notified?: number;
 }
 
 export async function runCronTick(
@@ -37,12 +40,14 @@ export async function runCronTick(
   // A failure in either step never fails the other, and never corrupts persisted state (both
   // modules only write after every fetch succeeded) — it is surfaced as a warning.
   const warnings: string[] = [];
+  let notified = 0;
   if (steps.notifyStore) {
     try {
       const result = await runServerSideNotifyCheck(fetchImpl, config, accountId, steps.notifyStore, undefined, {
         ...("webhookUrl" in steps ? { webhookUrl: steps.webhookUrl } : {}),
         timezoneOffsetMinutes: steps.timezoneOffsetMinutes,
       });
+      notified = result.notified;
       if (result.error) warnings.push(`Server-side notify check failed: ${result.error}`);
     } catch (err) {
       warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -57,7 +62,37 @@ export async function runCronTick(
       warnings.push(`Server-side daily report failed: ${err instanceof Error ? err.message : "unknown error"}`);
     }
   }
-  return { ok: true, cron: true, ran: { notify: !!steps.notifyStore, snapshot: !!steps.snapshot }, warnings };
+  return { ok: true, cron: true, ran: { notify: !!steps.notifyStore, snapshot: !!steps.snapshot }, warnings, notified };
+}
+
+/** P2.2 — runCronTick plus the heartbeat: written after every run, success OR failure, and a
+ *  heartbeat problem (or a throw out of the tick) never escapes — the cron response stays a
+ *  normal JSON body. No store (KV not configured) -> exactly runCronTick. */
+export async function runCronTickWithHeartbeat(
+  fetchImpl: FetchLike,
+  config: JiraConnectionConfig,
+  accountId: string,
+  steps: Parameters<typeof runCronTick>[3],
+  heartbeat?: HeartbeatStore,
+  clock: () => number = Date.now,
+  extra: { oldestWaitMinutes?: number } = {}
+): Promise<CronTickResult> {
+  const startedAt = clock();
+  let result: CronTickResult;
+  try {
+    result = await runCronTick(fetchImpl, config, accountId, steps);
+  } catch (err) {
+    result = { ok: true, cron: true, ran: { notify: false, snapshot: false }, warnings: [`Cron tick failed: ${err instanceof Error ? err.message : "unknown error"}`], notified: 0 };
+  }
+  if (heartbeat) {
+    try {
+      const previous = await heartbeat.get();
+      await heartbeat.set(buildHeartbeat({ startedAt, finishedAt: clock(), notified: result.notified ?? 0, warnings: result.warnings, previous, ...extra }));
+    } catch {
+      // best-effort — a heartbeat write failure never fails the run
+    }
+  }
+  return result;
 }
 
 // ===== L4 — team sign-in: one run per member =================================================
@@ -97,6 +132,8 @@ export async function runCronForMembers(
     /** Wall-clock budget for the whole run, ms. */
     budgetMs: number;
     clock?: () => number;
+    /** P2.2 — per-member heartbeat store (omitted: none written). */
+    heartbeatFor?: (uid: string) => HeartbeatStore | undefined;
   }
 ): Promise<CronMembersResult> {
   const clock = deps.clock ?? Date.now;
@@ -109,12 +146,12 @@ export async function runCronForMembers(
     }
     const stores = deps.storesFor(plan.uid);
     try {
-      const tick = await runCronTick(fetchImpl, plan.config, plan.accountId, {
+      const tick = await runCronTickWithHeartbeat(fetchImpl, plan.config, plan.accountId, {
         notifyStore: plan.notify ? stores.notifyStore : undefined,
         webhookUrl: plan.webhookUrl,
         timezoneOffsetMinutes: plan.timezoneOffsetMinutes,
         snapshot: plan.snapshot && stores.reportStore ? { store: stores.reportStore, now: deps.now(), timezoneOffsetMinutes: plan.timezoneOffsetMinutes, snapshotHourLocal: deps.snapshotHourLocal } : undefined,
-      });
+      }, deps.heartbeatFor?.(plan.uid), clock);
       result.usersProcessed++;
       if (tick.warnings.length > 0) result.failures.push({ uid: plan.uid, email: plan.email, error: tick.warnings.join(" ") });
     } catch (err) {

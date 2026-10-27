@@ -4,30 +4,58 @@ name: Jira sync (scheduled)
 # plan/host, calling the exact same protected endpoint on a tighter schedule. Requires two
 # repo secrets to actually do anything: SYNC_URL (the deployed app's base URL) and
 # CRON_SECRET (must match the CRON_SECRET env var configured on the deployment — see
-# README.md). Neither secret being set means this workflow simply fails its curl step
-# harmlessly on every run; it never touches deployment config or credentials itself.
+# README.md). It never touches deployment config or credentials itself.
+#
+# V2.42 (P2.2):
+#  - It calls GET, which is what runs the server-side notify check and the daily snapshot
+#    (jira/cron-tick.ts). Until now this workflow sent a POST, i.e. a full Jira sync whose
+#    result nobody reads, so the 15-minute cadence never actually notified.
+#  - Missing secrets still exit 0 (a fork must not turn red), but now raise a visible
+#    ::warning:: annotation and a step summary instead of a silent no-op.
+#  - GitHub disables scheduled workflows on public repos after 60 days without repository
+#    activity. The keep-alive step re-enables this workflow through the API on every run. That
+#    is BEST EFFORT: a workflow GitHub already disabled does not run, so this only helps while
+#    it is still enabled and re-arms the 60-day window; if it has been disabled, enable it by
+#    hand in the Actions tab.
 
 on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+  actions: write # keep-alive step only
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Call the Jira sync endpoint
+      - name: Call the server-side check (notify + daily snapshot)
         env:
           SYNC_URL: ${{ secrets.SYNC_URL }}
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
         run: |
           if [ -z "$SYNC_URL" ] || [ -z "$CRON_SECRET" ]; then
-            echo "SYNC_URL and/or CRON_SECRET repo secrets are not configured — skipping (no-op)."
+            echo "::warning title=Jira sync not running::SYNC_URL and/or CRON_SECRET repo secrets are not configured, so this scheduled workflow does nothing."
+            {
+              echo "### Jira sync skipped"
+              echo "SYNC_URL and/or CRON_SECRET are not set as repository secrets, so no request was sent."
+              echo "Server-side notifications and the daily report will not run from this scheduler."
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           curl --fail --silent --show-error \
-            --max-time 30 \
-            -X POST "$SYNC_URL/api/command-center/jira/sync" \
-            -H "Authorization: Bearer $CRON_SECRET" \
-            -H "Content-Type: application/json" \
-            -d '{}'
+            --max-time 60 \
+            -X GET "$SYNC_URL/api/command-center/jira/sync" \
+            -H "Authorization: Bearer $CRON_SECRET"
+
+      - name: Keep this workflow enabled (best effort)
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api -X PUT "repos/$REPO/actions/workflows/sync.yml/enable" \
+            || echo "::notice::Could not re-enable the workflow (best effort)."
