@@ -122,6 +122,8 @@ import { migrateTicketBackedActionStatuses } from "./action-migration";
 import { mergeServerDailyReports, type ServerDailyStandup } from "./server-report-merge";
 import { planJiraComment, planJiraReply, planJiraWriteBack, type JiraWriteBackProposal } from "./jira/write-back";
 import { detectRepliedMentions, mergeMyTicketActivity } from "./mention-replies";
+import { buildAwaitingMe } from "./awaiting-me";
+import type { ScoreModel, ScoringOptions } from "./scoring";
 import type { ImportResult } from "./import";
 import type { SyncedAppState } from "./app-state";
 import { asAiDataProtectionSettings, DEFAULT_AI_DATA_PROTECTION, type AiDataProtectionSettings } from "./ai/data-protection";
@@ -348,6 +350,8 @@ export interface StoreState {
   morningTriage: Record<string, MorningTriageRecord>;
   /** F1 — Command Center compact mode (KPI strip + My Work summary + Release). */
   commandCenterCompact: boolean;
+  /** P3.1 — priority scoring model. Absent/unknown = "v2" (the default); "v1" is the original model. */
+  scoringModel?: ScoreModel;
   /** F1 — the Action Plan time budget, shared with Morning Mode's plan step. */
   timeBudgetMinutes?: TimeBudget;
   /** F2 — a blocked ticket older than this many business days is overdue (default 2). */
@@ -417,6 +421,7 @@ function initialState(): StoreState {
     followUpNotified: {},
     morningTriage: {},
     commandCenterCompact: false,
+    scoringModel: "v2",
     blockerSlaBusinessDays: DEFAULT_BLOCKER_SLA_BUSINESS_DAYS,
     jiraWriteBack: { ...DEFAULT_JIRA_WRITE_BACK_SETTINGS },
     jiraWriteLog: [],
@@ -1021,6 +1026,7 @@ function parseStoredStateRaw(raw: string): StoreState {
       backupReminderSnoozedAt: typeof parsed.backupReminderSnoozedAt === "string" ? parsed.backupReminderSnoozedAt : undefined,
       morningTriage: asMorningTriage(parsed.morningTriage),
       commandCenterCompact: parsed.commandCenterCompact === true,
+      scoringModel: parsed.scoringModel === "v1" ? "v1" : "v2",
       timeBudgetMinutes: TIME_BUDGETS.includes(parsed.timeBudgetMinutes as TimeBudget) ? (parsed.timeBudgetMinutes as TimeBudget) : undefined,
       blockerSlaBusinessDays: asBlockerSla(parsed.blockerSlaBusinessDays),
       jiraWriteBack: asJiraWriteBackSettings(parsed.jiraWriteBack),
@@ -1906,6 +1912,17 @@ export class CommandCenterStore {
     this.set({ ...this.state, commandCenterCompact: on });
   }
 
+  /** P3.1 — switch the priority scoring model (device-local setting). */
+  setScoringModel(model: ScoreModel) {
+    if (model !== "v1" && model !== "v2") return;
+    this.set({ ...this.state, scoringModel: model });
+  }
+
+  /** P3.1 — the scoring carrier every snapshot/score computed by the store uses. */
+  private scoringOptions(): ScoringOptions {
+    return { model: this.state.scoringModel ?? "v2", awaitingMeByKey: buildAwaitingMe(this.state.mentionEvents, this.state.mentionReplies) };
+  }
+
   /** F1 — the Action Plan time budget, also Morning Mode's plan budget. */
   setTimeBudget(minutes: TimeBudget) {
     if (!TIME_BUDGETS.includes(minutes)) return;
@@ -2782,7 +2799,7 @@ export class CommandCenterStore {
     // no longer generates a fresh memory event here as if it were still open/blocked.
     const workRelevanceIndex = buildWorkRelevanceIndex(this.state.jiraWorkRelevancePolicy);
     const dailyCommandCompletedWorkItemIds = this.resolveDailyCommandCompletedWorkItemIds(dataAfter);
-    const currentMetrics = buildDailySnapshot(dataAfter, today, 0, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds).metrics!;
+    const currentMetrics = buildDailySnapshot(dataAfter, today, 0, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds, this.scoringOptions()).metrics!;
     const currentDrift = computeDeliveryDrift(historyBeforeAppend, currentMetrics);
 
     const lastPrior = historyBeforeAppend[historyBeforeAppend.length - 1];
@@ -3205,7 +3222,7 @@ export class CommandCenterStore {
     const dailyCommandCompletedWorkItemIds = this.resolveDailyCommandCompletedWorkItemIds(data);
     const unscopedOpenRisks = dedupeRisks(data.risks, detectRisks(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
     const meaningfulChangeCount = detectChanges(previous, data, today, unscopedOpenRisks, workRelevanceIndex).length;
-    const todaySnapshot = buildDailySnapshot(data, today, meaningfulChangeCount, unscopedOpenRisks, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+    const todaySnapshot = buildDailySnapshot(data, today, meaningfulChangeCount, unscopedOpenRisks, workRelevanceIndex, dailyCommandCompletedWorkItemIds, this.scoringOptions());
     const newMemoryEvents = this.computeMemoryEvents(data, snapshotHistory, today);
 
     this.set({

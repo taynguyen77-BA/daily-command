@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.42
+**Current version:** V2.43
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.42.0` ↔ `V2.42`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.43.0` ↔ `V2.43`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -160,6 +160,10 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 - **Meeting notes → actions** *(J4)*. In Meeting Mode, paste notes or a transcript: decisions, action items (owner, due resolved from words like "Friday"), explicit ticket status changes and open questions, on a review screen where you edit and untick. **Create selected** is the only thing that creates decisions/actions or changes a status (history surface `ai-meeting`); ticket keys that don't exist here are listed as dropped, never created.
 - **Command Bar commands** *(J5)*. Type e.g. "defer all WF mentions to Monday" or "block MCWS-123 waiting for API spec". The command becomes operations from an allow-list (**setTicketStatus**, **addAction** — nothing else exists); the app resolves targets against real data and shows a preview diff; **Apply** runs it through the normal store (surface `ai-command`). An unknown ticket, a project name matching several projects, an unclear date or a vague target gets a question back instead of a guess. Without AI, a deterministic parser handles the same simple forms.
 - **Weekly insights** *(J6)*. Weekly Review → **Generate**: 3–5 observations, each with its evidence, and 3 suggestions for next week, from this week's ticket history, blockers by person, skip reasons and AI-triage acceptance (numbers locked). Saved per week; Reports → Weekly can add them to its copies ("Include in copies").
+
+## Smarter ranking (V2.43)
+
+- **Priority Score v2** *(P3.1)*. A separate, pure model selectable in Data & Settings → Features (`scoringModel`, default **v2**; **v1** is the original model and stays selectable; stored state without the field loads as v2). Weights (max 100): **Priority 20** (P1 20 · P2 14 · P3 7 · P4 0; Jira priority missing/unrecognised = 0 and −0.05 confidence, via the new `priorityKnown` flag) · **Deadline 20** (as v1) · **Awaiting you 15** (an unanswered mention of you, by age against the 2-business-day reply SLA) · **Blocker 15** · **Aging 10** (days since the status category changed, else last update) · **Change frequency 10** · **Dependency 5** · **Ownership 5**; when a business-impact rating exists (demo/import data) Priority is scaled to 10 and Business impact (0-10) takes the other 10. Thresholds (80/60/40) are unchanged, `reasoning` names the top two factors ("Priority P1 (Highest in Jira) and overdue by 3 days"), and `eligibilityScore` rescales by the factors the data can speak to. Snapshots record the model (`metrics.scoringModel`, absent = v1) and trend/drift/weekly code never compares scores across models — it says "Scoring model changed since <date>". *Deviation from the prompt's table:* Dependency 5 / Change frequency 10 instead of 10 / 5, because with the original weights an overdue, blocked P1 ticket with no dependency links maxes out at 75 and could never reach CRITICAL. On the 14-item demo dataset 9 of the top 10 are the same tickets (7 in the same position; the top 3 keep their order; UBS-202 enters because of its business impact and P2 priority, DIN-501 leaves).
 
 ## Reliability (V2.42)
 

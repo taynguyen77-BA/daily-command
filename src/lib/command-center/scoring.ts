@@ -2,33 +2,22 @@
 // Pure functions, no AI calls — every number here must be reproducible and explainable.
 
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
-import type { CommandCenterData, PriorityFactor, PriorityScoreResult, Severity, WorkItem } from "./types";
+import { eligibilityScoreV2, scoreWorkItemV2 } from "./scoring-v2";
+import type { AwaitingMeSignal } from "./awaiting-me";
+import type { CommandCenterData, PriorityFactor, PriorityScoreResult, WorkItem } from "./types";
 
-// F6 — daysBetween runs for every item in several engines on every render; parsing the same few
-// hundred distinct dates over and over was the single biggest cost on a 3,000-item Jira. The
-// local-midnight timestamp of each date string is cached (bounded; same parse as before, so the
-// result is identical — including NaN for an unparseable date).
-const MIDNIGHT_CACHE_MAX = 5000;
-const midnightCache = new Map<string, number>();
-function localMidnightMs(iso: string): number {
-  let t = midnightCache.get(iso);
-  if (t === undefined) {
-    if (midnightCache.size >= MIDNIGHT_CACHE_MAX) midnightCache.clear();
-    t = new Date(iso + "T00:00:00").getTime();
-    midnightCache.set(iso, t);
-  }
-  return t;
-}
+export { daysBetween, classify } from "./score-core";
+import { daysBetween, classify } from "./score-core";
 
-export function daysBetween(fromIso: string, toIso: string): number {
-  return Math.round((localMidnightMs(toIso) - localMidnightMs(fromIso)) / 86_400_000);
-}
+/** P3.1 — which scoring implementation. "v1" is the original model, untouched; every function below
+ *  defaults to it, so existing callers and tests keep their exact output. */
+export type ScoreModel = "v1" | "v2";
 
-export function classify(score: number): Severity {
-  if (score >= 80) return "CRITICAL";
-  if (score >= 60) return "HIGH";
-  if (score >= 40) return "MEDIUM";
-  return "LOW";
+/** The optional, trailing carrier threaded through every scoring entry point. */
+export interface ScoringOptions {
+  model?: ScoreModel;
+  /** v2's "Awaiting you" factor: ticket key -> unanswered mention (awaiting-me.ts). */
+  awaitingMeByKey?: Readonly<Record<string, AwaitingMeSignal>>;
 }
 
 /**
@@ -36,7 +25,8 @@ export function classify(score: number): Severity {
  *   Business impact (0-20) + Urgency/deadline (0-20) + Dependency risk (0-15)
  *   + Aging (0-10) + Blocker status (0-15) + Change frequency (0-10) + Ownership risk (0-10)
  */
-export function scoreWorkItem(item: WorkItem, data: CommandCenterData, today: string): PriorityScoreResult {
+export function scoreWorkItem(item: WorkItem, data: CommandCenterData, today: string, options: ScoringOptions = {}): PriorityScoreResult {
+  if (options.model === "v2") return scoreWorkItemV2(item, data, today, options);
   const factors: PriorityFactor[] = [];
 
   // V1.3 §17: a Jira-sourced item may not carry a business-impact-equivalent field —
@@ -138,7 +128,8 @@ export function scoreWorkItem(item: WorkItem, data: CommandCenterData, today: st
  * low and stays excluded. Used ONLY for the candidate-pool gate (action-plan.ts); the raw
  * score/classify() severity shown on Priorities and Risks is intentionally untouched.
  */
-export function eligibilityScore(item: WorkItem, result: PriorityScoreResult): number {
+export function eligibilityScore(item: WorkItem, result: PriorityScoreResult, model: ScoreModel = "v1"): number {
+  if (model === "v2") return eligibilityScoreV2(item, result);
   let maxAchievable = 100;
   if (item.businessImpact === undefined) maxAchievable -= 20;
   if (!item.dueDate) maxAchievable -= 20;
@@ -156,11 +147,12 @@ export function scoreAllWorkItems(
   data: CommandCenterData,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  options: ScoringOptions = {}
 ): PriorityScoreResult[] {
   return data.workItems
     .filter((i) => isWorkItemOperationallyOpen(i, workRelevanceIndex, dailyCommandCompletedWorkItemIds))
-    .map((i) => scoreWorkItem(i, data, today))
+    .map((i) => scoreWorkItem(i, data, today, options))
     .sort((a, b) => b.score - a.score);
 }
 

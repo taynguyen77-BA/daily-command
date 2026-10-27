@@ -45,12 +45,14 @@ const FILES = [
   "./34-review-fixes-v239.test.mts",
   "./34-multi-user-auth.test.mts",
   "./35-notify-correctness.test.mts",
+  "./36-priority-signal.test.mts",
   "./37-jira-resilience.test.mts",
   "./38-cron-health.test.mts",
   "./39-fair-cron.test.mts",
   "./40-kv-seam.test.mts",
   "./41-jira-smoke.test.mts",
   "./42-lint-cleanup.test.mts",
+  "./43-score-v2.test.mts",
 ];
 
 for (const file of FILES) await import(file);

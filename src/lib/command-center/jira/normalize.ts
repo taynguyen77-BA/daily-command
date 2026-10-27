@@ -3,7 +3,7 @@
 // CommandCenterData pieces. This is what makes it testable with fixtures and isolated from
 // both the UI and the actual HTTP client (./client.ts, server-only).
 
-import { isBlockedByHeuristic, mapPriority, mapStatus, mapWorkItemType } from "./mapping";
+import { isBlockedByHeuristic, isKnownJiraPriority, mapPriority, mapStatus, mapWorkItemType } from "./mapping";
 import type { JiraIssue, JiraProject } from "./types";
 import type { Client, Dependency, Project, WorkItem } from "../types";
 
@@ -107,6 +107,8 @@ export function normalizeIssue(issue: JiraIssue, options: NormalizeOptions): { w
     type: mapWorkItemType(f.issuetype?.name, f.labels ?? []),
     status: mapStatus(f.status?.name, f.status?.statusCategory?.key, flagged),
     priority: mapPriority(f.priority?.name),
+    priorityKnown: isKnownJiraPriority(f.priority?.name),
+    ...(f.priority?.name ? { jiraPriorityName: f.priority.name } : {}),
     owner: f.assignee?.displayName,
     // V2.10 §1 — the stable Jira accountId behind `owner`; preferred over the display name
     // for identity matching wherever a `PersonalIdentity.accountId` is configured.

@@ -4,7 +4,7 @@
 
 import { compareSnapshots, dailyCanonicalSnapshots } from "./memory";
 import { detectRecurringPatterns } from "./pattern-detection";
-import { scoreAllWorkItems } from "./scoring";
+import { scoreAllWorkItems, type ScoringOptions } from "./scoring";
 import { daysBetween } from "./scoring";
 import type { Action, CommandCenterData, DailySnapshot, Decision, EvidenceSourceType, PriorityScoreResult, RecurringPattern, WorkItem } from "./types";
 
@@ -30,7 +30,8 @@ export function buildWeeklyReviewFacts(
   data: CommandCenterData,
   history: DailySnapshot[],
   today: string,
-  sourceType: EvidenceSourceType
+  sourceType: EvidenceSourceType,
+  scoring?: ScoringOptions
 ): WeeklyReviewFacts {
   // V2.18 §10 — history is the raw, frequent operational record (see dailyCanonicalSnapshots'
   // own comment) — a "week" here must mean up to 7 distinct calendar days, not up to 7
@@ -40,11 +41,11 @@ export function buildWeeklyReviewFacts(
   const oldest = window[0];
   const latest = window[window.length - 1];
 
-  const scores = scoreAllWorkItems(data, today);
+  const scores = scoreAllWorkItems(data, today, undefined, undefined, scoring);
   const currentConfidence =
     latest?.metrics?.deliveryConfidence ?? 0; // if no history at all, we still report today via memory.buildSnapshotMetrics at the call site
 
-  const trend = oldest?.metrics && latest?.metrics ? compareSnapshots(latest.metrics, oldest.metrics) : null;
+  const trend = oldest?.metrics && latest?.metrics ? compareSnapshots(latest.metrics, oldest.metrics, oldest.date) : null;
 
   const decisionsMade = data.decisions.filter((d) => {
     if (d.status !== "made" && d.status !== "SUPERSEDED") return false;
@@ -78,7 +79,7 @@ export function buildWeeklyReviewFacts(
     hasEnoughHistory: window.length >= 2,
     windowDays: window.length > 0 && oldest ? Math.max(1, daysBetween(oldest.date, latest.date) + 1) : 0,
     currentConfidence: latest?.metrics ? currentConfidence : 0,
-    confidenceDelta: trend ? latest!.metrics!.deliveryConfidence - oldest!.metrics!.deliveryConfidence : null,
+    confidenceDelta: trend && !trend.modelChanged ? latest!.metrics!.deliveryConfidence - oldest!.metrics!.deliveryConfidence : null, // P3.1: not comparable across scoring models
     gettingBetter: trend?.gettingBetter ?? [],
     gettingWorse: trend?.gettingWorse ?? [],
     recurringRisks,

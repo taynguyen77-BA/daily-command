@@ -21,6 +21,11 @@ export const PRIORITY_MAP: Record<string, "P1" | "P2" | "P3" | "P4"> = {
   trivial: "P4",
 };
 
+/** P3.1 — true when Jira supplied a priority name this mapping recognises. */
+export function isKnownJiraPriority(jiraPriorityName: string | undefined): boolean {
+  return !!jiraPriorityName && jiraPriorityName.toLowerCase() in PRIORITY_MAP;
+}
+
 export function mapPriority(jiraPriorityName: string | undefined): "P1" | "P2" | "P3" | "P4" {
   if (!jiraPriorityName) return "P3"; // undocumented/missing priority — neutral default, never "P1"
   return PRIORITY_MAP[jiraPriorityName.toLowerCase()] ?? "P3";

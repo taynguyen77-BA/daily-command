@@ -3,7 +3,7 @@
 
 import { detectChanges } from "./change-detection";
 import { detectRisks, riskFingerprint, RISK_LEVEL_ORDER } from "./risk-detection";
-import { isOverdue, scoreAllWorkItems } from "./scoring";
+import { isOverdue, scoreAllWorkItems, type ScoringOptions } from "./scoring";
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, ChangeEvent, DailySnapshot, PriorityScoreResult, Risk, WorkItem } from "./types";
 
@@ -51,9 +51,11 @@ export function deriveData(
   previous: DailySnapshot | null,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  /** P3.1 — scoring model + signals; omitted = v1, exactly as before. */
+  scoring?: ScoringOptions
 ): DerivedData {
-  const scores = scoreAllWorkItems(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const scores = scoreAllWorkItems(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
   const scoreByItemId = new Map(scores.map((s) => [s.itemId, s]));
 
   const risks = dedupeRisks(data.risks, detectRisks(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));

@@ -32,7 +32,7 @@ function renderReview(text: string) {
 }
 
 export default function WeeklyReviewPage() {
-  const { state, today, filteredData, personalFocus, proactive, store } = useCommandCenter();
+  const { state, today, filteredData, personalFocus, proactive, scoring, store } = useCommandCenter();
   const [reviewText, setReviewText] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [weeklyReportCopied, setWeeklyReportCopied] = useState(false);
@@ -79,8 +79,8 @@ export default function WeeklyReviewPage() {
   // narrative below is grounded in, computed eagerly (no AI call) so DELIVERY renders
   // immediately without requiring "Generate Weekly Review" first.
   const facts: WeeklyReviewFacts | null = useMemo(
-    () => (state.loaded ? buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual") : null),
-    [state.loaded, filteredData, state.snapshotHistory, today, state.isDemo]
+    () => (state.loaded ? buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual", scoring) : null),
+    [state.loaded, filteredData, state.snapshotHistory, today, state.isDemo, scoring]
   );
   // C1 — actions repeated without effect, with the deterministic "change the approach" facts
   // (action-effectiveness.ts) — the same facts the action-strategy AI call is grounded in.
@@ -107,7 +107,7 @@ export default function WeeklyReviewPage() {
   async function generate() {
     setLoading(true);
     const today = getTodayIso();
-    const builtFacts = buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual");
+    const builtFacts = buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual", scoring);
     const text = await getAIProvider().generateWeeklyReview(builtFacts);
     setReviewText(text);
     setLoading(false);

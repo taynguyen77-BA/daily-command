@@ -44,7 +44,7 @@ function PilotScoreRow({ label, value, onChange }: { label: string; value: 0 | 1
 }
 
 export function CloseDayModal({ onClose }: { onClose: () => void }) {
-  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scopedMentionEvents, store, dailyCommandMaps } = useCommandCenter();
+  const { state, today, previousSnapshot, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scopedMentionEvents, scoring, store, dailyCommandMaps } = useCommandCenter();
   const [entry, setEntry] = useState<EodEntry | null>(null);
   const [entryMode, setEntryMode] = useState<"mock" | "claude" | null>(null);
   const [loading, setLoading] = useState(false);
@@ -144,8 +144,8 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
   const newPriorityTomorrow = personalFocus?.top3 ?? [];
   const watchTomorrow = personalFocus?.byCategory.WATCH.slice(0, 3) ?? [];
 
-  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-  const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics);
+  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
+  const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics, previousSnapshot?.date);
   const stableMetricsCount = trend.deltas.filter((d) => d.direction === "stable").length;
 
   async function run() {

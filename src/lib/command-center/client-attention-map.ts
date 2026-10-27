@@ -15,7 +15,7 @@
 // no-op-when-omitted contract as every other engine using this gate.
 
 import { computeDeliveryConfidence, deliveryConfidenceBand } from "./executive";
-import { scoreAllWorkItems } from "./scoring";
+import { scoreAllWorkItems, type ScoringOptions } from "./scoring";
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { ClientAttentionRow, CommandCenterData, DailySnapshot, DependencyRadarItem, ProjectAttentionRow, TrendDirection } from "./types";
 import type { DerivedData } from "./selectors";
@@ -33,10 +33,11 @@ function confidenceForClient(
   clientId: string,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): number {
   const clientData: CommandCenterData = { ...data, workItems: workItems.filter((w) => w.clientId === clientId) };
-  const scores = scoreAllWorkItems(clientData, today);
+  const scores = scoreAllWorkItems(clientData, today, undefined, undefined, scoring);
   const clientItemIds = new Set(clientData.workItems.map((w) => w.id));
   const clientRisks = risks.filter((r) => r.status === "open" && r.sourceWorkItemIds.some((id) => clientItemIds.has(id)));
   const overdue = clientData.workItems.filter(
@@ -52,7 +53,8 @@ export function computeClientAttentionMap(
   previousSnapshot: DailySnapshot | null,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): ClientAttentionRow[] {
   const criticalDependencyIds = new Set(dependencyRadar.filter((d) => d.heat === "CRITICAL" || d.heat === "HIGH").map((d) => d.dependencyId));
 
@@ -62,7 +64,7 @@ export function computeClientAttentionMap(
       const clientRisks = derived.risks.filter((r) => r.sourceWorkItemIds.some((id) => clientItemIds.has(id)));
       const topRiskTitle = clientRisks[0]?.title;
 
-      const deliveryConfidence = confidenceForClient(data.workItems, data.risks, data, client.id, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+      const deliveryConfidence = confidenceForClient(data.workItems, data.risks, data, client.id, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
 
       const openDecisionsCount = data.decisions.filter((d) => OPEN_DECISION_STATUSES.has(d.status) && decisionClientId(data, d) === client.id).length;
 
@@ -73,7 +75,7 @@ export function computeClientAttentionMap(
 
       let trend: TrendDirection = "stable";
       if (previousSnapshot) {
-        const previousConfidence = confidenceForClient(previousSnapshot.workItems, previousSnapshot.risks, data, client.id, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+        const previousConfidence = confidenceForClient(previousSnapshot.workItems, previousSnapshot.risks, data, client.id, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
         trend = deliveryConfidence > previousConfidence ? "improving" : deliveryConfidence < previousConfidence ? "deteriorating" : "stable";
       }
 
@@ -100,14 +102,15 @@ export function computeProjectAttentionMap(
   data: CommandCenterData,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): ProjectAttentionRow[] {
   return data.projects
     .filter((p) => p.sourceType === "jira" && p.sourceId)
     .map((project) => {
       const projectItems = data.workItems.filter((w) => w.projectId === project.id);
       const projectItemIds = new Set(projectItems.map((w) => w.id));
-      const scores = scoreAllWorkItems({ ...data, workItems: projectItems }, today);
+      const scores = scoreAllWorkItems({ ...data, workItems: projectItems }, today, undefined, undefined, scoring);
       const projectRisks = data.risks.filter((r) => r.status === "open" && r.sourceWorkItemIds.some((id) => projectItemIds.has(id)));
       const overdue = projectItems.filter(
         (w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds) && w.dueDate && w.dueDate < today

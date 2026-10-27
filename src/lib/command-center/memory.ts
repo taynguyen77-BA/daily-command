@@ -16,7 +16,8 @@ import { computeDeliveryConfidence } from "./executive";
 import { isWorkItemOperationallyOpen, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { detectRisks, RISK_LEVEL_ORDER } from "./risk-detection";
 import { dedupeRisks } from "./selectors";
-import { isOverdue, scoreAllWorkItems } from "./scoring";
+import { isOverdue, scoreAllWorkItems, type ScoringOptions } from "./scoring";
+import { SCORE_BASED_METRICS, scoringModelOf } from "./score-model";
 import type { CommandCenterData, DailySnapshot, HealthTrend, MetricDelta, Risk, SnapshotMetrics, TrendDirection } from "./types";
 
 /** V2.18 §7 — risksOverride, when passed, is used as-is instead of recomputing
@@ -29,9 +30,10 @@ export function buildSnapshotMetrics(
   meaningfulChangeCount: number,
   risksOverride?: Risk[],
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): SnapshotMetrics {
-  const scores = scoreAllWorkItems(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const scores = scoreAllWorkItems(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
   const dedupedRisks = risksOverride ?? dedupeRisks(data.risks, detectRisks(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
   const highRisks = dedupedRisks.filter((r) => r.level === "HIGH").sort((a, b) => RISK_LEVEL_ORDER[a.level] - RISK_LEVEL_ORDER[b.level]);
   const openItems = data.workItems.filter((w) => isWorkItemOperationallyOpen(w, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
@@ -49,6 +51,8 @@ export function buildSnapshotMetrics(
     majorRiskTitles: highRisks.slice(0, 5).map((r) => r.title),
     unresolvedDependencyTeams: Array.from(new Set(unresolvedDeps.map((d) => d.dependsOnTeam))),
     meaningfulChangeCount,
+    // P3.1 — recorded only for v2; a snapshot without it was scored by v1 (older snapshots included).
+    ...(scoring?.model === "v2" ? { scoringModel: "v2" as const } : {}),
   };
 }
 
@@ -62,11 +66,12 @@ export function buildDailySnapshot(
   meaningfulChangeCount: number,
   risksOverride?: Risk[],
   workRelevanceIndex?: WorkRelevanceIndex,
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): DailySnapshot {
   return {
     ...toSnapshot(data, today, risksOverride),
-    metrics: buildSnapshotMetrics(data, today, meaningfulChangeCount, risksOverride, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
+    metrics: buildSnapshotMetrics(data, today, meaningfulChangeCount, risksOverride, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring),
   };
 }
 
@@ -115,12 +120,18 @@ const METRIC_DEFS: { key: keyof SnapshotMetrics; label: string; higherIsBetter: 
 ];
 
 /** BUILD REQUEST V1.2 §4 — deterministic Today vs Yesterday comparison. Never calls AI. */
-export function compareSnapshots(current: SnapshotMetrics, previous: SnapshotMetrics | undefined): HealthTrend {
+export function compareSnapshots(current: SnapshotMetrics, previous: SnapshotMetrics | undefined, previousDate?: string): HealthTrend {
   if (!previous) {
     return { hasHistory: false, overall: "stable", deltas: [], gettingBetter: [], gettingWorse: [] };
   }
 
-  const deltas: MetricDelta[] = METRIC_DEFS.map((def) => {
+  // P3.1 — scores from different models are not comparable: leave the score-based metrics out and say so.
+  const from = scoringModelOf(previous);
+  const to = scoringModelOf(current);
+  const modelChanged = from !== to ? { from, to, note: `Scoring model changed${previousDate ? ` since ${previousDate}` : ""} (${from} → ${to}) — score-based trends (attention, critical, delivery confidence) restart; counts that do not depend on scoring are still compared.` } : undefined;
+  const comparable = (key: keyof SnapshotMetrics) => !modelChanged || !(SCORE_BASED_METRICS as readonly string[]).includes(key);
+
+  const deltas: MetricDelta[] = METRIC_DEFS.filter((def) => comparable(def.key)).map((def) => {
     const before = previous[def.key] as number;
     const after = current[def.key] as number;
     return { label: def.label, before, after, delta: after - before, direction: direction(before, after, def.higherIsBetter) };
@@ -137,5 +148,5 @@ export function compareSnapshots(current: SnapshotMetrics, previous: SnapshotMet
   const deterioratingCount = deltas.filter((d) => d.direction === "deteriorating").length;
   const overall: TrendDirection = deterioratingCount > improvingCount ? "deteriorating" : improvingCount > deterioratingCount ? "improving" : "stable";
 
-  return { hasHistory: true, overall, deltas, gettingBetter, gettingWorse };
+  return { hasHistory: true, overall, deltas, gettingBetter, gettingWorse, ...(modelChanged ? { modelChanged } : {}) };
 }

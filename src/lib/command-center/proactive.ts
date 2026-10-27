@@ -11,6 +11,7 @@ import { computeStaleAssignedTickets, DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS, 
 import { resolveAttentionEntity, workItemByIdIn } from "./personal-focus";
 import { classifyPersonalRelation, type PersonalRelationIdentity } from "./personal-relation";
 import { computeClientAttentionMap } from "./client-attention-map";
+import type { ScoringOptions } from "./scoring";
 import { computeDecisionEffectiveness } from "./decision-effectiveness";
 import { computeDecisionRadar } from "./decision-radar";
 import { computeDeliveryLoops } from "./delivery-loops";
@@ -95,9 +96,11 @@ export function computeProactiveIntelligence(
   // gets by default.
   staleAssignedTicketThresholds: StaleAssignedTicketThresholds = DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS,
   // D6 — optional; passed only when "measure from my own activity" is switched on.
-  myTicketActivity?: Record<string, MyTicketActivity>
+  myTicketActivity?: Record<string, MyTicketActivity>,
+  // P3.1 — scoring model + signals (omitted = v1, exactly as before).
+  scoring?: ScoringOptions
 ): ProactiveIntelligence {
-  const currentMetrics = buildDailySnapshot(data, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds).metrics!;
+  const currentMetrics = buildDailySnapshot(data, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring).metrics!;
 
   // V2.18 §10 — snapshotHistory is the raw, frequent operational record (appended to on
   // every sync/import/close-day, possibly several times per day). Genuine day-over-day
@@ -124,7 +127,7 @@ export function computeProactiveIntelligence(
 
   const stakeholderAttention = computeStakeholderAttention(data, dependencyRadar, decisionRadar, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const communicationPriority = rankCommunicationPriority(data.communications, data, riskEscalations, dependencyRadar);
-  const clientAttentionMap = computeClientAttentionMap(data, derived, dependencyRadar, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const clientAttentionMap = computeClientAttentionMap(data, derived, dependencyRadar, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
 
   const newAssignments = detectNewAssignments(data, previousSnapshot, identityOwnerId, dailyCommandCompletedWorkItemIds);
 

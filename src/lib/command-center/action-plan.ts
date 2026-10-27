@@ -2,7 +2,7 @@
 // pure functions of priority score, urgency, effort estimate, and dependency risk —
 // the AI provider only narrates the result (see ai/provider.ts generateActionPlan).
 
-import { eligibilityScore, scoreWorkItem } from "./scoring";
+import { eligibilityScore, scoreWorkItem, type ScoringOptions } from "./scoring";
 import { isPersonalWorkEligibleItem, type WorkRelevanceIndex } from "./jira/work-relevance";
 import type { Action, CommandCenterData, PriorityScoreResult, WorkItem } from "./types";
 
@@ -82,7 +82,9 @@ export function buildCandidates(
   workRelevanceIndex?: WorkRelevanceIndex,
   dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
   /** Callers pass the PAUSED set (skipped ∪ deferred ∪ blocked). */
-  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>,
+  /** P3.1 — scoring model + signals; omitted = v1. */
+  scoring?: ScoringOptions
 ): PlanCandidate[] {
   const candidates: PlanCandidate[] = [];
   // G1 — which work items an Action already stands for (so no second, synthesized candidate):
@@ -103,7 +105,7 @@ export function buildCandidates(
     // tickets aren't in today's plan, whatever the action's own status says.
     if (action.relatedWorkItemId && (dailyCommandCompletedWorkItemIds?.has(action.relatedWorkItemId) || dailyCommandSkippedWorkItemIds?.has(action.relatedWorkItemId))) continue;
     const item = action.relatedWorkItemId ? data.workItems.find((w) => w.id === action.relatedWorkItemId) : undefined;
-    const result = item ? scoreWorkItem(item, data, today) : undefined;
+    const result = item ? scoreWorkItem(item, data, today, scoring) : undefined;
     candidates.push({
       id: action.id,
       title: action.title,
@@ -128,11 +130,11 @@ export function buildCandidates(
     if (dailyCommandCompletedWorkItemIds?.has(item.id)) continue;
     if (dailyCommandSkippedWorkItemIds?.has(item.id)) continue;
     if (workRelevanceIndex && !isPersonalWorkEligibleItem(item, workRelevanceIndex)) continue;
-    const result = scoreWorkItem(item, data, today);
+    const result = scoreWorkItem(item, data, today, scoring);
     // V2.9 §F-01 — gate on eligibilityScore, not the raw score: an item missing a due
     // date / Business Impact field (the real-Jira norm) must not be unfairly excluded
     // for data it never had a chance to populate. See scoring.ts for the rationale.
-    if (eligibilityScore(item, result) < 40) continue; // LOW-signal items don't earn a slot in a time-boxed plan
+    if (eligibilityScore(item, result, scoring?.model) < 40) continue; // LOW-signal items don't earn a slot in a time-boxed plan
     candidates.push({
       id: `plan-${item.id}`,
       title: `${item.key} — ${item.title}`,
@@ -154,9 +156,10 @@ export function buildPlan(
   budgetMinutes: TimeBudget,
   workRelevanceIndex?: WorkRelevanceIndex,
   dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
-  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>
+  dailyCommandSkippedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): PlanCandidate[] {
-  const candidates = buildCandidates(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds);
+  const candidates = buildCandidates(data, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandSkippedWorkItemIds, scoring);
   const plan: PlanCandidate[] = [];
   let remaining = budgetMinutes;
   for (const c of candidates) {

@@ -6,9 +6,9 @@
 // scoring.ts never reads `item.priority`, and Jira items always have businessImpact === undefined
 // (jira/normalize.ts), so the 20-point "Business impact" factor is dead weight on real data.
 
-import { scoreWorkItem } from "../../../src/lib/command-center/scoring";
-import type { CommandCenterData, WorkItem } from "../../../src/lib/command-center/types";
-import { ok } from "../harness.mts";
+import { scoreWorkItem } from "../../src/lib/command-center/scoring";
+import type { CommandCenterData, WorkItem } from "../../src/lib/command-center/types";
+import { ok } from "./harness.mts";
 
 const base = {
   id: "jira-X-1", key: "X-1", title: "t", projectId: "p", clientId: "c", type: "task", status: "In Progress",
@@ -17,7 +17,7 @@ const base = {
 } as unknown as WorkItem;
 const data = { dependencies: [], clients: [], workItems: [] } as unknown as CommandCenterData;
 const today = "2026-10-27";
-const score = (priority: WorkItem["priority"], extra: Partial<WorkItem> = {}) => scoreWorkItem({ ...base, priority, ...extra }, data, today).score;
+const score = (priority: WorkItem["priority"], extra: Partial<WorkItem> = {}) => scoreWorkItem({ ...base, priority, ...extra }, data, today, { model: "v2" }).score;
 
 {
   const group = "P3.1 Priority signal";

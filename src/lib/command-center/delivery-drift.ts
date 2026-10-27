@@ -16,6 +16,7 @@
 // TREND QUALITY (§7) is a function of how many prior snapshots were actually available —
 // never presented as a strong trend off a single data point.
 
+import { scoringModelOf } from "./score-model";
 import type { DailySnapshot, DeliveryDrift, DeliveryTrajectory, DriftFactor, SnapshotMetrics, TrajectoryLevel, TrendDirection, TrendQuality } from "./types";
 
 export function trendQuality(snapshotsUsed: number): TrendQuality {
@@ -32,6 +33,21 @@ function worsening(before: number, after: number): number {
 export function computeDeliveryDrift(history: DailySnapshot[], currentMetrics: SnapshotMetrics): DeliveryDrift {
   const withMetrics = history.filter((s): s is DailySnapshot & { metrics: SnapshotMetrics } => !!s.metrics);
   const previous = withMetrics[withMetrics.length - 1]?.metrics;
+  const previousDate = withMetrics[withMetrics.length - 1]?.date;
+
+  // P3.1 — never compare scores across scoring models: drift restarts from this snapshot.
+  if (previous && scoringModelOf(previous) !== scoringModelOf(currentMetrics)) {
+    return {
+      level: "STABLE",
+      score: 0,
+      factors: [],
+      evidence: [`Scoring model changed since ${previousDate} (${scoringModelOf(previous)} → ${scoringModelOf(currentMetrics)}) — drift is measured again from today, because scores are not comparable across models.`],
+      trend: "stable",
+      confidence: 0.3,
+      trendQuality: "insufficient",
+      snapshotsUsed: 0,
+    };
+  }
 
   if (!previous) {
     return {
@@ -109,7 +125,8 @@ export function computeDeliveryDrift(history: DailySnapshot[], currentMetrics: S
  * inventing a trend (§6).
  */
 export function computeTrajectory(history: DailySnapshot[], currentMetrics: SnapshotMetrics): DeliveryTrajectory {
-  const withMetrics = history.filter((s): s is DailySnapshot & { metrics: SnapshotMetrics } => !!s.metrics).slice(-5);
+  // P3.1 — only snapshots scored by the same model as today are comparable.
+  const withMetrics = history.filter((s): s is DailySnapshot & { metrics: SnapshotMetrics } => !!s.metrics && scoringModelOf(s.metrics) === scoringModelOf(currentMetrics)).slice(-5);
   if (withMetrics.length === 0) {
     return { level: "INSUFFICIENT_HISTORY", trendQuality: "insufficient", snapshotsUsed: 0 };
   }

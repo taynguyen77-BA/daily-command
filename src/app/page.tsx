@@ -39,7 +39,7 @@ import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
 type ViewMode = "operations" | "executive";
 
 export default function CommandCenterPage() {
-  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, store } = useCommandCenter();
+  const { state, today, derived, proactive, personalFocus, previousSnapshot, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, scoring, store } = useCommandCenter();
   const [selected, setSelected] = useState<{ item: WorkItem; result: PriorityScoreResult } | null>(null);
   const [closingDay, setClosingDay] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("operations");
@@ -70,8 +70,8 @@ export default function CommandCenterPage() {
   const topRisks = derived.risks.slice(0, 4);
   const openComms = filteredData.communications.filter((c) => c.status === "open").slice(0, 4);
 
-  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-  const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics);
+  const currentMetrics = buildSnapshotMetrics(filteredData, today, derived.changes.length, undefined, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
+  const trend = compareSnapshots(currentMetrics, previousSnapshot?.metrics, previousSnapshot?.date);
   const confidenceDelta = trend.deltas.find((d) => d.label === "Delivery confidence")?.delta;
   const escalatingRisks = proactive?.riskEscalations.filter((r) => r.trend === "worsening" || r.reopened).slice(0, 4) ?? [];
   const agingDependencies = proactive?.dependencyRadar.filter((d) => d.heat !== "LOW").slice(0, 4) ?? [];

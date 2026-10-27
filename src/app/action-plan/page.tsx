@@ -9,14 +9,14 @@ import { actionsNotInTodaysPlan, buildPlan, TIME_BUDGET_LABELS, type TimeBudget 
 const BUDGETS: TimeBudget[] = [15, 30, 60, 120, 480];
 
 export default function ActionPlanPage() {
-  const { state, today, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, store } = useCommandCenter();
+  const { state, today, filteredData, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, scoring, store } = useCommandCenter();
   // F1 — persisted, shared with Morning Mode's plan step.
   const budget: TimeBudget = state.timeBudgetMinutes ?? 30;
   const setBudget = (b: TimeBudget) => store.setTimeBudget(b);
 
   const plan = useMemo(
-    () => (state.loaded ? buildPlan(filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds) : []),
-    [state.loaded, filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds]
+    () => (state.loaded ? buildPlan(filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, scoring) : []),
+    [state.loaded, filteredData, today, budget, workRelevanceIndex, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, scoring]
   );
 
   // G1 — ticketless actions set aside (deferred / snoozed until a later date, or blocked).

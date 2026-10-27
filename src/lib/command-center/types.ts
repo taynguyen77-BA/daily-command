@@ -261,6 +261,11 @@ export interface WorkItem {
   // the 5-value WorkItemStatus enum is too coarse to distinguish "In Progress" from
   // "Ready for UAT" — both map to "In Progress" today.
   jiraStatusName?: string;
+  /** P3.1 — false when Jira gave no priority, or one this app does not recognise (mapPriority's "P3" is then only a
+   *  placeholder). Score v2 contributes 0 for the Priority factor instead of trusting it. Absent = trusted (demo/import). */
+  priorityKnown?: boolean;
+  /** P3.1 — the priority name exactly as Jira returned it (e.g. "Highest"), for readable reasoning text. */
+  jiraPriorityName?: string;
   // Sync provenance — ISO datetime of the Jira sync that first created this work item in the
   // local store. Stamped exactly once, by store.ts's runJiraSync() merge, at the moment the
   // item is new to the store; carried forward unchanged by every later sync. Undefined for
@@ -322,6 +327,9 @@ export interface SnapshotMetrics {
   majorRiskTitles: string[]; // top HIGH-risk titles at snapshot time — lightweight, not full objects
   unresolvedDependencyTeams: string[]; // for recurring-pattern detection
   meaningfulChangeCount: number;
+  /** P3.1 — which scoring model produced the score-based fields (attention/critical counts, deliveryConfidence).
+   *  Absent = "v1". Trend code never compares these across models. */
+  scoringModel?: "v1" | "v2";
 }
 
 export interface PriorityFactor {
@@ -419,6 +427,8 @@ export interface HealthTrend {
   deltas: MetricDelta[];
   gettingBetter: string[]; // deterministic fact strings, e.g. "Blocked items: 6 → 4 (-2)"
   gettingWorse: string[];
+  /** P3.1 — set when the two snapshots were scored by different models: the score-based deltas are left out. */
+  modelChanged?: { from: "v1" | "v2"; to: "v1" | "v2"; note: string };
 }
 
 /** BUILD REQUEST V1.2 §5 — Claude's trend narration. Never invents historical facts;

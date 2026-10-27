@@ -3,6 +3,8 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 import { commandCenterStore, getTodayIso, previousSnapshotOf, selectDailyCommandMaps, type StoreState } from "@/lib/command-center/store";
 import { deriveData } from "@/lib/command-center/selectors";
+import { buildAwaitingMe } from "@/lib/command-center/awaiting-me";
+import type { ScoreModel, ScoringOptions } from "@/lib/command-center/scoring";
 import { applyFilters } from "@/lib/command-center/filters";
 import { applyProjectScope, scopeMentionEvents } from "@/lib/command-center/jira/project-scope";
 import { buildWorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
@@ -33,6 +35,11 @@ function sendSlackNotifications(data: CommandCenterData, previousAttentionState:
   }).catch(() => {
     // best-effort — never surfaces as an app error
   });
+}
+
+/** P3.1 — the ScoringOptions carrier for a store state: the model (absent = v2) and the unanswered-mention signal. */
+export function scoringOptionsFor(model: ScoreModel | undefined, mentionEvents: StoreState["mentionEvents"], mentionReplies: StoreState["mentionReplies"]): ScoringOptions {
+  return { model: model ?? "v2", awaitingMeByKey: buildAwaitingMe(mentionEvents, mentionReplies) };
 }
 
 /** Every one of the ~45 components that calls useCommandCenter() used to run the full
@@ -149,10 +156,11 @@ export function useCommandCenter() {
   // — otherwise a Work-Relevance-COMPLETED/EXCLUDED or Daily-Command-completed item kept
   // inflating "needs attention"/"overdue" counts and generating fresh risks even though every
   // other surface already treated it as finished (see selectors.ts's own comment).
+  // P3.1 — the scoring model (a device setting; default v2) and the "waiting on me" signal v2 reads.
+  const scoring = sharedMemo("m10", () => scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies), [state.scoringModel, scopedMentionEvents, state.mentionReplies]);
   const derived = sharedMemo("m7", 
-    () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds),
-     
-    [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds]
+    () => deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring),
+    [filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring]
   );
 
   // V1.4 — one composed bundle for every proactive engine, mirroring `derived` above.
@@ -175,11 +183,12 @@ export function useCommandCenter() {
             dailyCommandCompletedWorkItemIds,
             dailyCommandPausedWorkItemIds,
             state.staleAssignedTicketThresholds,
-            state.features?.staleUseMyActivity ? state.myTicketActivity : undefined
+            state.features?.staleUseMyActivity ? state.myTicketActivity : undefined,
+            scoring
           )
         : null,
      
-    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, state.staleAssignedTicketThresholds, state.features?.staleUseMyActivity, state.myTicketActivity]
+    [filteredData, derived, state.snapshotHistory, previousSnapshot, state.attentionState, sourceType, today, state.loaded, workRelevanceIndex, scopedMentionEvents, state.personalIdentity?.accountId, state.ownerName, dailyCommandCompletedWorkItemIds, dailyCommandPausedWorkItemIds, state.staleAssignedTicketThresholds, state.features?.staleUseMyActivity, state.myTicketActivity, scoring]
   );
 
   // Persist attention-lifecycle transitions (NEW->ACTIVE, auto-RESOLVED, REOPENED,
@@ -246,6 +255,7 @@ export function useCommandCenter() {
     scopedData,
     workRelevanceIndex,
     scopedMentionEvents,
+    scoring,
     dailyCommandCompletedWorkItemIds,
     dailyCommandSkippedWorkItemIds,
     dailyCommandBlockedWorkItemIds,
@@ -292,7 +302,8 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
   const dailyCommandSkippedWorkItemIds = ticketSets.skippedIds;
   const dailyCommandBlockedWorkItemIds = ticketSets.blockedIds;
   const dailyCommandPausedWorkItemIds = ticketSets.pausedIds;
-  const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
+  const scoring = scoringOptionsFor(state.scoringModel, scopedMentionEvents, state.mentionReplies);
+  const derived = deriveData(filteredData, previousSnapshot, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring);
   const proactive = state.loaded
     ? computeProactiveIntelligence(
         filteredData,
@@ -309,7 +320,8 @@ export function buildProjectOverrideView(state: StoreState, today: string, proje
         dailyCommandCompletedWorkItemIds,
         dailyCommandPausedWorkItemIds,
         state.staleAssignedTicketThresholds,
-        state.features?.staleUseMyActivity ? state.myTicketActivity : undefined
+        state.features?.staleUseMyActivity ? state.myTicketActivity : undefined,
+        scoring
       )
     : null;
   const personalFocus = proactive
