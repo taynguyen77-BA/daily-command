@@ -19,3 +19,9 @@ export function skip(group: string, msg: string) {
 export function counts() {
   return { passed, failures, skipped, total: passed + failures };
 }
+
+/** Scales a timing budget for slow machines/CI: PERF_BUDGET_FACTOR (default 1; NaN and <= 0 are ignored). */
+export function perfBudget(ms: number): number {
+  const factor = Number(process.env.PERF_BUDGET_FACTOR || 1);
+  return ms * (Number.isFinite(factor) && factor > 0 ? factor : 1);
+}

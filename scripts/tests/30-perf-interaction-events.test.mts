@@ -17,12 +17,12 @@ import { buildMyWork } from "../../src/lib/command-center/my-work";
 import { buildPlan } from "../../src/lib/command-center/action-plan";
 import { buildDailyReportView, buildWeeklyReportView, mondayOf } from "../../src/lib/command-center/reports";
 import { focusSessionHandlers } from "../../src/components/command-center/focus-session-handlers";
-import { ok } from "./harness.mts";
+import { ok, perfBudget } from "./harness.mts";
 import { v226Actionable, v226ConfiguredStore, v226Tick } from "./helpers.mts";
 import { buildPerfFixture, timeSelectors } from "./perf-fixture.mts";
 
-export const ATTENTION_QUEUE_BUDGET_MS = 100;
-export const INTERACTION_BUDGET_MS = 250;
+export const ATTENTION_QUEUE_BUDGET_MS = perfBudget(100);
+export const INTERACTION_BUDGET_MS = perfBudget(250);
 
 // ----- Focus Session complete(): ACTION_COMPLETED once -----
 {

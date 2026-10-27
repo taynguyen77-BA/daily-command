@@ -10,9 +10,9 @@ import { computeProactiveIntelligence } from "../../src/lib/command-center/proac
 import { resolveAttentionEntity, workItemByIdIn } from "../../src/lib/command-center/personal-focus";
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import type { AttentionItem, CommandCenterData, Risk } from "../../src/lib/command-center/types";
-import { ok } from "./harness.mts";
+import { ok, perfBudget } from "./harness.mts";
 
-export const SELECTOR_BUDGET_MS = 200;
+export const SELECTOR_BUDGET_MS = perfBudget(200);
 
 const env = await buildPerfFixture();
 const s = env.store.getSnapshot();
