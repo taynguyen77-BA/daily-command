@@ -19,6 +19,7 @@ import { normalizeIssues } from "./jira/normalize";
 import { fetchAssignedIssuesWith, fetchMentionedIssuesWith, type FetchLike } from "./jira/http";
 import type { JiraConnectionConfig, JiraIssue } from "./jira/types";
 import { collectCurrentMentions } from "./cron-notify";
+import { keysToFetch, nextRetryKeys } from "./notify-baseline";
 import type { ReportTicket } from "./reports";
 import type { ServerDailyStandup } from "./server-report-merge";
 
@@ -29,6 +30,8 @@ export interface ServerReportBaseline {
   assignedAllKeys: string[];
   seenMentionCommentIds: string[];
   lastRunIso: string;
+  /** P1.1 — issues whose comment fetch failed last run; fetched again next run (<= 50, FIFO). Optional (older blobs lack it). */
+  retryIssueKeys?: string[];
 }
 
 export interface ServerReportState {
@@ -125,16 +128,19 @@ export async function runServerDailySnapshot(
   const previous = await store.get();
   const baseline = previous?.baseline ?? null;
 
-  const assignedResult = await fetchAssignedIssuesWith(fetchImpl, config, accountId);
+  // Open issues + issues that turned Done in the last 14 days (so "closed in Jira" is still seen);
+  // never the account's whole history.
+  const assignedResult = await fetchAssignedIssuesWith(fetchImpl, config, accountId, { includeDoneChangedWithinDays: 14 });
   if (!assignedResult.ok) return { date, written: false, error: assignedResult.error };
   const { workItems } = normalizeIssues(assignedResult.data, { baseUrl: config.baseUrl, today: date });
   const issueByKey = new Map(assignedResult.data.map((i) => [i.key, i]));
   const openKeys = workItems.filter((w) => w.status !== "Done").map((w) => w.key);
   const doneKeys = new Set(workItems.filter((w) => w.status === "Done").map((w) => w.key));
 
-  const mentionedResult = await fetchMentionedIssuesWith(fetchImpl, config, accountId, baseline?.lastRunIso);
+  const mentionedResult = await fetchMentionedIssuesWith(fetchImpl, config, accountId, baseline?.lastRunIso, undefined, options.timezoneOffsetMinutes);
   if (!mentionedResult.ok) return { date, written: false, error: mentionedResult.error };
-  const mentions = await collectCurrentMentions(fetchImpl, config, accountId, mentionedResult.data.map((i) => i.key), date);
+  const { entries: mentions, failedKeys } = await collectCurrentMentions(fetchImpl, config, accountId, keysToFetch(mentionedResult.data.map((i) => i.key), baseline?.retryIssueKeys), date);
+  const retryIssueKeys = nextRetryKeys(baseline?.retryIssueKeys, failedKeys);
 
   const seen = new Set(baseline?.seenMentionCommentIds ?? []);
   const newMentionEntries = mentions.filter((m) => (baseline ? !seen.has(m.commentId) : m.event.mentionedAt.slice(0, 10) === date));
@@ -180,6 +186,7 @@ export async function runServerDailySnapshot(
       assignedAllKeys: workItems.map((w) => w.key),
       seenMentionCommentIds: Array.from(new Set([...(baseline?.seenMentionCommentIds ?? []), ...mentions.map((m) => m.commentId)])).slice(-MAX_SEEN_MENTIONS),
       lastRunIso: options.now.toISOString(),
+      ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
     },
     reports,
   });

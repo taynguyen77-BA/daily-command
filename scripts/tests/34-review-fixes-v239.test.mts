@@ -11,7 +11,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ok } from "./harness.mts";
-import { makeJiraIssue } from "./helpers.mts";
+import { makeJiraIssue, strictJiraFake } from "./helpers.mts";
 import type { IssueContext } from "../../src/lib/command-center/jira/issue-context";
 import { CommandCenterStore } from "../../src/lib/command-center/store";
 import { createMemoryStateStorage } from "../../src/lib/command-center/state-persistence";
@@ -179,13 +179,13 @@ async function withIssueContextEndpoint<T>(serverCtx: IssueContext, run: (store:
   const ME = "acc-me";
   function recordingJira() {
     const urls: string[] = [];
-    const fetchImpl: FetchLike = async (url) => {
+    const fetchImpl: FetchLike = strictJiraFake(async (url) => {
       urls.push(url);
       const u = new URL(url);
       if (u.pathname.endsWith("/search/jql")) return { ok: true, status: 200, json: async () => ({ issues: [], isLast: true }) };
       if (/issue\/[^/]+\/comment/.test(u.pathname)) return { ok: true, status: 200, json: async () => ({ comments: [] }) };
       return { ok: false, status: 404, json: async () => ({}) };
-    };
+    });
     return { fetchImpl, urls };
   }
   const NOW = new Date("2026-10-07T11:00:00.000Z"); // a Wednesday, after the snapshot hour

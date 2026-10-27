@@ -44,6 +44,7 @@ const FILES = [
   "./33-ai-ba-features.test.mts",
   "./34-review-fixes-v239.test.mts",
   "./34-multi-user-auth.test.mts",
+  "./35-notify-correctness.test.mts",
 ];
 
 for (const file of FILES) await import(file);

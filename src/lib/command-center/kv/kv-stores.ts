@@ -40,7 +40,7 @@ function isValidAppState(v: unknown): v is SyncedAppState {
 function isValidNotifyState(v: unknown): v is PersonalNotifyState {
   if (typeof v !== "object" || v === null) return false;
   const s = v as Partial<PersonalNotifyState>;
-  return Array.isArray(s.assignedIssueKeys) && s.assignedIssueKeys.every((k) => typeof k === "string") && Array.isArray(s.notifiedCommentIds) && s.notifiedCommentIds.every((k) => typeof k === "string") && typeof s.lastCheckedAtIso === "string";
+  return Array.isArray(s.assignedIssueKeys) && s.assignedIssueKeys.every((k) => typeof k === "string") && Array.isArray(s.notifiedCommentIds) && s.notifiedCommentIds.every((k) => typeof k === "string") && typeof s.lastCheckedAtIso === "string" && (s.retryIssueKeys === undefined || (Array.isArray(s.retryIssueKeys) && s.retryIssueKeys.every((k) => typeof k === "string")));
 }
 
 function isValidReportState(v: unknown): v is ServerReportState {

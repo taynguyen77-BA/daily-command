@@ -152,12 +152,29 @@ export function buildIncrementalSinceParam(lastSyncCompletedAtIso: string, timez
   return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`;
 }
 
-export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: string[] }): string {
+/** Jira's documented JQL date literals: yyyy-MM-dd or yyyy/MM/dd, optionally followed by " HH:mm". */
+const JQL_DATE_LITERAL = /^\d{4}[-/]\d{2}[-/]\d{2}( \d{2}:\d{2})?$/;
+
+/** P1.1 — THE single place an `updated >= "..."` value is produced. Accepts an ISO-8601 instant
+ *  (converted with buildIncrementalSinceParam's exact semantics: tz offset + 5-minute safety
+ *  buffer, `yyyy-MM-dd HH:mm`; day-level when the offset is unknown) OR a value that is already a
+ *  JQL date literal (passed through untouched, so a caller that formatted it itself is never
+ *  double-buffered). Anything unparseable falls back to nothing (undefined) rather than a string
+ *  Jira would reject. Raw ISO strings never reach JQL. */
+export function formatJqlSince(sinceIso: string | undefined, timezoneOffsetMinutes?: number): string | undefined {
+  if (!sinceIso) return undefined;
+  if (JQL_DATE_LITERAL.test(sinceIso)) return sinceIso;
+  if (!Number.isFinite(new Date(sinceIso).getTime())) return undefined;
+  return buildIncrementalSinceParam(sinceIso, timezoneOffsetMinutes);
+}
+
+export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: string[]; timezoneOffsetMinutes?: number }): string {
   const clauses: string[] = [];
   if (options.projectKeys && options.projectKeys.length > 0) {
     clauses.push(`project in (${options.projectKeys.map((k) => `"${k}"`).join(",")})`);
   }
-  if (options.sinceIso) clauses.push(`updated >= "${options.sinceIso}"`);
+  const since = formatJqlSince(options.sinceIso, options.timezoneOffsetMinutes);
+  if (since) clauses.push(`updated >= "${since}"`);
   // V2.2.4 — Jira's search/jql endpoint rejects a fully unbounded query (no WHERE clause at
   // all, `order by` only) with 400 "Unbounded JQL queries are not allowed here." This hits a
   // first full sync with no JIRA_PROJECT_KEYS configured — exactly the common case, since
@@ -403,14 +420,17 @@ export async function fetchMentionedIssuesWith(
   config: JiraConnectionConfig,
   accountId: string,
   sinceIso?: string,
-  projectKeys?: string[]
+  projectKeys?: string[],
+  /** P1.1 — the Jira user's UTC offset, used when `sinceIso` is an ISO instant (see formatJqlSince). */
+  timezoneOffsetMinutes?: number
 ): Promise<JiraFetchResult<JiraIssue[]>> {
   const safeAccountId = accountId.replace(/"/g, '\\"');
   const clauses = [`comment ~ "accountid:${safeAccountId}"`];
   if (projectKeys && projectKeys.length > 0) {
     clauses.push(`project in (${projectKeys.map((k) => `"${k}"`).join(",")})`);
   }
-  if (sinceIso) clauses.push(`updated >= "${sinceIso}"`);
+  const since = formatJqlSince(sinceIso, timezoneOffsetMinutes);
+  if (since) clauses.push(`updated >= "${since}"`);
   const jql = `${clauses.join(" AND ")} order by updated desc`;
   return fetchIssuesByJqlCursor(fetchImpl, config, jql);
 }
@@ -422,36 +442,67 @@ export async function fetchMentionedIssuesWith(
  * the full multi-thousand-issue dataset the main sync fetches — a dedicated `assignee = X`
  * JQL is strictly cheaper than fetching everything and filtering client-side.
  */
-export async function fetchAssignedIssuesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string): Promise<JiraFetchResult<JiraIssue[]>> {
+export async function fetchAssignedIssuesWith(
+  fetchImpl: FetchLike,
+  config: JiraConnectionConfig,
+  accountId: string,
+  options: { includeDoneChangedWithinDays?: number } = {}
+): Promise<JiraFetchResult<JiraIssue[]>> {
   const safeAccountId = accountId.replace(/"/g, '\\"');
-  const jql = `assignee = "${safeAccountId}" order by updated desc`;
+  // P1.1 — open work only. `statusCategory != Done` (not `resolution = Unresolved`): the status
+  // category is exactly what normalize.ts's mapStatus reads to decide "Done", it exists on every
+  // Jira Cloud workflow, and it cannot disagree with it — whereas `resolution` is only set by a
+  // transition post-function, so custom workflows can have Done statuses with no resolution (they
+  // would stay "unresolved" forever) or resolved issues in non-Done statuses. Without this filter
+  // the query returned up to 2,000 historical issues on every tick.
+  // Edge case (documented, accepted): a ticket that leaves and re-enters the open set (reopened,
+  // or moved Done -> To Do) is "newly assigned" again and IS announced once, since it was absent
+  // from the previous baseline.
+  // `includeDoneChangedWithinDays` (daily report only) also returns issues that turned Done
+  // recently, so "closed in Jira" can still be detected; relative `-Nd` JQL, never an ISO date.
+  const recentlyDone = options.includeDoneChangedWithinDays;
+  const scope = recentlyDone && recentlyDone > 0 ? `(statusCategory != Done OR statusCategoryChangedDate >= -${Math.floor(recentlyDone)}d)` : "statusCategory != Done";
+  const jql = `assignee = "${safeAccountId}" AND ${scope} order by updated desc`;
   return fetchIssuesByJqlCursor(fetchImpl, config, jql);
 }
 
+export const JIRA_COMMENT_PAGE_SIZE = 100;
+export const JIRA_COMMENT_MAX_PAGES = 3;
+
 /**
- * V2.10 §2 — single-page comment fetch for one issue, same "best-effort, called only for a
- * small prioritized set of issue keys" discipline as fetchIssueChangelogWith below (this is
- * only ever called for the issue keys fetchMentionedIssuesWith returned, never every synced
- * issue). Deliberately not paginated deeper than the first page (100 entries, matching the
- * changelog fetcher's own documented limit) — a comment thread with more than that is a rare
- * case this best-effort signal doesn't need to fully cover.
+ * V2.10 §2 — best-effort comment fetch for one issue, same "called only for a small prioritized
+ * set of issue keys" discipline as fetchIssueChangelogWith below (only for the keys
+ * fetchMentionedIssuesWith returned, never every synced issue).
+ *
+ * P1.1 — was one unordered page of 100; Jira's default is oldest-first, so in a long thread the
+ * NEWEST comments (the ones that mention you) were the ones cut off. Now `orderBy=-created`
+ * (newest first) and up to JIRA_COMMENT_MAX_PAGES pages while `total` says more exist. Callers
+ * must not assume any ordering (buildMentionEvents / latestOwnCommentAt / detectRepliedMentions
+ * compare timestamps, they never index by position). A later page failing fails the whole fetch
+ * (the caller retries the issue) rather than silently returning a thread with a hole in it.
  */
 export async function fetchIssueCommentsWith(fetchImpl: FetchLike, config: JiraConnectionConfig, issueKey: string): Promise<JiraFetchResult<JiraComment[]>> {
   try {
-    const res = await fetchImpl(buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, { maxResults: "100" }), {
-      headers: { Authorization: authHeader(config), Accept: "application/json" },
-      signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS),
-    });
-    if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
-    let json: unknown;
-    try {
-      json = await res.json();
-    } catch {
-      return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+    const comments: JiraComment[] = [];
+    for (let page = 0; page < JIRA_COMMENT_MAX_PAGES; page++) {
+      const res = await fetchImpl(
+        buildUrl(config.baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, { maxResults: String(JIRA_COMMENT_PAGE_SIZE), startAt: String(comments.length), orderBy: "-created" }),
+        { headers: { Authorization: authHeader(config), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) }
+      );
+      if (!res.ok) return { ok: false, ...(await describeJiraError(res)) };
+      let json: unknown;
+      try {
+        json = await res.json();
+      } catch {
+        return { ok: false, error: "Jira returned a response that was not valid JSON.", errorKind: "malformed-response" };
+      }
+      const parsed = jiraCommentPageResponseSchema.safeParse(json);
+      if (!parsed.success) return { ok: false, error: "Jira's comment response did not match the expected shape.", errorKind: "malformed-response" };
+      comments.push(...parsed.data.comments);
+      const total = typeof parsed.data.total === "number" ? parsed.data.total : comments.length;
+      if (parsed.data.comments.length === 0 || comments.length >= total) break;
     }
-    const parsed = jiraCommentPageResponseSchema.safeParse(json);
-    if (!parsed.success) return { ok: false, error: "Jira's comment response did not match the expected shape.", errorKind: "malformed-response" };
-    return { ok: true, data: parsed.data.comments, recordsFetched: parsed.data.comments.length };
+    return { ok: true, data: comments, recordsFetched: comments.length };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
   }

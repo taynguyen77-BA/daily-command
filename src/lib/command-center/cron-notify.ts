@@ -24,6 +24,7 @@ import { fetchAssignedIssuesWith, fetchIssueCommentsWith, fetchMentionedIssuesWi
 import type { JiraConnectionConfig } from "./jira/types";
 import { postToSlack, renderSlackText, type SlackFetchLike, type SlackSignal } from "../server/slack-notify";
 import type { NotifyStateStore, PersonalNotifyState } from "./notify-state";
+import { fifoUnion, keysToFetch, MAX_NOTIFIED_COMMENT_IDS, nextRetryKeys } from "./notify-baseline";
 
 export interface ServerNotifyCheckResult {
   notified: number;
@@ -74,14 +75,20 @@ export interface MentionEntry {
  *  longer needs a second, locally-duplicated identity function. A single issue's comment-fetch
  *  failure is best-effort (never fails the whole check), same discipline as
  *  jira/sync/route.ts's own mention-fetching chain. */
-/** Exported for server-daily-report.ts (E4), which needs the same per-comment mention list. */
-export async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, issueKeys: string[], today: string): Promise<MentionEntry[]> {
+/** Exported for server-daily-report.ts (E4), which needs the same per-comment mention list.
+ *  P1.1 — also reports `failedKeys` (issues whose comment fetch failed or threw) so the caller can
+ *  retry them next run instead of losing the mention once its cursor advances. */
+export async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, issueKeys: string[], today: string): Promise<{ entries: MentionEntry[]; failedKeys: string[] }> {
   const entries: MentionEntry[] = [];
+  const failedKeys: string[] = [];
   await Promise.all(
     issueKeys.map(async (issueKey) => {
       try {
         const commentsResult = await fetchIssueCommentsWith(fetchImpl, config, issueKey);
-        if (!commentsResult.ok) return;
+        if (!commentsResult.ok) {
+          failedKeys.push(issueKey);
+          return;
+        }
         for (const comment of commentsResult.data) {
           if (!commentMentionsAccount(comment.body, accountId)) continue;
           const [event] = buildMentionEvents(issueKey, [comment], accountId, { baseUrl: config.baseUrl, today });
@@ -90,10 +97,11 @@ export async function collectCurrentMentions(fetchImpl: FetchLike, config: JiraC
         }
       } catch {
         // best-effort — a single issue's comment fetch failure never fails the check
+        failedKeys.push(issueKey);
       }
     })
   );
-  return entries;
+  return { entries, failedKeys: issueKeys.filter((k) => failedKeys.includes(k)) };
 }
 
 export async function runServerSideNotifyCheck(
@@ -104,7 +112,11 @@ export async function runServerSideNotifyCheck(
   slackFetchImpl?: SlackFetchLike,
   /** L4 — the destination for this run (a member's own webhook, the team one, or null for
    *  none). Omitted (team sign-in off): SLACK_WEBHOOK_URL, as before. */
-  options: { webhookUrl?: string | null } = {}
+  options: {
+    webhookUrl?: string | null;
+    /** P1.1 — the Jira user's UTC offset, for the `updated >=` cursor (see jira/http.ts formatJqlSince). */
+    timezoneOffsetMinutes?: number;
+  } = {}
 ): Promise<ServerNotifyCheckResult> {
   const previous = await store.get();
   const today = new Date().toISOString().slice(0, 10);
@@ -123,18 +135,25 @@ export async function runServerSideNotifyCheck(
   // Scoped by lastCheckedAtIso when available: a real Jira instance bumps an issue's `updated`
   // timestamp when a comment is added, so this is a safe, real narrowing (same reasoning the
   // main sync's own incremental cursor already relies on), not a guess. -----
-  const mentionedResult = await fetchMentionedIssuesWith(fetchImpl, config, accountId, previous?.lastCheckedAtIso);
+  const mentionedResult = await fetchMentionedIssuesWith(fetchImpl, config, accountId, previous?.lastCheckedAtIso, undefined, options.timezoneOffsetMinutes);
   if (!mentionedResult.ok) {
     return { notified: 0, skippedColdStart: false, error: mentionedResult.error };
   }
-  const mentionEntries = await collectCurrentMentions(fetchImpl, config, accountId, mentionedResult.data.map((i) => i.key), today);
+  // Issues whose comments failed last run are fetched again even if the JQL no longer matches them.
+  const { entries: mentionEntries, failedKeys } = await collectCurrentMentions(fetchImpl, config, accountId, keysToFetch(mentionedResult.data.map((i) => i.key), previous?.retryIssueKeys), today);
+  const retryIssueKeys = nextRetryKeys(previous?.retryIssueKeys, failedKeys);
   const currentMentionCommentIds = mentionEntries.map((e) => e.commentId);
 
   // ----- Cold start (§2 Task 2 point 1): first-ever run for this install. Write the baseline,
   // send zero notifications — the exact same discipline as V2.10.1's client-side fix, now also
   // true for this unattended path. -----
   if (previous === null) {
-    await store.set({ assignedIssueKeys: currentAssignedKeys, notifiedCommentIds: currentMentionCommentIds, lastCheckedAtIso: new Date().toISOString() });
+    await store.set({
+      assignedIssueKeys: currentAssignedKeys,
+      notifiedCommentIds: fifoUnion([], currentMentionCommentIds, MAX_NOTIFIED_COMMENT_IDS),
+      lastCheckedAtIso: new Date().toISOString(),
+      ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
+    });
     return { notified: 0, skippedColdStart: true };
   }
 
@@ -174,8 +193,11 @@ export async function runServerSideNotifyCheck(
 
   const nextState: PersonalNotifyState = {
     assignedIssueKeys: currentAssignedKeys,
-    notifiedCommentIds: currentMentionCommentIds,
+    // A UNION, not this run's ids: a run only sees issues updated since the last check, so
+    // overwriting would forget older mentions and re-announce them when their ticket is touched again.
+    notifiedCommentIds: fifoUnion(previous.notifiedCommentIds, currentMentionCommentIds, MAX_NOTIFIED_COMMENT_IDS),
     lastCheckedAtIso: new Date().toISOString(),
+    ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
   };
   await store.set(nextState);
 

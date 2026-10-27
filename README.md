@@ -2,10 +2,10 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.40.1
+**Current version:** V2.41
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](#v221-production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
-**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.40.1` ↔ `V2.40.1`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
+**Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see the sections below), so it is now enforced: `package.json` `"version"` is the source of truth (`2.41.0` ↔ `V2.41`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).
 
 Core principle: every important claim is either **CALCULATED** (deterministic, from your data), **EVIDENCE** (a specific underlying fact), **AI DRAFT** (Claude/Mock wording you review before use), **USER INPUT** (something you or your import provided), or explicitly **UNKNOWN** — never guessed, never silently blended.
 
@@ -160,6 +160,10 @@ Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fai
 - **Meeting notes → actions** *(J4)*. In Meeting Mode, paste notes or a transcript: decisions, action items (owner, due resolved from words like "Friday"), explicit ticket status changes and open questions, on a review screen where you edit and untick. **Create selected** is the only thing that creates decisions/actions or changes a status (history surface `ai-meeting`); ticket keys that don't exist here are listed as dropped, never created.
 - **Command Bar commands** *(J5)*. Type e.g. "defer all WF mentions to Monday" or "block MCWS-123 waiting for API spec". The command becomes operations from an allow-list (**setTicketStatus**, **addAction** — nothing else exists); the app resolves targets against real data and shows a preview diff; **Apply** runs it through the normal store (surface `ai-command`). An unknown ticket, a project name matching several projects, an unclear date or a vague target gets a question back instead of a guess. Without AI, a deterministic parser handles the same simple forms.
 - **Weekly insights** *(J6)*. Weekly Review → **Generate**: 3–5 observations, each with its evidence, and 3 suggestions for next week, from this week's ticket history, blockers by person, skip reasons and AI-triage acceptance (numbers locked). Saved per week; Reports → Weekly can add them to its copies ("Include in copies").
+
+## Notify correctness (V2.41)
+
+The unattended cron (notify check + daily snapshot) now sends Jira only valid JQL dates: one formatter (`formatJqlSince` in `jira/http.ts`, same tz-offset + 5-minute-buffer semantics as `buildIncrementalSinceParam`) is applied inside `fetchMentionedIssuesWith` / `buildIssuesJql`, and both cron paths receive the member's timezone offset. Before, a raw ISO string made every steady-state run fail with a 400. Also fixed: the notified-comment baseline is a FIFO union capped at 1,000 (an unrelated comment on an old ticket no longer re-announces its old mention); an issue whose comment fetch failed is remembered in an optional `retryIssueKeys` (<= 50) and fetched again next run; comments are fetched newest-first (`orderBy=-created`, up to 3 pages), so a mention in a long thread is no longer missed; the assigned-issues query is `statusCategory != Done` instead of the account's whole history (the daily report also takes issues that turned Done in the last 14 days, to keep "closed in Jira"). A ticket that leaves and re-enters the open set is announced as newly assigned again. Old stored blobs load unchanged; the first run on one is a normal run. Tests: `35-notify-correctness`, using the JQL-validating `strictJiraFake()`.
 
 ## Guard rails (V2.40.1)
 

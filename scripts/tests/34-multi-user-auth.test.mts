@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ok } from "./harness.mts";
+import { strictJiraFake } from "./helpers.mts";
 import { isAdminEmail, isEmailAllowed, misconfigurationError, PROVIDER_REQUIREMENT, readAuthSettings, scopedKey, sessionCookieConfig, userIdForEmail } from "../../src/lib/command-center/auth/auth-config";
 import { effectiveAccountId, isSameOrigin, resolvePrincipal } from "../../src/lib/command-center/auth/principal";
 import { createUserDirectory, type UserRecord } from "../../src/lib/command-center/auth/users";
@@ -355,14 +356,14 @@ const ctxFor = (email: string, over: Partial<AccountContext> = {}): AccountConte
   const { plans, skipped } = await planCronMembers(cdir, ENV_ON, KEY, false);
   ok(group, plans.length === 3 && skipped.length === 0 && plans.every((p) => p.config.apiToken === `token-${p.email}` && p.accountId === `acc-${p.email}`), "plans one run per member who turned notify/snapshot on, each with their own token and accountId");
   const seenTokens = new Set<string>();
-  const fetchImpl: FetchLike = async (url, init) => {
+  const fetchImpl: FetchLike = strictJiraFake(async (url, init) => {
     const auth = init?.headers?.Authorization ?? "";
     seenTokens.add(auth);
     if (auth === "Basic " + Buffer.from("two@acme.com:token-two@acme.com").toString("base64")) return { ok: false, status: 401, json: async () => ({ errorMessages: ["revoked"] }) };
     const u = new URL(url);
     if (u.pathname.endsWith("/search/jql")) return { ok: true, status: 200, json: async () => ({ issues: [], isLast: true }) };
     return { ok: true, status: 200, json: async () => ({ comments: [] }) };
-  };
+  });
   const stores = new Map<string, { notifyStore: ReturnType<typeof createInMemoryNotifyStore>; reportStore: ReturnType<typeof createInMemoryServerReportStore> }>();
   const result = await runCronForMembers(fetchImpl, plans, {
     storesFor: (uid) => stores.get(uid) ?? (stores.set(uid, { notifyStore: createInMemoryNotifyStore(), reportStore: createInMemoryServerReportStore() }), stores.get(uid)!),

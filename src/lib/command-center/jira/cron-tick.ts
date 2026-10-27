@@ -30,6 +30,8 @@ export async function runCronTick(
     /** L4 — this member's Slack destination (null: none). Omitted: SLACK_WEBHOOK_URL. */
     webhookUrl?: string | null;
     snapshot?: { store: ServerReportStore; now: Date; timezoneOffsetMinutes?: number; snapshotHourLocal?: number };
+    /** P1.1 — the Jira user's UTC offset for the notify step's `updated >=` cursor. */
+    timezoneOffsetMinutes?: number;
   }
 ): Promise<CronTickResult> {
   // A failure in either step never fails the other, and never corrupts persisted state (both
@@ -37,10 +39,10 @@ export async function runCronTick(
   const warnings: string[] = [];
   if (steps.notifyStore) {
     try {
-      const result =
-        "webhookUrl" in steps
-          ? await runServerSideNotifyCheck(fetchImpl, config, accountId, steps.notifyStore, undefined, { webhookUrl: steps.webhookUrl })
-          : await runServerSideNotifyCheck(fetchImpl, config, accountId, steps.notifyStore);
+      const result = await runServerSideNotifyCheck(fetchImpl, config, accountId, steps.notifyStore, undefined, {
+        ...("webhookUrl" in steps ? { webhookUrl: steps.webhookUrl } : {}),
+        timezoneOffsetMinutes: steps.timezoneOffsetMinutes,
+      });
       if (result.error) warnings.push(`Server-side notify check failed: ${result.error}`);
     } catch (err) {
       warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -110,6 +112,7 @@ export async function runCronForMembers(
       const tick = await runCronTick(fetchImpl, plan.config, plan.accountId, {
         notifyStore: plan.notify ? stores.notifyStore : undefined,
         webhookUrl: plan.webhookUrl,
+        timezoneOffsetMinutes: plan.timezoneOffsetMinutes,
         snapshot: plan.snapshot && stores.reportStore ? { store: stores.reportStore, now: deps.now(), timezoneOffsetMinutes: plan.timezoneOffsetMinutes, snapshotHourLocal: deps.snapshotHourLocal } : undefined,
       });
       result.usersProcessed++;

@@ -10,6 +10,9 @@ export interface PersonalNotifyState {
   assignedIssueKeys: string[];
   notifiedCommentIds: string[];
   lastCheckedAtIso: string;
+  /** P1.1 — issues whose comment fetch failed last run; fetched again next run even when the
+   *  JQL no longer returns them (<= 50, FIFO). Optional: blobs written before V2.41 lack it. */
+  retryIssueKeys?: string[];
 }
 
 export interface NotifyStateStore {

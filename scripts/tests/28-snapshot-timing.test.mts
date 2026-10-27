@@ -12,6 +12,7 @@ import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-
 import { emptyData } from "../../src/lib/command-center/types";
 import type { FetchLike } from "../../src/lib/command-center/jira/http";
 import { ok } from "./harness.mts";
+import { strictJiraFake } from "./helpers.mts";
 
 const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
 const ME = "acc-me";
@@ -21,14 +22,14 @@ const issue = (key: string, done: boolean, resolved?: string) => ({
   key,
   fields: { summary: `Ticket ${key}`, assignee: { accountId: ME }, status: { name: done ? "Done" : "In Progress", statusCategory: { key: done ? "done" : "indeterminate" } }, project: { key: "PAY", name: "Payments" }, ...(resolved ? { resolutiondate: resolved } : {}) },
 });
-const jira = (assigned: unknown[]): FetchLike => async (url, init) => {
+const jira = (assigned: unknown[]): FetchLike => strictJiraFake(async (url, init) => {
   const u = new URL(url);
   if (u.pathname.endsWith("/search/jql")) {
     const jql = String(JSON.parse(init?.body ?? "{}").jql ?? "");
     return { ok: true, status: 200, json: async () => ({ issues: jql.startsWith("assignee") ? assigned : [], isLast: true }) };
   }
   return { ok: true, status: 200, json: async () => ({ comments: [] }) };
-};
+});
 
 // ----- Schedule -----
 {

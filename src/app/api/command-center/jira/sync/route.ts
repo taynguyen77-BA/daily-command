@@ -306,6 +306,7 @@ export async function GET(req: Request) {
   }
   const result = await runCronTick(fetch, config, accountId, {
     notifyStore: isNotifyStoreConfigured() ? createNotifyStore() : undefined,
+    timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(),
     snapshot: isServerDailyReportConfigured(process.env)
       ? { store: createServerReportStore(), now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) }
       : undefined,

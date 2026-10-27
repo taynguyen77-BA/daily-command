@@ -33,7 +33,7 @@ import { runServerSideNotifyCheck } from "../../src/lib/command-center/cron-noti
 import { createInMemoryNotifyStore, isNotifyStoreConfigured } from "../../src/lib/command-center/notify-state";
 import type { SlackFetchLike } from "../../src/lib/server/slack-notify";
 import { ok } from "./harness.mts";
-import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mockAttentionItem, mockPersonalFocus, mockProactive, pfc } from "./helpers.mts";
+import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mockAttentionItem, mockPersonalFocus, mockProactive, pfc, strictJiraFake } from "./helpers.mts";
 
 // ----- Policy model: parsing, project isolation, unknown project/status -----
 {
@@ -586,7 +586,7 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
 
   type RawIssue = { key: string; fields?: Record<string, unknown> };
   function cronJiraFetch(opts: { assigned: RawIssue[]; mentioned: RawIssue[]; comments: Record<string, JiraComment[]> }): FetchLike {
-    return async (url, init) => {
+    return strictJiraFake(async (url, init) => {
       const u = new URL(url);
       if (u.pathname.endsWith("/search/jql")) {
         const body = init?.body ? (JSON.parse(init.body) as { jql?: string }) : {};
@@ -601,7 +601,7 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
         return { ok: true, status: 200, json: async () => ({ comments: opts.comments[key] ?? [] }) };
       }
       return { ok: false, status: 404, json: async () => ({}) };
-    };
+    });
   }
 
   let cnSlackCaptured: string[] = [];
@@ -760,7 +760,7 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
   const syncRouteSrc = fs.readFileSync(path.join(repoRoot, "src/app/api/command-center/jira/sync/route.ts"), "utf8");
   ok("V2.13 Sync route wiring", /process\.env\.PERSONAL_JIRA_ACCOUNT_ID/.test(syncRouteSrc), "the sync route's GET handler reads PERSONAL_JIRA_ACCOUNT_ID");
   const cronTickSrc = fs.readFileSync(path.join(repoRoot, "src/lib/command-center/jira/cron-tick.ts"), "utf8");
-  ok("V2.13 Sync route wiring", /runCronTick\(fetch, config, accountId/.test(syncRouteSrc) && /runServerSideNotifyCheck\(fetchImpl, config, accountId, steps\.notifyStore\)/.test(cronTickSrc), "the GET handler calls the real runServerSideNotifyCheck (via jira/cron-tick.ts), never a second implementation");
+  ok("V2.13 Sync route wiring", /runCronTick\(fetch, config, accountId/.test(syncRouteSrc) && /runServerSideNotifyCheck\(fetchImpl, config, accountId, steps\.notifyStore,/.test(cronTickSrc), "the GET handler calls the real runServerSideNotifyCheck (via jira/cron-tick.ts), never a second implementation");
   ok("V2.13 Sync route wiring", /createNotifyStore/.test(syncRouteSrc), "the GET handler wires the real KV-backed store, not the in-memory test fake");
   ok("V2.13 Sync route wiring", /isNotifyStoreConfigured/.test(syncRouteSrc), "the GET handler gates on the shared isNotifyStoreConfigured() check, not a duplicated env-var check");
   // K3 — the GET no longer runs the full sync first; every step is gated: no account → nothing

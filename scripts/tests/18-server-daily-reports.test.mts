@@ -20,6 +20,7 @@ import { buildDailyReportView, renderDailyReport, NO_DATA_RECORDED } from "../..
 import type { FetchLike } from "../../src/lib/command-center/jira/http";
 import type { JiraConnectionConfig } from "../../src/lib/command-center/jira/types";
 import { ok } from "./harness.mts";
+import { strictJiraFake } from "./helpers.mts";
 
 const config: JiraConnectionConfig = { baseUrl: "https://example.atlassian.net", email: "a@b.com", apiToken: "tok" };
 const ME = "acc-me";
@@ -37,7 +38,7 @@ const mentionBody = { type: "doc", content: [{ type: "paragraph", content: [{ ty
 /** Fake Jira: assignee search, comment-mention search, per-issue comments. Counts calls. */
 function fakeJira(opts: { assigned: RawIssue[]; mentioned: RawIssue[]; comments: Record<string, unknown[]>; failAssigned?: boolean }) {
   let calls = 0;
-  const fetchImpl: FetchLike = async (url, init) => {
+  const fetchImpl: FetchLike = strictJiraFake(async (url, init) => {
     calls++;
     const u = new URL(url);
     if (u.pathname.endsWith("/search/jql")) {
@@ -49,7 +50,7 @@ function fakeJira(opts: { assigned: RawIssue[]; mentioned: RawIssue[]; comments:
     const m = u.pathname.match(/issue\/([^/]+)\/comment/);
     if (m) return { ok: true, status: 200, json: async () => ({ comments: opts.comments[decodeURIComponent(m[1])] ?? [] }) };
     return { ok: false, status: 404, json: async () => ({}) };
-  };
+  });
   return { fetchImpl, calls: () => calls };
 }
 

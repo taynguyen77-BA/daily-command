@@ -14,6 +14,7 @@ import { computeDeliveryLoops } from "../../src/lib/command-center/delivery-loop
 import type { Action } from "../../src/lib/command-center/types";
 import { computePersonalFocus } from "../../src/lib/command-center/personal-focus";
 import type { JiraConnectionConfig } from "../../src/lib/command-center/jira/types";
+import type { FetchLike } from "../../src/lib/command-center/jira/http";
 import type { PersonalFocusCandidate } from "../../src/lib/command-center/types";
 import type { Project } from "../../src/lib/command-center/types";
 import { buildProjectOverrideView } from "../../src/components/command-center/use-command-center";
@@ -415,3 +416,36 @@ export function v226ConfiguredStore(extraDeps: Partial<ConstructorParameters<typ
 }
 
 export const v226Actionable = (key: string, overrides: Partial<WorkItem> = {}) => v226JiraItem(key, { jiraStatusName: "In Progress", priority: "P1", dueDate: "2026-01-05", businessImpact: 5, ...overrides });
+
+
+// ================= strictJiraFake — a fake that validates JQL like Jira does =================
+// CLAUDE.md rule 3: a Jira fake that ignores the JQL hides bugs (a raw ISO timestamp in
+// `updated >= "..."` sailed through every earlier fake and 400s on real Jira). Wrap any
+// fake with this: /search/jql requests whose `updated` comparison is not yyyy-MM-dd,
+// yyyy/MM/dd, or either followed by " HH:mm" are answered 400 (like Jira); all else goes to `inner`.
+
+export const JQL_DATE_FORMAT = /^\d{4}[-/]\d{2}[-/]\d{2}( \d{2}:\d{2})?$/;
+const JQL_UPDATED_DATE = /\bupdated\s*(?:>=|<=|>|<|=)\s*"([^"]*)"/g;
+
+export type StrictJiraFake = FetchLike & { rejected: string[]; jqls: string[] };
+
+export function strictJiraFake(inner: FetchLike): StrictJiraFake {
+  const rejected: string[] = [];
+  const jqls: string[] = [];
+  const fake = (async (url, init) => {
+    if (new URL(url).pathname.endsWith("/search/jql")) {
+      let jql = "";
+      try { jql = String(JSON.parse(init?.body ?? "{}").jql ?? ""); } catch { /* not JSON: let inner answer */ }
+      jqls.push(jql);
+      for (const m of jql.matchAll(JQL_UPDATED_DATE)) {
+        if (JQL_DATE_FORMAT.test(m[1])) continue;
+        rejected.push(m[1]);
+        return { ok: false, status: 400, json: async () => ({ errorMessages: [`Date value '${m[1]}' for field 'updated' is invalid.`] }) };
+      }
+    }
+    return inner(url, init);
+  }) as StrictJiraFake;
+  fake.rejected = rejected;
+  fake.jqls = jqls;
+  return fake;
+}
