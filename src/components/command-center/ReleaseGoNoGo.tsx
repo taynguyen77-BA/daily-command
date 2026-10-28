@@ -12,6 +12,7 @@ import { computeReleaseDrift } from "@/lib/command-center/release-drift";
 import type { ReleaseBriefResponse } from "@/lib/command-center/ai/schemas";
 import type { CommandCenterData, ReleaseHealth } from "@/lib/command-center/types";
 import { todayLocalIso } from "@/lib/command-center/date-utils";
+import { scoringOptionsFor } from "./use-command-center";
 import { TrustLabel } from "./ui";
 import { useAiReadiness } from "./use-ai-readiness";
 
@@ -28,7 +29,7 @@ export function ReleaseGoNoGo({ release, data }: { release: ReleaseHealth; data:
   const run = async () => {
     setBusy(true);
     const s = commandCenterStore.getSnapshot();
-    const drift = computeReleaseDrift([release], previousSnapshotOf(s), todayLocalIso(), undefined, data.workItems)[0];
+    const drift = computeReleaseDrift([release], previousSnapshotOf(s), todayLocalIso(), undefined, data.workItems, scoringOptionsFor(s, s.mentionEvents, todayLocalIso()))[0];
     const { input, session } = buildReleaseBriefInput(release, data, drift, s.aiDataProtection.customTerms);
     setResult(await runReleaseBrief(input, session, getAIProvider()));
     setBusy(false);

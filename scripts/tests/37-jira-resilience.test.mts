@@ -121,5 +121,5 @@ const res = (status: number, body: unknown = {}, headers: Record<string, string>
   const r = await fetchJiraIssuesWith(seen, cfg, { bootstrapDays: 90 });
   ok(group, r.ok && seen.jqls[0].includes("-90d") && seen.rejected.length === 0, "the bootstrap query is accepted by the JQL-validating fake");
   const route = read("src/app/api/command-center/jira/sync/route.ts");
-  ok(group, /const bootstrapDays = jqlSinceIso \? 0 : jiraBootstrapDays\(\)/.test(route) && /Initial sync limited to open tickets/.test(route), "only a sync without a cursor uses it, and says so in a warning");
+  ok(group, /const bootstrapDays = jqlSinceIso && !keepBootstrap \? 0 : jiraBootstrapDays\(\)/.test(route) && /Initial sync limited to open tickets/.test(route), "only a sync without a cursor uses it, and says so in a warning");
 }

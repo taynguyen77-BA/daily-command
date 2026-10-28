@@ -12,7 +12,7 @@ import { describeReleaseForecast, weeklyForecastLine } from "../../src/component
 import { addDays } from "../../src/lib/command-center/date-utils";
 import { parseStoredState } from "../../src/lib/command-center/store";
 import { emptyData, type CommandCenterData, type WorkItem } from "../../src/lib/command-center/types";
-import { ok, perfBudget } from "./harness.mts";
+import { measureMedianMs, ok, perfBudget } from "./harness.mts";
 
 const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
 const today = "2026-10-27";
@@ -155,11 +155,8 @@ const ok_ = (e: LeadTimeEstimate) => (e.status === "OK" ? e : (() => { throw new
     items.push(i % 3 === 0 ? done(`T-${i}`, 3 + (i % 25), i % 80, { projectId: p, type: (["task", "bug"] as const)[i % 2], fixVersion: `V${i % 10}` }) : wi(`T-${i}`, { projectId: p, type: (["task", "bug"] as const)[i % 2], fixVersion: `V${i % 10}`, createdDate: addDays(today, -(i % 70)), dueDate: i % 4 === 0 ? addDays(today, (i % 20) - 5) : undefined }));
   }
   const data = { ...emptyData(), workItems: items } as CommandCenterData;
-  const t0 = performance.now();
-  const fc = computeForecast(data, today);
-  const ms = performance.now() - t0;
+  const { ms, result: fc } = measureMedianMs(() => computeForecast(data, today)); // C3: warm-up discarded, median of 5
   ok(group, fc.resolvedSamples > 500 && fc.byTicket.size > 500 && ms <= perfBudget(100), `the whole forecast layer on 3,000 tickets: ${ms.toFixed(1)} ms (budget ${perfBudget(100)} ms, ${fc.resolvedSamples} resolved samples, ${fc.releases.length} releases)`);
-  const t1 = performance.now();
-  detectRisks({ ...data }, today);
-  ok(group, performance.now() - t1 <= perfBudget(400), "the risk engine with the new rule stays within its budget");
+  const risk = measureMedianMs(() => detectRisks({ ...data }, today), 3);
+  ok(group, risk.ms <= perfBudget(400), "the risk engine with the new rule stays within its budget");
 }

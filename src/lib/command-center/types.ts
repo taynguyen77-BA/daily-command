@@ -523,6 +523,8 @@ export interface JiraSyncState {
   lastSyncStatus: "never" | "success" | "partial" | "failed";
   lastSyncError?: string;
   lastSyncErrorKind?: JiraErrorKind;
+  /** C2 (R5) — false while the first (bootstrap-windowed) sync is unfinished because it hit the issue cap; undefined = true (existing installs). */
+  initialSyncComplete?: boolean;
   recordsFetched?: number;
   recordsCreated?: number;
   recordsUpdated?: number;

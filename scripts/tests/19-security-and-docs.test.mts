@@ -9,7 +9,7 @@ import { bearerMatches, safeEqual } from "../../src/lib/command-center/secure-co
 import { checkSyncRequestAuth } from "../../src/lib/command-center/jira/sync-auth";
 import { checkAppStateAuth } from "../../src/lib/command-center/app-state";
 import { buildJiraStatusResponse } from "../../src/lib/command-center/jira/status-response";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 
 const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
 
@@ -53,6 +53,7 @@ function walk(dir: string): string[] {
   const group = "E6 Version line";
   const pkg = JSON.parse(read("package.json")) as { version: string };
   const readme = read("README.md");
+  const allDocs = readDocs();
   const lines = readme.match(/^\*\*Current version:\*\* .*$/gm) ?? [];
   const [major, minor, patch] = pkg.version.split(".");
   const expected = `V${major}.${minor}${patch && patch !== "0" ? `.${patch}` : ""}`;
@@ -62,8 +63,8 @@ function walk(dir: string): string[] {
   ok(group, actual === expected, `README "Current version" (${actual}) equals package.json "version" (${pkg.version} → ${expected})`);
   // K5 — a heading documenting a newer release than package.json means the bump was forgotten.
   const pkgRank = Number(major) * 1000 + Number(minor);
-  const ahead = (readme.match(/^#+ .*$/gm) ?? []).filter((h) => Array.from(h.matchAll(/\(([^)]*)\)/g)).some((m) => Array.from(m[1].matchAll(/V(\d+)\.(\d+)/g)).some((v) => Number(v[1]) * 1000 + Number(v[2]) > pkgRank)));
-  ok(group, ahead.length === 0, `no README "(V2.NN)" heading is newer than package.json ${pkg.version} (${ahead.join(" | ") || "none"})`);
+  const ahead = (allDocs.match(/^#+ .*$/gm) ?? []).filter((h) => Array.from(h.matchAll(/\(([^)]*)\)/g)).some((m) => Array.from(m[1].matchAll(/V(\d+)\.(\d+)/g)).some((v) => Number(v[1]) * 1000 + Number(v[2]) > pkgRank)));
+  ok(group, ahead.length === 0, `no README / docs "(V2.NN)" heading is newer than package.json ${pkg.version} (${ahead.join(" | ") || "none"})`);
   const fakeRank = 2 * 1000 + 35;
   const fake = ["## Task-level AI (V2.36–V2.37) — x", "## Review fixes (V2.35)"].filter((h) => Array.from(h.matchAll(/\(([^)]*)\)/g)).some((m) => Array.from(m[1].matchAll(/V(\d+)\.(\d+)/g)).some((v) => Number(v[1]) * 1000 + Number(v[2]) > fakeRank)));
   ok(group, fake.length === 1, "the check catches a V2.36–V2.37 heading in a README still versioned 2.35.0 (the stale state K5 fixed)");
@@ -75,7 +76,8 @@ function walk(dir: string): string[] {
 {
   const group = "E6 Test layout";
   const runner = read("scripts/tests/run.mts");
-  const listed = Array.from(runner.matchAll(/"\.\/([^"]+\.test\.mts)"/g)).map((m) => m[1]);
+  // C3 — the two wall-clock files are listed in run-perf.mts (run.mts spawns it in a child process); together they cover every file once.
+  const listed = Array.from((runner + read("scripts/tests/run-perf.mts")).matchAll(/"\.\/([^"]+\.test\.mts)"/g)).map((m) => m[1]);
   const onDisk = fs.readdirSync(path.join(process.cwd(), "scripts/tests")).filter((f) => f.endsWith(".test.mts")).sort();
   ok(group, JSON.stringify([...listed].sort()) === JSON.stringify(onDisk), `the runner lists every *.test.mts file exactly once (${onDisk.length} files)`);
   ok(group, !fs.existsSync(path.join(process.cwd(), "scripts/command-center-test.mts")) && /"test": "tsx scripts\/tests\/run\.mts"/.test(read("package.json")), "npm test runs the single runner; the old monolith is gone");
@@ -84,7 +86,7 @@ function walk(dir: string): string[] {
 // ----- V2.34 — every daily-flow feature has its README entry -----
 {
   const group = "V2.34 README entries";
-  const readme = read("README.md");
+  const readme = readDocs();
   const start = readme.indexOf("## Daily flow (V2.34)");
   const section = start >= 0 ? readme.slice(start, readme.indexOf("\n## ", start + 5)) : "";
   for (const [feature, title] of [["F1", "**Morning Mode**"], ["F2", "**Blocker follow-ups**"], ["F3", "**Mention reply auto-detection**"], ["F4", "**Jira write-back**"], ["F5", "**Report summaries**"], ["F6", "**Performance budget.**"]] as const) {

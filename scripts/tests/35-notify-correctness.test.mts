@@ -145,7 +145,7 @@ const noSlack = (async () => ({ ok: true, status: 200, text: async () => "" })) 
   const group = "P1.1 JQL date formatter";
   const iso = "2026-10-27T10:15:33.123Z";
   ok(group, formatJqlSince(iso, 420) === buildIncrementalSinceParam(iso, 420) && formatJqlSince(iso, 420) === "2026-10-27 17:10", `an ISO instant uses buildIncrementalSinceParam semantics (tz offset + 5-min buffer): ${formatJqlSince(iso, 420)}`);
-  ok(group, formatJqlSince(iso) === "2026-10-27", "unknown offset falls back to the day-level cursor, exactly like buildIncrementalSinceParam");
+  ok(group, formatJqlSince(iso) === "2026-10-26", "unknown zone falls back to the day-level cursor, UTC date minus one day (C1: the UTC date itself skips hours west of UTC)");
   ok(group, formatJqlSince("2026-10-27 17:10", 420) === "2026-10-27 17:10" && formatJqlSince("2026/10/27") === "2026/10/27" && formatJqlSince("2026-10-27") === "2026-10-27", "an already-formatted value passes through (never double-buffered)");
   ok(group, formatJqlSince("not a date", 0) === undefined && formatJqlSince(undefined) === undefined && formatJqlSince("") === undefined, "garbage / empty yields no clause instead of a string Jira rejects");
   ok(group, buildIssuesJql({ sinceIso: iso, timezoneOffsetMinutes: 420 }).includes('updated >= "2026-10-27 17:10"') && buildIssuesJql({ sinceIso: "2026-10-27 17:10" }).includes('updated >= "2026-10-27 17:10"'), "buildIssuesJql normalizes its sinceIso (ISO or pre-formatted)");
@@ -155,7 +155,7 @@ const noSlack = (async () => ({ ok: true, status: 200, text: async () => "" })) 
   const mentionedNoTz = await fetchMentionedIssuesWith(seen, cfg, ME, iso);
   const assigned = await fetchAssignedIssuesWith(seen, cfg, ME);
   ok(group, mentioned.ok && mentionedNoTz.ok && assigned.ok && seen.rejected.length === 0, `fetchMentionedIssuesWith accepts a raw ISO string and never sends it (rejected: ${seen.rejected.join(",") || "none"})`);
-  ok(group, seen.jqls[0].includes('updated >= "2026-10-27 17:10"') && seen.jqls[1].includes('updated >= "2026-10-27"'), "the tz offset is honoured when given, day-level otherwise");
+  ok(group, seen.jqls[0].includes('updated >= "2026-10-27 17:10"') && seen.jqls[1].includes('updated >= "2026-10-26"'), "the tz offset is honoured when given, day-level (UTC date minus one day) otherwise");
 }
 
 {

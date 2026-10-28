@@ -12,7 +12,7 @@ import { computeSetupHealthRows } from "../../src/components/command-center/Setu
 import { emptyData } from "../../src/lib/command-center/types";
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import type { FetchLike } from "../../src/lib/command-center/jira/http";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import { strictJiraFake } from "./helpers.mts";
 
 const U1 = "u_000000000000000000000001";
@@ -126,7 +126,7 @@ const minAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString()
   ok(group, /-X GET "\$SYNC_URL\/api\/command-center\/jira\/sync"/.test(wf) && !/-X POST/.test(wf), "the scheduled workflow calls GET (the method that runs notify + snapshot), not POST");
   ok(group, /::warning/.test(wf) && /GITHUB_STEP_SUMMARY/.test(wf) && /exit 0/.test(wf), "missing secrets: a warning annotation and a step summary, still exit 0");
   ok(group, /actions: write/.test(wf) && /workflows\/sync\.yml\/enable/.test(wf) && /continue-on-error: true/.test(wf) && /60 days/.test(wf), "a best-effort keep-alive step re-enables the workflow; the 60-day rule is documented");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, /### Choosing a scheduler/.test(readme) && /cron-job\.org/.test(readme) && /QStash/.test(readme) && /Vercel Pro cron/.test(readme) && /GitHub Actions/.test(readme) && /Recommendation/.test(readme), "README has the scheduler table with a recommendation");
   ok(group, JSON.stringify(JSON.parse(read("vercel.json")).crons) === JSON.stringify([{ path: "/api/command-center/jira/sync", schedule: "0 11 * * *" }]), "vercel.json is unchanged");
 }

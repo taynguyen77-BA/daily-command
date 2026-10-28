@@ -8,7 +8,7 @@ import { isNotifyStoreConfigured } from "../../src/lib/command-center/notify-sta
 import { isAppStateStoreConfigured } from "../../src/lib/command-center/app-state";
 import { isServerDailyReportConfigured } from "../../src/lib/command-center/server-daily-report";
 import { readAuthSettings } from "../../src/lib/command-center/auth/auth-config";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 
 const root = process.cwd();
 const read = (f: string) => fs.readFileSync(path.join(root, f), "utf8");
@@ -104,7 +104,7 @@ ok("P2.4 KV contract (Redis adapter)", ["get", "set", "del", "rpush", "lrange", 
   const pkg = JSON.parse(read("package.json")) as { dependencies: Record<string, string> };
   ok(group, !("@vercel/kv" in pkg.dependencies) && "@upstash/redis" in pkg.dependencies, "package.json: @vercel/kv removed, @upstash/redis added");
   ok(group, !fs.existsSync(path.join(root, "node_modules/@vercel/kv")), "@vercel/kv is not installed");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, /UPSTASH_REDIS_REST_URL/.test(readme) && /first complete pair wins/.test(readme), "README documents both variable-name pairs");
   ok(group, /usage-ledger/.test("usage-ledger") && /server\/kv-client/.test(read("src/lib/command-center/ai/usage-ledger.ts")) && !/@vercel\/kv/.test(read("src/lib/command-center/ai/usage-ledger.ts")), "the AI usage ledger reaches KV through the seam");
 }

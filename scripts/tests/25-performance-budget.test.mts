@@ -10,7 +10,7 @@ import { computeProactiveIntelligence } from "../../src/lib/command-center/proac
 import { resolveAttentionEntity, workItemByIdIn } from "../../src/lib/command-center/personal-focus";
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import type { AttentionItem, CommandCenterData, Risk } from "../../src/lib/command-center/types";
-import { ok, perfBudget } from "./harness.mts";
+import { measureMedianMs, ok, perfBudget } from "./harness.mts";
 
 export const SELECTOR_BUDGET_MS = perfBudget(200);
 
@@ -73,8 +73,6 @@ const s = env.store.getSnapshot();
   const group = "P3.4 Forecast performance";
   const { computeForecast } = await import("../../src/lib/command-center/forecast");
   const today = new Date().toISOString().slice(0, 10);
-  const t0 = performance.now();
-  const bundle = computeForecast(s.data, today);
-  const ms = performance.now() - t0;
+  const { ms, result: bundle } = measureMedianMs(() => computeForecast(s.data, today)); // C3: warm-up discarded, median of 5
   ok(group, ms <= perfBudget(100), `the whole forecast layer on the ${s.data.workItems.length}-item fixture: ${ms.toFixed(1)} ms (budget ${perfBudget(100)} ms; ${bundle.resolvedSamples} resolved samples — the fixture carries few resolved dates, so most answers are UNKNOWN by design)`);
 }

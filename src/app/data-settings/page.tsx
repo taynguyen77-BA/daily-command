@@ -264,14 +264,14 @@ function ArtifactHistoryRow({
   onReopen: (draft: ArtifactDraft, staleness: "fresh" | "stale" | "unavailable") => void;
   onDelete: () => void;
 }) {
-  const { filteredData, derived, proactive, personalFocus, today, workRelevanceIndex } = useCommandCenter();
+  const { filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, scoring } = useCommandCenter();
 
   function reopen() {
     if (!proactive) {
       onReopen(record, "unavailable");
       return;
     }
-    const fresh = rebuildDraftFromSourceRef(record.sourceRef, record.sourceContext, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex);
+    const fresh = rebuildDraftFromSourceRef(record.sourceRef, record.sourceContext, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, scoring);
     if (!fresh) {
       onReopen(record, "unavailable");
       return;
@@ -694,7 +694,7 @@ const FEATURE_TOGGLE_LABELS: { key: keyof FeatureToggles; label: string; detail:
   { key: "ticketAi", label: "Ticket AI (off by default)", detail: "'Check requirements' on a Jira ticket: reads its description, acceptance criteria and comments on demand and asks the AI for gaps and questions. Only for projects allowed in AI data protection below, redacted first, with a 'What will be sent' preview the first time per project." },
 ];
 export default function DataSettingsPage() {
-  const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
+  const { state, store, scopedData, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring } = useCommandCenter();
   const authSession = useAuthSession();
   const [confirmingReset, setConfirmingReset] = useState(false);
   // E1 — Reset requires typing RESET (and offers a backup download first).
@@ -1871,7 +1871,7 @@ export default function DataSettingsPage() {
             onRefresh:
               reopening.staleness === "stale" && proactive
                 ? () => {
-                    const fresh = rebuildDraftFromSourceRef(reopening.record.sourceRef, reopening.record.sourceContext, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex);
+                    const fresh = rebuildDraftFromSourceRef(reopening.record.sourceRef, reopening.record.sourceContext, filteredData, derived, proactive, personalFocus, today, workRelevanceIndex, scoring);
                     if (fresh) setReopening({ record: reopening.record, draft: fresh, staleness: "fresh", nonce: Date.now() });
                   }
                 : undefined,

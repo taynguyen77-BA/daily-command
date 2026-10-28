@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import type { ScoringOptions } from "@/lib/command-center/scoring";
 import { selectAllReleaseHealth } from "@/lib/command-center/release-health";
 import { buildReleaseUpdateDraft } from "@/lib/command-center/communicate";
 import type { WorkRelevanceIndex } from "@/lib/command-center/jira/work-relevance";
@@ -52,15 +53,18 @@ export function ReleaseHealthPanel({
   data,
   today,
   workRelevanceIndex,
+  scoring,
 }: {
   data: CommandCenterData;
   today: string;
   workRelevanceIndex?: WorkRelevanceIndex;
+  /** C2 — the dashboard's scoring options (omitted = v1). */
+  scoring?: ScoringOptions;
   /** Accepted for compatibility and ignored — personal completion never counts toward a release (B5). */
   dailyCommandCompletedWorkItemIds?: ReadonlySet<string>;
 }) {
   // B5 — the one release selector; personal Daily Command completion never counts here.
-  const releases = selectAllReleaseHealth(data, today, workRelevanceIndex);
+  const releases = selectAllReleaseHealth(data, today, workRelevanceIndex, scoring);
   if (releases.length === 0) return null;
 
   return (

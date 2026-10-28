@@ -3,7 +3,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import type { IssueContext } from "../../src/lib/command-center/jira/issue-context";
 import { DEFAULT_AI_DATA_PROTECTION, buildTicketAiInput, type AiDataProtectionSettings } from "../../src/lib/command-center/ai/data-protection";
 import { handleAiRequest, ResponseCache, type ModelCallParams, type ModelCallResult, type AiServerDeps } from "../../src/lib/command-center/ai/server-runner";
@@ -97,7 +97,7 @@ const ctx = (over: Partial<IssueContext> = {}): IssueContext => ({
   ok(group, keys.every((k) => DEFAULT_FEATURE_TOGGLES[k] === false), "all six are off by default");
   const ds = read("src/app/data-settings/page.tsx");
   ok(group, keys.every((k) => ds.includes(`key: "${k}"`)), "each has a Data & Settings switch");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, ["Requirement check", "Go/No-Go", "Meeting notes", "Command Bar commands", "Weekly insights", "AI blocker follow-ups"].every((t) => readme.includes(t)), "README documents all six");
 }
 

@@ -38,6 +38,7 @@ const savedPrefs = async (uid?: string) => {
   }
 };
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
+import { minimalNotifyBody } from "@/lib/command-center/status-access";
 import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
 import { jiraConfigForUser, slackWebhookForUser } from "@/lib/command-center/auth/connections";
 import type { UserRecord } from "@/lib/command-center/auth/users";
@@ -100,6 +101,8 @@ export async function GET(req: Request) {
     }
   }
   const configured = !!process.env.SLACK_WEBHOOK_URL;
+  // R4 — sign-in off: only a paired caller (Bearer APP_STATE_SECRET / CRON_SECRET) sees prefs, the channel label and cron state.
+  if (!checkSyncRequestAuth(req.headers.get("authorization"), process.env.CRON_SECRET, process.env.APP_STATE_SECRET).ok) return NextResponse.json(minimalNotifyBody(configured));
   const channelLabel = process.env.SLACK_CHANNEL_LABEL?.trim() || undefined;
   return NextResponse.json({ configured, channelLabel, serverSideNotifyActive: isServerSideNotifyActive(), prefs: await savedPrefs() });
 }

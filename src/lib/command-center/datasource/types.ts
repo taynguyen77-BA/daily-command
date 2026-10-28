@@ -44,5 +44,5 @@ export interface DataSourceSyncResult {
 
 export interface DataSourceProvider {
   readonly type: DataSourceType;
-  sync(options?: { sinceIso?: string; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string; conversationCache?: Record<string, string> }): Promise<DataSourceSyncResult>;
+  sync(options?: { sinceIso?: string; bootstrapPending?: boolean; scopeMode?: JiraProjectScopeMode; projectKeys?: string[]; accountId?: string; sprintFieldId?: string; conversationCache?: Record<string, string> }): Promise<DataSourceSyncResult>;
 }

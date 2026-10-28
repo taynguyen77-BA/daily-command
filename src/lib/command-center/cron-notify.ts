@@ -20,7 +20,7 @@ import { emptyData } from "./types";
 import { detectNewAssignments } from "./assignment-detection";
 import { buildMentionEvents, commentMentionsAccount, latestOwnCommentAt } from "./jira/mentions";
 import { normalizeIssues } from "./jira/normalize";
-import { fetchAssignedIssuesWith, fetchIssueCommentsWith, fetchMentionedIssuesWith, type FetchLike } from "./jira/http";
+import { fetchAssignedIssuesWith, fetchIssueCommentsWith, fetchMentionedIssuesWith, fetchMyTimeZoneWith, type FetchLike } from "./jira/http";
 import type { JiraConnectionConfig } from "./jira/types";
 import { postToSlack, renderSlackText, type SlackFetchLike, type SlackSignal } from "../server/slack-notify";
 import type { NotifyStateStore, PersonalNotifyState } from "./notify-state";
@@ -29,7 +29,8 @@ import type { DigestStore } from "./notify-digest";
 import { runSmartDelivery } from "./cron-notify-smart";
 import type { TicketUrgencyFacts } from "./notify-severity";
 import { jiraConcurrency, mapWithConcurrency } from "./jira/concurrency";
-import { fifoUnion, keysToFetch, MAX_NOTIFIED_COMMENT_IDS, nextRetryKeys } from "./notify-baseline";
+import { fifoUnion, keysToFetch, MAX_NOTIFIED_COMMENT_IDS, MAX_RETRY_ISSUE_KEYS, nextRetryKeys } from "./notify-baseline";
+import { applyDeliveryOutcomes, assignmentSignalId, DEFAULT_MAX_PER_RUN, mentionSignalId, type DeliveryOutcome } from "./notify-delivery";
 
 export interface ServerNotifyCheckResult {
   notified: number;
@@ -39,6 +40,14 @@ export interface ServerNotifyCheckResult {
   // should surface it as a warning, same discipline as every other best-effort fetch in this
   // app (see that route's own `warnings` array).
   error?: string;
+  /** C1 — signals whose Slack post failed and that will be re-announced next run. */
+  undelivered?: number;
+  /** C1 — signals given up on this run after too many failed posts. */
+  droppedUndelivered?: number;
+  /** C1 — the last Slack error of this run. */
+  lastSlackError?: string;
+  /** C1 — when the current Slack failure streak began. */
+  undeliveredSince?: string;
 }
 
 /** A synthetic single-purpose "previous DailySnapshot" built ONLY from the persisted
@@ -124,6 +133,9 @@ export async function collectCurrentMentions(
   return { entries, failedKeys: issueKeys.filter((k) => failed.has(k)), ownLastAt };
 }
 
+const ZONE_RECHECK_MS = 7 * 86_400_000;
+const isFresh = (checkedAtIso: string | undefined, now: Date) => !!checkedAtIso && now.getTime() - new Date(checkedAtIso).getTime() < ZONE_RECHECK_MS;
+
 export async function runServerSideNotifyCheck(
   fetchImpl: FetchLike,
   config: JiraConnectionConfig,
@@ -136,6 +148,12 @@ export async function runServerSideNotifyCheck(
     webhookUrl?: string | null;
     /** P1.1 — the Jira user's UTC offset, for the `updated >=` cursor (see jira/http.ts formatJqlSince). */
     timezoneOffsetMinutes?: number;
+    /** C1 — the Jira user's IANA zone (DST-aware); wins over the offset for the cursor. */
+    timeZone?: string;
+    /** C1 — separate Slack messages per run on the default path (default 10). */
+    maxPerRun?: number;
+    /** C1 — set false to skip the /myself lookup (the caller already knows the zone or wants no extra request). */
+    learnTimeZone?: boolean;
     /** P3.5 — smart notifications: preferences + digest queue. Omitted = exactly the V2.41 behaviour (every signal at once). */
     smart?: { prefsStore: NotifyPrefsStore; digestStore: DigestStore };
     /** Injectable clock (tests). */
@@ -145,6 +163,20 @@ export async function runServerSideNotifyCheck(
   const previous = await store.get();
   const nowDate = options.now ?? new Date();
   const today = nowDate.toISOString().slice(0, 10);
+
+  // C1 — the zone for the `updated >=` cursor: an explicit one (env / member profile) wins; otherwise the one learned
+  // from /myself, cached in this record and re-checked weekly. Best-effort: unknown -> offset -> safe day-level fallback.
+  let timeZone = options.timeZone ?? (previous?.jiraTimeZone && isFresh(previous.jiraTimeZoneCheckedAt, nowDate) ? previous.jiraTimeZone : undefined);
+  let learned: Pick<PersonalNotifyState, "jiraTimeZone" | "jiraTimeZoneCheckedAt"> = previous?.jiraTimeZone ? { jiraTimeZone: previous.jiraTimeZone, ...(previous.jiraTimeZoneCheckedAt ? { jiraTimeZoneCheckedAt: previous.jiraTimeZoneCheckedAt } : {}) } : {};
+  if (!options.timeZone && !timeZone && options.learnTimeZone !== false) {
+    const fetched = await fetchMyTimeZoneWith(fetchImpl, config);
+    if (fetched) {
+      timeZone = fetched;
+      learned = { jiraTimeZone: fetched, jiraTimeZoneCheckedAt: nowDate.toISOString() };
+    } else if (previous?.jiraTimeZone) {
+      timeZone = previous.jiraTimeZone; // stale beats unknown
+    }
+  }
 
   // ----- Fetch current assigned issues (targeted JQL — never the full sync dataset) -----
   const assignedResult = await fetchAssignedIssuesWith(fetchImpl, config, accountId);
@@ -160,7 +192,7 @@ export async function runServerSideNotifyCheck(
   // Scoped by lastCheckedAtIso when available: a real Jira instance bumps an issue's `updated`
   // timestamp when a comment is added, so this is a safe, real narrowing (same reasoning the
   // main sync's own incremental cursor already relies on), not a guess. -----
-  const mentionedResult = await fetchMentionedIssuesWith(fetchImpl, config, accountId, previous?.lastCheckedAtIso, undefined, options.timezoneOffsetMinutes);
+  const mentionedResult = await fetchMentionedIssuesWith(fetchImpl, config, accountId, previous?.lastCheckedAtIso, undefined, options.timezoneOffsetMinutes, timeZone);
   if (!mentionedResult.ok) {
     return { notified: 0, skippedColdStart: false, error: mentionedResult.error };
   }
@@ -178,6 +210,7 @@ export async function runServerSideNotifyCheck(
       notifiedCommentIds: fifoUnion([], currentMentionCommentIds, MAX_NOTIFIED_COMMENT_IDS),
       lastCheckedAtIso: nowDate.toISOString(),
       ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
+      ...learned,
     });
     return { notified: 0, skippedColdStart: true };
   }
@@ -210,6 +243,8 @@ export async function runServerSideNotifyCheck(
   // every signal accumulated while unconfigured.
   const webhookUrl = "webhookUrl" in options ? options.webhookUrl : process.env.SLACK_WEBHOOK_URL;
   let delivered = 0;
+  const outcomes: DeliveryOutcome[] = [];
+  let lastSlackError: string | undefined;
 
   // P3.5 — smart notifications. Used only when the caller supplied the stores AND the user's preferences are not the
   // defaults, or a digest is already waiting; otherwise the loop below is exactly the V2.41 behaviour.
@@ -239,21 +274,64 @@ export async function runServerSideNotifyCheck(
     await options.smart.digestStore.set(run.delivery.digest);
     smartExtras = { ...(run.pendingMentions.length > 0 ? { pendingMentions: run.pendingMentions } : {}), ...(run.escalatedCommentIds.length > 0 ? { escalatedCommentIds: run.escalatedCommentIds } : {}) };
   } else if (webhookUrl) {
-    for (const signal of signals) {
-      if ((await postToSlack(webhookUrl, renderSlackText(signal), slackFetchImpl)).ok) delivered++;
+    // C1 — a signal is notified only if its post succeeded. Failed (and flood-deferred) signals stay "new".
+    const maxPerRun = options.maxPerRun && options.maxPerRun > 0 ? options.maxPerRun : DEFAULT_MAX_PER_RUN;
+    const ids = [...newAssignments.map((a) => assignmentSignalId(a.issueKey)), ...newMentionEntries.map((e) => mentionSignalId(e.commentId))];
+    const now = ids.length > maxPerRun ? signals.slice(0, maxPerRun) : signals;
+    for (let i = 0; i < signals.length; i++) {
+      if (i >= now.length) {
+        outcomes.push({ id: ids[i], status: "deferred" });
+        continue;
+      }
+      const res = await postToSlack(webhookUrl, renderSlackText(signals[i]), slackFetchImpl);
+      if (res.ok) {
+        delivered++;
+        outcomes.push({ id: ids[i], status: "delivered" });
+      } else {
+        lastSlackError = res.detail ?? "Slack post failed";
+        outcomes.push({ id: ids[i], status: "failed" });
+      }
+    }
+    const deferredCount = signals.length - now.length;
+    if (deferredCount > 0) {
+      const rest = signals.slice(now.length);
+      const keys = Array.from(new Set(rest.map((sg) => sg.issueKey)));
+      await postToSlack(webhookUrl, `➕ +${deferredCount} more: ${keys.slice(0, 10).join(", ")}${keys.length > 10 ? ", …" : ""} (delivered over the next checks)`, slackFetchImpl); // best-effort notice; the signals themselves stay pending
     }
   }
 
+  const update = applyDeliveryOutcomes(previous.deliveryAttempts, outcomes);
+  for (const id of update.dropped) console.warn(`[notify] dropped undelivered signal ${id} after repeated Slack failures`);
+  const pendingMentionIds = new Set(newMentionEntries.filter((e) => update.pending.has(mentionSignalId(e.commentId))).map((e) => e.commentId));
+  const pendingAssignKeys = new Set(newAssignments.filter((a) => update.pending.has(assignmentSignalId(a.issueKey))).map((a) => a.issueKey));
+  const undelivered = update.pending.size;
+  const undeliveredSince = undelivered > 0 ? previous.undeliveredSince ?? nowDate.toISOString() : undefined;
+  // Mentions still owed are re-fetched next run even if the JQL no longer matches their ticket.
+  const owedKeys = newMentionEntries.filter((e) => pendingMentionIds.has(e.commentId)).map((e) => e.event.issueKey);
+  const retryWithOwed = fifoUnion(retryIssueKeys, owedKeys, MAX_RETRY_ISSUE_KEYS);
+
   const nextState: PersonalNotifyState = {
-    assignedIssueKeys: currentAssignedKeys,
+    // An undelivered assignment is left out so it diffs as new again next run.
+    assignedIssueKeys: currentAssignedKeys.filter((k) => !pendingAssignKeys.has(k)),
     // A UNION, not this run's ids: a run only sees issues updated since the last check, so
     // overwriting would forget older mentions and re-announce them when their ticket is touched again.
-    notifiedCommentIds: fifoUnion(previous.notifiedCommentIds, currentMentionCommentIds, MAX_NOTIFIED_COMMENT_IDS),
+    // An undelivered mention is left out so it is announced once Slack is back.
+    notifiedCommentIds: fifoUnion(previous.notifiedCommentIds, currentMentionCommentIds.filter((id) => !pendingMentionIds.has(id)), MAX_NOTIFIED_COMMENT_IDS),
     lastCheckedAtIso: nowDate.toISOString(),
-    ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
+    ...(retryWithOwed.length > 0 ? { retryIssueKeys: retryWithOwed } : {}),
+    ...(update.attempts.length > 0 ? { deliveryAttempts: update.attempts } : {}),
+    ...(undeliveredSince ? { undeliveredSince } : {}),
+    ...learned,
     ...smartExtras,
   };
   await store.set(nextState);
 
-  return { notified: delivered, skippedColdStart: false };
+  return {
+    notified: delivered,
+    skippedColdStart: false,
+    ...(undelivered > 0 ? { undelivered } : {}),
+    ...(update.dropped.length > 0 ? { droppedUndelivered: update.dropped.length } : {}),
+    ...(lastSlackError ? { lastSlackError } : {}),
+    ...(undeliveredSince ? { undeliveredSince } : {}),
+  };
 }

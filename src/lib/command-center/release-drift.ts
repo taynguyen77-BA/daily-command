@@ -3,6 +3,7 @@
 // selectReleaseHealth() (the one release selector — never a second, divergent implementation).
 
 import { isInRelease, selectReleaseHealth } from "./release-health";
+import type { ScoringOptions } from "./scoring";
 import type { WorkRelevanceIndex } from "./jira/work-relevance";
 import type { CommandCenterData, DailySnapshot, DriftLevel, ReleaseDrift, ReleaseHealth } from "./types";
 
@@ -21,7 +22,9 @@ export function computeReleaseDrift(
   previousSnapshot: DailySnapshot | null,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  currentWorkItems?: CommandCenterData["workItems"]
+  currentWorkItems?: CommandCenterData["workItems"],
+  /** C2 — the same scoring options the `current` healths were computed with, so the comparison is like for like. */
+  scoring?: ScoringOptions
 ): ReleaseDrift[] {
   if (!previousSnapshot) return [];
 
@@ -41,7 +44,7 @@ export function computeReleaseDrift(
     .map((health) => {
       const hadItemsBefore = previousSnapshot.workItems.some((w) => isInRelease(w, health.fixVersion));
       if (!hadItemsBefore) return null;
-      const previousHealth = selectReleaseHealth(previousData, health.fixVersion, today, workRelevanceIndex);
+      const previousHealth = selectReleaseHealth(previousData, health.fixVersion, today, workRelevanceIndex, scoring);
       const before = new Set(previousSnapshot.workItems.filter((w) => isInRelease(w, health.fixVersion)).map((w) => w.key));
       const after = currentWorkItems ? new Set(currentWorkItems.filter((w) => isInRelease(w, health.fixVersion)).map((w) => w.key)) : undefined;
 

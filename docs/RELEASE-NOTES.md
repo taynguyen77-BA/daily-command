@@ -1,0 +1,502 @@
+# Release notes (V2.x history)
+
+Moved verbatim from README.md in V2.45.0 (C3): every `(V2.NN)` section, the page smoke test, the validation status and the V2.2.1 summary. The README keeps the current version line and a short index. Add ONE short `(V2.NN)` section per release here, newest first, never a heading newer than package.json.
+
+## Task-level AI (V2.36–V2.37) — every feature OFF by default (Data & Settings → Features)
+
+**Foundation (V2.36).** Ticket content (description, acceptance criteria, last 20 comments, links, status history) is fetched only on demand (`GET /api/command-center/jira/issue-context`) and cached per ticket until Jira shows it changed. Nothing from a ticket reaches the model unless its project is on the **AI allow-list** (Data & Settings → AI data protection; default: none) — otherwise the UI says "AI disabled for this project". Before sending, emails, phones, token URLs, account ids and card/IBAN-like numbers become placeholders and your custom terms become aliases (restored in the answer); the first use per project shows **What will be sent**. The browser sends `{ task, input }` and the server builds the prompt; descriptions and comments are wrapped as untrusted data. Model tiers, the daily token cap and usage totals are in Environment Variables above. Every answer passes a **grounding guard**: a ticket key, person, number or date that wasn't in the supplied facts → one retry, then the deterministic text.
+
+- **Ticket Brief** *(I1)*. A **Brief** link on every Jira ticket row (TaskRow — so also in Focus Sessions): what is asked, current state, who it is waiting on (only people named in the ticket), open questions, a suggested next step and, sometimes, a suggested status. Kept per (ticket, Jira `updated`): opening it again costs nothing (no model call, no Jira fetch); when the ticket changed since, it is marked **Updated since brief** with **Regenerate**. A suggested status is only a button — the normal status change, recorded with surface `ai-brief` and reason "AI-suggested: …".
+- **Smart triage** *(I2)*. Morning Mode step 2 gets **Suggest for N items**: one batched fast-tier call over the New items (title, type, status, why it is new, your role, and — for allow-listed projects only — the last comment excerpt, ≤ 300 chars). Each item gets Reply needed / Review needed / Do / FYI, a suggested action (keep today / done / defer to an offered date / block + reason / skip + reason), a confidence and a one-line rationale, grouped with checkboxes. **Nothing changes until Apply selected**; each ticked item goes through the normal status change with surface `ai-triage` and an "AI-suggested" reason. Low-confidence suggestions start unticked. The acceptance rate per category shows in Weekly Review.
+- **Mention reply drafter** *(I3)*. **Draft reply** on Recently Mentioned rows, from the comment thread: tone client-facing / internal, English / Vietnamese, short / normal (each combination is its own draft). Shows the reply (editable) and the points it did not answer. **Copy**, or **Post to Jira…**, which opens the existing write-back dialog (editable preview, explicit confirm, server gate, write log) — only when Jira write-back is on for that project. A posted reply marks the mention replied.
+- **Rewrite for…** *(I4)*. Reports gets **Standup (team) / PM update / Client update / Vietnamese**. The deterministic report is the only input; ticket keys, numbers and section membership are locked, and if the answer contains a ticket key or number that isn't in the report, the deterministic report is shown with a notice. **Client update** leaves out team work, skipped items, mentions awaiting reply, people's names and any note marked internal — start a block/skip reason with `[internal]` or `internal:` (or add `#internal`) to keep it out — and runs your redaction aliases.
+
+## BA/PM AI features (V2.38) — every one OFF by default (Data & Settings → Features)
+
+Same rules as V2.36–V2.37: a mock (deterministic) answer when AI is off or fails, every answer schema-validated and grounding-checked on the server, and nothing changes or is sent without your click.
+
+- **Requirement check** *(J1, deep model, allowed projects only)*. On Jira **Story/Task** rows: acceptance criteria as a **checklist** — happy path, validation, errors, edge cases — never Given/When/Then; every item quotes the ticket sentence it comes from or is marked **assumption** (checked on the server, and again in the browser: an untraceable item is flagged, never trusted). Plus clarification questions grouped by stakeholder, missing information and risks. **Copy Markdown**, **Download CSV** (opens in Excel: UTF-8 BOM, CRLF, formulas neutralized) or **Post as Jira comment…** through the write-back dialog (feature on, allow-listed project, preview, confirm, server gate).
+- **AI blocker follow-ups** *(J2)*. Next to **Ask** / **Ask everyone**: **Draft with AI** writes one message per person for their blocked tickets (age, SLA, the last comment for allowed projects), in a Slack / Jira comment / email tone, with a suggested deadline from offered dates. Copy, **Send via Slack…** (same second confirmation as Ask), **Post on KEY…** (write-back dialog) or **Email draft** (your mail app).
+- **Go/No-Go** brief *(J3, deep model)*. On Release Health cards: Go / Go with conditions / No-Go, conditions, evidence (ticket keys), risks and a communication draft. The deterministic readiness rules decide which answers are allowed — an open P1 blocker or NOT_READY → No-Go only; AT_RISK, or open P1/P2 items → no unconditional Go — and numbers are locked; a rule-breaking answer falls back to the deterministic brief with a notice.
+- **Meeting notes → actions** *(J4)*. In Meeting Mode, paste notes or a transcript: decisions, action items (owner, due resolved from words like "Friday"), explicit ticket status changes and open questions, on a review screen where you edit and untick. **Create selected** is the only thing that creates decisions/actions or changes a status (history surface `ai-meeting`); ticket keys that don't exist here are listed as dropped, never created.
+- **Command Bar commands** *(J5)*. Type e.g. "defer all WF mentions to Monday" or "block MCWS-123 waiting for API spec". The command becomes operations from an allow-list (**setTicketStatus**, **addAction** — nothing else exists); the app resolves targets against real data and shows a preview diff; **Apply** runs it through the normal store (surface `ai-command`). An unknown ticket, a project name matching several projects, an unclear date or a vague target gets a question back instead of a guess. Without AI, a deterministic parser handles the same simple forms.
+- **Weekly insights** *(J6)*. Weekly Review → **Generate**: 3–5 observations, each with its evidence, and 3 suggestions for next week, from this week's ticket history, blockers by person, skip reasons and AI-triage acceptance (numbers locked). Saved per week; Reports → Weekly can add them to its copies ("Include in copies").
+
+## Consistency, exposure and trustworthy tests (V2.45)
+
+- **Release Health uses the same scoring model as the rest of the app** *(C2/R3)*. `selectReleaseHealth`, `selectAllReleaseHealth`, `computeReleaseHealth` and `release-drift` take the scoring options as an optional trailing parameter (omitted = v1, so every old output is unchanged); the panel, Command Bar, Ask, rebuilt drafts, proactive intelligence and the store pass them. Under v2 a P1-heavy release has a lower `deliveryConfidence` than a P4-heavy one; under v1 both are classified identically (the old blind spot).
+- **Status endpoints are minimal for strangers** *(C2/R4)*. With sign-in off, an unpaired `GET /api/command-center/health` returns `{ ok: true }` and `GET /api/command-center/notify` returns `{ configured }`; the full body (version, services, cron, schedule, prefs) needs `Authorization: Bearer APP_STATE_SECRET` (or `CRON_SECRET`), or a signed-in member. The health route memoizes its KV probe for 30 s per instance; both clients send the pairing header they already use.
+- **A truncated first sync keeps its bootstrap window** *(C2/R5)*. New optional `jiraSync.initialSyncComplete` (undefined = complete, so existing installs are untouched). While it is `false`, every resume sync is `updated >= <cursor> AND (statusCategory != Done OR updated >= -Nd)`; the first sync that is not truncated sets it to `true`.
+- **Learning compares dates in one zone** *(C2/R6)*. History timestamps are read in the browser's local date (like `plannedDate`), so an action at 00:30 local lands in the right day's window.
+- **A trustworthy test suite** *(C3)*. `npm test` runs every functional file first, then the two wall-clock files (`25`, `30`) in a child process with a clean heap and adds their checks to the totals (`npm run test:perf` runs just them). Timing checks discard a warm-up and use the median of 5; the interaction and attention-queue budgets pass if any of up to 3 independent attempts is within budget (a real regression is slow in all of them), and report the machine-independent workload size (items / mentions) next to the milliseconds. `PERF_BUDGET_FACTOR` is unchanged.
+- **Docs split** *(C3)*. README is a short entry point; env/setup moved to `docs/CONFIG.md`, the version history to `docs/RELEASE-NOTES.md`, the prompt packs to `docs/prompts/`.
+
+## Delivery guarantees & timezone cursors (V2.44.1)
+
+- **A Slack outage no longer loses notifications** *(C1)*. A mention or assignment counts as notified only when its Slack post succeeded; otherwise it stays "new" and is announced on a later run (mentions are re-fetched even if the JQL no longer matches the ticket). Each signal is retried at most 5 times, then dropped and counted (`droppedUndelivered`). After an outage at most 10 separate messages go out per run plus one "+N more" line; the rest drain over the next runs, never twice. With no webhook configured nothing changes (the baseline advances). The heartbeat carries `{ undelivered, lastSlackError, undeliveredSince, droppedUndelivered }`; the Server check chip tooltip and Setup Health say "Slack delivery failing since …".
+- **Timezone-correct Jira cursors** *(C1)*. Order: IANA zone (`JIRA_TIMEZONE`, the member profile, or the zone learned from `/myself`; DST-aware at the cursor's instant) -> `JIRA_TIMEZONE_OFFSET_MINUTES` -> a safe day-level fallback (the UTC date minus one day, which is never later than the user's local day). Setup Health names the zone in use and where it came from; `npm run smoke:jira` warns when the configured offset disagrees with the Jira user's zone at "now" (the DST symptom).
+
+## Smarter guidance (V2.44)
+
+- **Delivery forecast** *(P3.4)*. Label **FORECAST**, always with its sample size; with too little history it says "insufficient history", never zero or a default. `forecast/lead-time.ts`: created → resolved over the last 90 days, P50/P85/P95 per (project, type), at least 8 samples, falling back to the project, then everything, else UNKNOWN. `aging.ts`: an open ticket older than the P85 of comparable tickets ("older than 85% of similar tickets"). `slip-risk.ts`: with a due date, days left vs the expected remaining time `max(0, P50 − age)` → HIGH (overdue, or even the typical remaining time does not fit), MEDIUM (only the slow P85 case does not fit), LOW. `release-forecast.ts`: for a fix version, the remaining open tickets against the project's weekly throughput over the last 8 weeks (a seeded resample, so the same inputs always give the same dates) → P50–P85 completion dates and the probability of landing by the target (a project's entered release date, else the latest due date among its tickets). Shown in the Executive view and on each Release Health card, as a quiet chip on ticket rows (older than P85, or slip HIGH), as one line in the Weekly Review and as a new auto-risk rule **forecast-slip** (identity = the ticket, so it dedupes across syncs and disappears when the ticket is Done). Nothing is persisted. *Caveat shown in the UI:* only synced tickets exist (open + recently closed; the first sync is limited to the last 90 days). Aging compares the ticket's age since creation with the resolved lead times (time-in-status history of resolved tickets is not stored).
+- **Smart notifications** *(P3.5)*. Fewer, better Slack messages from the scheduled server-side check — and **no change until you opt in**: the defaults (immediate, everything, no quiet hours, nothing muted, no limit, no escalation) produce byte-identical Slack output and counts to V2.41. Preferences (`NotifyPrefs`: `mode` immediate / hourly digest / daily digest, `quietHours` in your timezone, `immediateKinds`, `mutedProjects`, `maxPerRun`, `escalateUnanswered`) are saved from Data & Settings → Slack Notifications through `/api/command-center/notify` (zod-validated, same auth) into KV, scoped per member with sign-in on, and read by the cron. A signal is **URGENT** when its ticket is P1/P2, overdue or blocked (or it is a mention on such a ticket). During quiet hours or in digest mode, NORMAL signals wait in a digest queue (≤ 100, no duplicates) and go out as **one** message when quiet hours end / when the hourly or daily digest is due; URGENT signals of a kind listed in `immediateKinds` still go out at once. A failed post keeps the queue (and a failed immediate post joins it), so nothing is lost. Quiet hours are `[start, end)` in the member's timezone (or `JIRA_TIMEZONE_OFFSET_MINUTES`), may cross midnight, and `start == end` means off. More than `maxPerRun` messages in one run → the first N plus one "+M more" summary. With `escalateUnanswered` on, a mention you have not answered after 2 business days is re-announced **once** (`escalatedCommentIds` ≤ 500, `pendingMentions` ≤ 100; reply detection uses your own newest comment on that issue). Slack text in smart mode carries a priority marker, age, a one-line reason and the link; the browser path's `renderSlackText` is unchanged. Cold start still sends nothing and a muted project never notifies.
+- **Next Best Action** *(P3.6)*. "Do this next, and here is why": up to **three** cards (My Work → Today, the last step of Morning Mode, and a strip on the Command Center), no new page and no new AI task. Rank order, documented in `next-best-action.ts`: **1** a mention waiting on your reply past the reply SLA (→ *Draft reply*) · **2** an overdue P1/P2 ticket · **3** a ticket the forecast says will miss its date · **4** a blocked ticket past the blocker SLA with a nudge message ready (→ *Nudge*) · **5** a skipped/blocked ticket whose re-check is due today · **6** the highest-scored remaining ticket (Score v2) — the last three-and-up use *Start focus*; *Defer* is always offered. A ticket appears once (in its best class); Done, Skipped and still-deferred tickets never do. Every card lists its evidence and **Why?** opens the existing "Why should I care" drawer with the same facts. **Useful** / **Not now** are recorded as memory events (`NBA_ACCEPTED` / `NBA_DISMISSED`: ticket, card kind, reason — they persist and sync like the rest of memory); "Not now" hides that ticket's card for the rest of the day, and both feed the learning loop as half-weight signals (a REPLY card counts as a mention-kind signal). Optional wording by AI (Features → *Next Best Action wording by AI*, off by default): the existing daily-guidance task, **at most one call a day**, cached by a hash of the facts, only when AI is configured; with AI off, capped or failing the structure is identical and the text is deterministic.
+- **AI readiness & presets** *(P3.7)*. Data & Settings → **AI readiness** is a matrix of the 12 AI features: `READY`, `OFF`, `NEEDS_KEY` (no `ANTHROPIC_API_KEY` on the server — AI then runs in Mock mode), `NEEDS_ALLOWLIST`, `SERVER_POLICY_BLOCKED` (`AI_ALLOWED_PROJECT_KEYS` excludes your projects) or `CAP_REACHED`, each with the next step and an allowed/total project count. Precedence: OFF > NEEDS_KEY > NEEDS_ALLOWLIST > SERVER_POLICY_BLOCKED > CAP_REACHED > READY; an unknown status (still loading) never produces a claim. The allow-list only applies to the six features that send ticket content (ticket AI, brief, smart triage, mention-reply drafter, BA requirement check, AI blocker follow-ups). Every AI button's tooltip comes from one hook (`useAiReadiness`), so it always equals the matrix's next step. **Presets** (*Recommended* = smart triage + ticket brief + weekly insights on; *All off*) only flip feature switches, show the exact diff before applying, can be undone, and never touch the project allow-list. **Model default:** checked against Anthropic's models overview (the current lineup is Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5; Haiku 4.5 is legacy), the fast tier now defaults to **`claude-haiku-5-5`** (fastest tier, from $0.10 / $0.50 per million input/output tokens, retirement not before 2027-10-07) instead of `claude-haiku-4-5`; `isAlwaysThinkingModel` was updated with it, and the `ANTHROPIC_MODEL_*` overrides still win.
+
+## Smarter ranking (V2.43)
+
+- **Priority Score v2** *(P3.1)*. A separate, pure model selectable in Data & Settings → Features (`scoringModel`, default **v2**; **v1** is the original model and stays selectable; stored state without the field loads as v2). Weights (max 100): **Priority 20** (P1 20 · P2 14 · P3 7 · P4 0; Jira priority missing/unrecognised = 0 and −0.05 confidence, via the new `priorityKnown` flag) · **Deadline 20** (as v1) · **Awaiting you 15** (an unanswered mention of you, by age against the 2-business-day reply SLA) · **Blocker 15** · **Aging 10** (days since the status category changed, else last update) · **Change frequency 10** · **Dependency 5** · **Ownership 5**; when a business-impact rating exists (demo/import data) Priority is scaled to 10 and Business impact (0-10) takes the other 10. Thresholds (80/60/40) are unchanged, `reasoning` names the top two factors ("Priority P1 (Highest in Jira) and overdue by 3 days"), and `eligibilityScore` rescales by the factors the data can speak to. Snapshots record the model (`metrics.scoringModel`, absent = v1) and trend/drift/weekly code never compares scores across models — it says "Scoring model changed since <date>". *Deviation from the prompt's table:* Dependency 5 / Change frequency 10 instead of 10 / 5, because with the original weights an overdue, blocked P1 ticket with no dependency links maxes out at 75 and could never reach CRITICAL. On the 14-item demo dataset 9 of the top 10 are the same tickets (7 in the same position; the top 3 keep their order; UBS-202 enters because of its business impact and P2 priority, DIN-501 leaves).
+- **Ball-in-court** *(P3.2)*. Know whose turn it is on the tickets that matter, at bounded Jira cost. After the main fetch the sync reads the **5 newest comments** (`orderBy=-created`, through the bounded pool and inside the sync deadline) of at most `CONVERSATION_ENRICH_CAP` (default 25, `0` = off) open tickets — mentioned, assigned to you, blocked, then top-prioritised — skipping any whose `updated` equals the one in the client's cached state (the request carries only `key -> updatedAt`, never content). `conversation-state.ts` (pure, deterministic): **Awaiting you** when someone else commented after your last comment and it mentions you or you are the assignee; **Awaiting them** when your comment is the newest, the ticket is open and it is at least one business day old; else none. Only the newest 5 comments are seen, so "your last comment" means within those. The result is stored as device-local, derived `conversationByTicket` (not synced across devices, pruned to open tickets) and feeds Score v2's Awaiting-you factor. UI: a chip on every ticket row (`Awaiting you · 2d`), a My Work filter (all / awaiting you / awaiting them) and a **Needs a nudge** group (awaiting them past your blocker SLA) whose drafts use the blocker follow-up renderer — the recipient is shown as UNKNOWN, never guessed. A sync without an accountId, or against an older server, behaves exactly as before.
+- **Personal learning loop** *(P3.3)*. Priority Score v2 can adapt to how *you* work — explainably, reversibly, with no AI and no network (label **LEARNED**). Every plan item with a ticket is an "appearance in Today"; it counts as **acted on** when, within 2 business days, the ticket went to Done, In progress, or Blocked *with a real reason*, and as **ignored** when it was skipped/deferred or nothing happened once the window closed (recent ones stay pending). Groups are (project, issue type, priority, first signal kind) over the last 45 days (newer samples weigh more), need **n ≥ 6**, and give `delta = clamp(round(8 × (group rate − overall rate)), −8, +8)`; a delta whose newest sample is over 30 days old is halved. **Hard rules win:** a negative delta is never applied to a ticket that is overdue, blocked, P1 or waiting on your reply past the SLA. Modes (`learnedPriority`, Data & Settings → Personal learning): **shadow** (default — computed and shown as a quiet chip "Learning would move this +4 · n=11", scores and order untouched, identical to *off*), **on** (a `Learned (you)` factor, max 8, with its evidence), **off**; Weekly Review lists what learning moved up *and* down and, after 14 days of shadow data, offers to switch it on. "Reset learning" ignores older history and records a memory event; the table can be exported as JSON. *Scope notes:* only plan items and ticket status history feed it so far (attention lifecycle, triage acceptance and action effectiveness are not used yet), the first-signal kind is normalised to MENTION / OTHER (knowable before the attention queue exists), and learning applies to model v2 only.
+
+## Reliability (V2.42)
+
+- **Jira HTTP resilience** *(P2.1)*. One wrapper (`withJiraRetry`, `jira/http.ts`) is used by every `fetch*With` function: 429/502/503/504 are retried up to 3 times, honouring `Retry-After` (seconds or date, capped at 10 s), otherwise exponential backoff with full jitter, and never past a deadline; each attempt gets its own 20 s timeout. Error kinds shown in the UI are unchanged, and the Jira write route never retries. Enrichment calls (changelogs, mention comments, the cron's comment fetches) run through `mapWithConcurrency` (`JIRA_CONCURRENCY`, 1-10, default 5). The sync route and `ai` route export `maxDuration = 60` (check your Vercel plan's limit); the sync stops optional enrichments at 50 s and reports `partial: true` plus a warning, always returning the issues it fetched. The **first** sync (no cursor) fetches open tickets + the last `JIRA_BOOTSTRAP_DAYS` days (default 90, `0` = everything) instead of the oldest 2,000 issues; incremental syncs are unchanged.
+
+- **Server check health** *(P2.2)*. Every cron run writes a small heartbeat to KV (global key, or per member with sign-in on). `GET /api/command-center/health` returns `{ version, kv, jira, slack, ai, cron, schedule }` (booleans and the cron judgement only, never a secret or URL); the header shows a **Server check** chip (OK / late / stale / never / failed) and Setup Health a row, both from one selector. `LATE` = last run older than 2x `CRON_EXPECTED_MINUTES` (default 20), `STALE` = older than 6x. **With only the once-a-day Vercel cron set `CRON_EXPECTED_MINUTES=1440`.** `.github/workflows/sync.yml` now calls `GET` (the method that runs notify + daily snapshot; it used to send a POST, i.e. a discarded full sync), warns visibly when its secrets are missing and tries to re-enable itself.
+
+- **Fair team cron** *(P2.3)*. With sign-in on, each member's last-processed time is kept in KV and the cron plans members longest-waiting first (never-processed first, ties by user id), so a time-budget skip no longer starves the members at the end of the list. A failed member still counts as processed. The cron response and heartbeat report `oldestWaitMinutes`. Single-user mode is unchanged.
+
+- **KV client** *(P2.4)*. See the KV note under Server-Side Real-Time Notify: `@upstash/redis` replaces `@vercel/kv`; both variable-name pairs are accepted.
+
+- **Live Jira smoke** *(P2.5)*. `npm run smoke:jira` (read-only; needs `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `SMOKE_ACCOUNT_ID`; optional `SMOKE_ISSUE_KEY`, `SMOKE_MENTION_ISSUE_KEY`, `JIRA_TIMEZONE_OFFSET_MINUTES`) checks auth, search paging + fields, JQL date formats (ISO rejected? finding F1), comment order (F4), the timezone offset, the mention search and rate-limit headers, prints a Markdown table and writes `smoke-report.json` (gitignored); exit 1 on any FAIL. It sends only GETs and `POST /search/jql`, never prints the token, and is not part of `npm test` or CI.
+
+- **Lint** *(P2.6)*. `npm run lint` and CI now run `eslint . --max-warnings 0`: unused directives removed, the `set-state-in-effect` / purity warnings fixed by deriving state, freezing lists during render, keying `TakeActionPanel` per item and resetting timers in effect cleanups (one explained directive remains in `Nav.tsx`), and the signed-out redirect uses the router.
+
+### Choosing a scheduler
+
+| Scheduler | Cadence | Cost | Failure modes | Who gets alerted |
+|---|---|---|---|---|
+| Vercel cron (`vercel.json`, Hobby) | once a day | free | cannot run more often; skipped on a failed deploy | nobody — see the header chip |
+| GitHub Actions (`sync.yml`) | every ~15 min (best effort, can be delayed) | free (public repo) | disabled after 60 days without repo activity; secrets missing = no-op; GitHub may delay or drop runs | GitHub emails the repo owner on workflow failure |
+| cron-job.org | 1-5 min | free | third-party account; you maintain the URL + header | optional e-mail on failure |
+| Upstash QStash | 1 min+ | free tier | extra service; you maintain the schedule | dashboard + retries |
+| Vercel Pro cron | down to 1 min | paid plan | function time limit (`maxDuration`) | Vercel logs |
+
+**Recommendation:** keep Vercel's daily cron for the daily report, and add GitHub Actions (free, already in the repo) or cron-job.org for the 15-minute notify check; set `CRON_EXPECTED_MINUTES` to match, and watch the header chip. `vercel.json` is unchanged.
+
+## Notify correctness (V2.41)
+
+The unattended cron (notify check + daily snapshot) now sends Jira only valid JQL dates: one formatter (`formatJqlSince` in `jira/http.ts`, same tz-offset + 5-minute-buffer semantics as `buildIncrementalSinceParam`) is applied inside `fetchMentionedIssuesWith` / `buildIssuesJql`, and both cron paths receive the member's timezone offset. Before, a raw ISO string made every steady-state run fail with a 400. Also fixed: the notified-comment baseline is a FIFO union capped at 1,000 (an unrelated comment on an old ticket no longer re-announces its old mention); an issue whose comment fetch failed is remembered in an optional `retryIssueKeys` (<= 50) and fetched again next run; comments are fetched newest-first (`orderBy=-created`, up to 3 pages), so a mention in a long thread is no longer missed; the assigned-issues query is `statusCategory != Done` instead of the account's whole history (the daily report also takes issues that turned Done in the last 14 days, to keep "closed in Jira"). A ticket that leaves and re-enters the open set is announced as newly assigned again. Old stored blobs load unchanged; the first run on one is a normal run. Tests: `35-notify-correctness`, using the JQL-validating `strictJiraFake()`. Copy: the Data & Settings AI-provider panel no longer claims Jira write-back is unimplemented (it shows the live flag), stale "no backend / no auth" headers were corrected, and the unused `datasource/demo-source.ts` and `local-import-source.ts` were removed (Demo = `store.loadDemoData`, import = `import.ts`); a test fails if the stale phrases return.
+
+## Guard rails (V2.40.1)
+
+No behaviour change. Adds `.github/workflows/ci.yml` (push to `main` + pull requests: `npm ci`, `tsc --noEmit`, lint, `npm test` with `PERF_BUDGET_FACTOR=3`, build), `CLAUDE.md`, an `npm run check` script, and `perfBudget(ms)` in the test harness so the three perf budgets scale with `PERF_BUDGET_FACTOR` (default 1). Two red-on-purpose seed tests live in `scripts/tests/seed/` and are not in the runner yet.
+
+## Team sign-in (V2.40) — opt-in, OFF unless `AUTH_ENABLED=true`
+
+Off (the default), nothing changes: one installation, one browser data set, the paired `APP_STATE_SECRET` / `JIRA_WRITE_SECRET` secrets, the server's Jira token. On, every team member signs in, connects **their own Jira**, and gets fully separate data and settings — in the browser (`command-center:v1:u:<uid>` in IndexedDB, its own BroadcastChannel) and on the server (every KV key scoped per member: cross-device sync state, notify baseline, daily snapshots, Jira write log; AI usage records carry the member's id). A member's id is `u_` + the first 24 hex characters of sha256(`daily-command:` + lower-cased email), so the same person gets the same data whichever provider they use.
+
+**What changes when it's on**
+- Pages without a session redirect to `/signin`; every API route needs a signed-in member (401 otherwise). Pairing secrets (`APP_STATE_SECRET`, `JIRA_WRITE_SECRET` bearers) are rejected (401) — they identify a device, not a person. `CRON_SECRET` is accepted only by the cron `GET /api/command-center/jira/sync`.
+- Misconfigured (e.g. `NEXTAUTH_SECRET` missing) → every route answers **503** naming the exact missing variables, and the sign-in page and Setup Health show the same list. Nothing falls back to "open".
+- **Data & Settings → My account:** connect Jira (Atlassian email + API token, verified against `{JIRA_BASE_URL}/rest/api/3/myself`; your accountId and name come from Jira; the token is stored AES-256-GCM-encrypted and never shown again), Slack (your own incoming webhook, the team channel, or off — with **Test**), server notifications, the daily snapshot, and your timezone. **Team** (admins): members, role, Jira connected?, last login, may-write-to-Jira, disable; invites. The last enabled admin can't be demoted or disabled; `AUTH_ADMIN_EMAILS` members are always enabled admins. Device pairing and the `JIRA_WRITE_SECRET` pairing are hidden.
+- **Jira sync** runs with your own connection; your verified accountId is authoritative (a different accountId in the request is ignored). The base URL is always the server's `JIRA_BASE_URL`.
+- **Jira write-back** needs an admin's "may write to Jira" plus your own (personal) Jira connection, the project in `JIRA_WRITE_PROJECT_KEYS` and `JIRA_WRITE_ENABLED`; `JIRA_WRITE_SECRET` isn't needed. 30 writes/hour **per member**; the write log records uid and email.
+- **The cron** walks every member who switched on server notifications or the daily snapshot and has a usable Jira connection, and runs notify + snapshot with that member's Jira, stores, Slack destination and timezone — sequentially, within `CRON_RUN_BUDGET_MS` (default 50 s); a member whose Jira fails (e.g. a revoked token) is reported and never stops the others. The response is `{ usersProcessed, failures[], skipped[] }`.
+- **AI:** `AI_USER_DAILY_TOKEN_CAP` caps each member on top of the global `AI_DAILY_TOKEN_CAP` (only that member gets 429). Data & Settings shows your usage ("you") and, to admins, the team's.
+
+| Variable | Purpose |
+| --- | --- |
+| `AUTH_ENABLED` | `true` turns team sign-in on. Read when the app is built — redeploy after changing it. Anything else = off. |
+| `NEXTAUTH_SECRET` | Required. Signs the session (httpOnly, sameSite=lax, secure in production). `openssl rand -base64 32`. |
+| `NEXTAUTH_URL` | The app's public URL (e.g. `https://daily-command.vercel.app`) — OAuth callbacks and the CSRF origin check use it. |
+| `AUTH_ADMIN_EMAILS` | Required. Comma list; always allowed, always admin. |
+| `AUTH_ALLOWED_EMAILS` / `AUTH_ALLOWED_DOMAINS` | Who else may sign in (plus admin invites). Everyone else is refused. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google sign-in. |
+| `AZURE_AD_CLIENT_ID` / `AZURE_AD_CLIENT_SECRET` / `AZURE_AD_TENANT_ID` | Microsoft Entra ID sign-in. |
+| `ATLASSIAN_CLIENT_ID` / `ATLASSIAN_CLIENT_SECRET` | Atlassian sign-in (identity only, scope `read:me`; Jira data still uses each member's API token). |
+| `AUTH_DEV_LOGIN` | `true` = email-only login for local development. Ignored when `NODE_ENV=production`. |
+| `AUTH_ENCRYPTION_KEY` | Optional 32-byte key (base64 or hex) for stored Jira tokens / webhooks; default is derived from `NEXTAUTH_SECRET` (HKDF). Changing either makes stored tokens unreadable — members reconnect. |
+| `AUTH_ALLOW_SHARED_JIRA` | `true` lets a member use the server's Jira token with their own accountId — read-only (writes 403). Off by default. |
+| `AUTH_LEGACY_DATA_OWNER` | The one email whose browser takes over this device's pre-sign-in data (see Migration). |
+| `AI_USER_DAILY_TOKEN_CAP` | Optional per-member daily AI tokens. |
+| `CRON_RUN_BUDGET_MS` | Optional time budget for one cron run over all members (default 50000). |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | **Required in production** when sign-in is on (members, profiles, invites, per-member data). A non-production dev server without KV keeps members in memory. |
+
+**Set up**
+1. **KV:** Vercel → Storage → Create Database → KV → Connect to Project (injects `KV_REST_API_URL`/`KV_REST_API_TOKEN`).
+2. **Google:** Google Cloud Console → APIs & Services → Credentials → Create OAuth client ID → *Web application*. Authorized JavaScript origin: your app URL. Authorized redirect URI: `https://<your-app>/api/auth/callback/google`. Copy the client id/secret into `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`. (OAuth consent screen: *Internal* for a Workspace org.)
+3. **Microsoft Entra ID:** Entra admin center → App registrations → New registration → *Accounts in this organizational directory only*; Redirect URI (Web): `https://<your-app>/api/auth/callback/azure-ad`. Certificates & secrets → New client secret. Set `AZURE_AD_CLIENT_ID` (Application ID), `AZURE_AD_CLIENT_SECRET` (the secret's *value*) and `AZURE_AD_TENANT_ID` (Directory ID).
+4. Optional **Atlassian:** developer.atlassian.com → Create OAuth 2.0 integration → Permissions: User identity API (`read:me`) → Callback URL `https://<your-app>/api/auth/callback/atlassian`.
+5. Set `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `AUTH_ADMIN_EMAILS` (and `AUTH_ALLOWED_DOMAINS` / `AUTH_ALLOWED_EMAILS`), then `AUTH_ENABLED=true`, and redeploy. Each member: sign in → Data & Settings → My account → connect Jira.
+
+**Migration from a single-user install.** Server data under the old single-user keys stays where it is and isn't shown to anyone once sign-in is on (each member starts with their own empty keys). In the browser, the existing local data (`command-center:v1`) is offered **only** to `AUTH_LEGACY_DATA_OWNER`: on their first sign-in on that device, if their own key is still empty, it is copied in (a conditional write — never over existing data) and the old key is deleted, so it is adopted once. Anyone else signing in on that device starts empty and never reads it. To go back, unset `AUTH_ENABLED` and redeploy — the per-member keys simply stop being used.
+
+## Review fixes (V2.39)
+
+- **Mention reply drafts read the current thread.** A ticket's content cached earlier (e.g. by a Brief) is refetched — once — when the mention is newer than it or its comments don't include the mention. If the mention comment still isn't in the thread (it can be older than the last 20 comments), the draft is made from the mention's excerpt and says **Mention comment not found in thread — draft based on excerpt only**. A cached draft keeps the mode that produced it, so a template draft is never shown as an AI one.
+- **Same-day changes count.** Work items now keep Jira's full `updated` time (`updatedAt`; `lastUpdated` stays the day for reports). Brief's **Updated since brief** and the ticket-content cache compare full times, so a comment at 15:00 after a 10:00 brief marks it. Items synced before V2.39 keep the old day comparison until the next sync.
+- **The cron no longer runs a full sync it throws away.** `GET /api/command-center/jira/sync` (Vercel Cron / GitHub Actions) now runs only the server-side notify check and the daily snapshot, with their own targeted queries — no issue search over every project, no changelogs, no mention-comment sweep. Without `PERSONAL_JIRA_ACCOUNT_ID` it makes no Jira call. **Sync Now** (POST) is unchanged.
+- **Server-side AI data policy** — `AI_ALLOWED_PROJECT_KEYS` (see Environment Variables). Data & Settings → AI data protection shows it read-only and marks a ticked project the server blocks.
+- **Removed the legacy `{ task, prompt }` AI request** and its `AI_LEGACY_PROMPT_PATH` flag, as announced in V2.36: the AI route accepts only `{ task, input }`.
+- **Setup Health** warns when the AI daily cap is counted per server instance (Anthropic key set, Vercel KV not).
+- The test suite now also fails when a README `(V2.NN)` heading is newer than `package.json`'s version.
+
+## Review fixes (V2.35)
+
+- **Action Plan has one status vocabulary.** A planned action about a ticket has no action-level Defer / Snooze / Blocked any more — the ticket buttons are its only status controls, and the action is in today's plan exactly when the ticket is (deferred tickets come back on their date, Unblock / Reactivate bring them back). A ticket reopened after its action was completed is suggested again. A ticketless action keeps Defer (+date, default tomorrow), Snooze (+until) and Blocked (+reason); deferred and snoozed ones wake up on their date by themselves, and a **Not in today's plan** list shows the set-aside ones with a Reopen button. Old ticket-backed actions that were deferred/snoozed/blocked are moved onto the ticket on load (DEFERRED until tomorrow / until the snooze date, BLOCKED "Migrated from action") unless the ticket already has a newer status. Also fixed: two actions — or two memory events — created in the same millisecond got the same id.
+- **Jira write-back has a server gate** — `JIRA_WRITE_ENABLED`, `JIRA_WRITE_PROJECT_KEYS`, `JIRA_WRITE_SECRET` (see Environment Variables), a rate limit and a server log.
+- **The server snapshot runs after the workday** (11:00 UTC by default; see "Server report snapshot timing").
+- **Encrypted backups.** Export warns that the file holds client ticket data and offers an optional passphrase: AES-GCM with a PBKDF2-SHA-256 key (250,000 iterations, random salt and IV in the file header), all in the browser (WebCrypto). Import recognises an encrypted file and asks for the passphrase; a wrong one (or an altered file) is refused with a clear message and nothing changes. Without a passphrase, export is the plain JSON file as before.
+- **Fewer recomputes, one event.** `detectRisks` is memoized per dataset (it ran three times per render), and related-ticket lookups use cached indexes: the attention queue now takes ~40–55 ms at 3,000 items / 1,500 mentions with cold caches (was ~105–120 ms). A new budget test changes one ticket's status and recomputes every selector (priorities, attention queue, focus, Daily Review, My Work, Action Plan, standup, daily and weekly reports): ~95 ms, budget 250 ms. A ticket's Done now records `ACTION_COMPLETED` for the action it completes, and Focus Session no longer completes that action a second time.
+
+## Daily flow (V2.34) — each can be switched off in Data & Settings → Features
+
+- **Morning Mode** *(on by default)*. The first time you open the app each day it lands on a guided five-step flow in My Work: **1. Sync** (Jira, with a progress line; skipped when Jira isn't connected) → **2. Triage New**, one key per ticket: <kbd>D</kbd> done · <kbd>B</kbd> block · <kbd>S</kbd> skip · <kbd>F</kbd> defer to tomorrow · <kbd>Enter</kbd> keep for today (<kbd>J</kbd>/<kbd>K</kbd> move) → **3. Due re-checks** (skipped/blocked tickets whose re-check date has come, deferrals whose date arrived) → **4. Today's plan** (drag or ↑/↓ to order, against the Action Plan time budget, which is now remembered) → **5. Start first task**. Finishing shows "Triage done in Xm" and remembers it for the day; "Skip Morning Mode today" leaves without recording anything, and a Morning Mode button in My Work reopens it. Every key uses the same ticket actions as the TaskRow buttons. The Command Center has a **Compact** switch in its header (KPI strip + My Work summary + Release only), remembered.
+- **Blocker follow-ups** *(on)*. Blocked rows show how long they have been blocked in business days against a configurable **SLA** (Data & Settings → Blocker SLA, default 2 business days) and an **Ask** button: the Needs From Others follow-up, one message per person, to copy — or to send to the server's Slack channel after an explicit second confirmation. My Work → Blocked has **Ask everyone**. Blockers past the SLA lead the Blocked view, are listed first in Today, and are called out under the Daily Report title.
+- **Mention reply auto-detection** *(part of "Mention reply tracking", on)*. On every sync, a mention you've since answered in Jira (your own comment on that issue is newer than the mention) is recorded as replied, source `jira` — it leaves "awaiting my reply" on every device. A manual **Replied** still works and is never overwritten.
+- **Jira write-back** *(OFF by default)*. When switched on, and only for projects on the **allow-list** (Data & Settings → Jira write-back): after a **Block** the app offers a Jira comment "Blocked: &lt;reason&gt;" (and optionally the Flag, given the instance's Flagged field id); after a **Done** it offers a transition chosen from the transitions Jira reports for that ticket (a per-project default can be remembered). Every write is previewed in a dialog and happens only on **Write to Jira**; every attempt, successful or not, is kept in the write history. Never with the switch off, never for a project not on the list, never for a status Jira itself changed. Server side: `POST /api/command-center/jira/write` (same auth as every other route), the only place the real `HttpJiraActionProvider` is used — the disabled provider remains the default everywhere else.
+- **Report summaries** *(on)*. Daily and weekly reports open with one deterministic paragraph (counts, top blocker with its age, biggest open risk) and add **Blocked aging** (oldest first) and **Needs decision from** (open decisions by owner, decision-blocked tickets by who they wait on). No AI needed. **Polish with AI** (optional, uses the configured fast model) is accepted only if every number and ticket key is unchanged; otherwise the original stays and the reason is shown.
+- **Performance budget.** `scripts/tests/25-performance-budget.test.mts` builds My Work, Daily Review, Priorities, focus, the attention queue and the reports over a synthetic 3,000-work-item / 1,500-mention dataset and fails if any takes over 200 ms in Node (worst of 3 warm runs). To stay well inside it, id lookups in the focus/attention engines use per-dataset cached indexes and date parsing is cached (attention queue ~145 → ~105 ms, personal focus ~67 → ~35 ms on that dataset); a test checks the cached lookups give exactly the answers of the linear scans they replaced.
+
+## Final-review fixes (V2.33)
+
+- **Backup & storage (Data & Settings).** The app asks the browser for persistent storage on first load (`navigator.storage.persist()`, feature-detected) and shows the result ("Storage: persistent" / "may be cleared by the browser"). **Export backup** downloads the full local state (ticket statuses, plan, actions, attention, history, reports, sync log, settings) with `schemaVersion` + `exportedAt`. **Import backup** validates the file (a malformed one is rejected with the reason and changes nothing), runs the normal migrations (older backups come in upgraded), previews counts, then **Merge** (default — per-record newest-wins, the same merge cross-device sync uses) or **Replace** (explicit). **Reset all data** offers "Export backup first" and needs `RESET` typed. While cross-device sync isn't active, a weekly reminder offers a backup download (Features → "Weekly backup reminder", on by default) and Setup Health says "No backup in the last 7 days and no cross-device sync".
+- **Focus Session tells the truth.** Its actions return `{ ok }` / `{ ok: false, reason: "transition-rejected", current }`; the session re-reads storage first (another tab may have moved the ticket) and only shows Completed/Blocked/Skipped/Deferred when the store accepted it — otherwise "This ticket is already Done (changed … on …). Reopen it first?" with a Reopen button. A rejected Block writes no reason.
+- **One reason vocabulary.** Focus Session and every TaskRow render the same Block suggestions and Skip reasons (`ReasonPickers.tsx`). "Not enough time today" is gone from Block — Focus Session has **Defer** (+date, default tomorrow) for that, plus **Skip** (+reason). Old records that carry it are kept and shown as-is.
+- **Reports without opening the app.** With Vercel KV + `APP_STATE_SECRET` + `PERSONAL_JIRA_ACCOUNT_ID`, the scheduled cron also writes a server-side standup snapshot for each workday (new assigned, new mentions, closed in Jira, open assigned). A paired device pulls them (`GET /api/command-center/reports/server`) into its Daily Reports — whatever the app itself recorded always wins for in-app sections. A day with neither shows "No data recorded".
+- **Security.** Every secret check is constant-time (`secure-compare.ts`, `crypto.timingSafeEqual` over SHA-256 digests). `/api/command-center/jira/status` returns only `{ configured }` to an unauthenticated caller; the Jira host is returned only with the same auth as every other route (a paired device sends it).
+- **Tests** are split per domain under `scripts/tests/` (one runner, `scripts/tests/run.mts`); the split moved 2616 checks verbatim and in order.
+
+## Daily helpers (V2.30) — each can be switched off in Data & Settings → Features
+
+| Feature | Default | What it does |
+| --- | --- | --- |
+| **Morning Brief** | on | The first time the app is opened on a day (entered at `/`), it syncs Jira (when connected) and lands on My Work → New (formerly Daily Review), whose header reads e.g. "Since yesterday 18:00: 4 new, 2 assigned, 3 mentions, 1 due re-check, 5 closed by team" — each count a jump link. "Yesterday" is the previous business day (Monday reads "Since Fri 18:00"). |
+| **Keyboard triage** | on | On My Work (current view): `J`/`K` move, `C` done, `S` skip, `B` block, `R` reviewed (New rows), `O` open in Jira. Ignored while typing in a field or with Ctrl/Cmd/Alt held. |
+| **Sync history** | on | Every successful Jira sync rolls into a per-day summary (syncs, new tickets, newly assigned to you, closed in Jira), kept 90 days and shown in Data & Settings. |
+| **Mention reply tracking** | on | Mark a mention "Replied" (Recently Mentioned, Reports), or let the sync detect your own later comment on the same issue — either way it leaves "Mentions awaiting my reply". Replies sync across devices. |
+| **Follow-up reminders** | on | Blocking a ticket can take an optional "Ping on <date>". From that day it is listed in My Work → Blocked, under "Follow-ups to send" (with the Draft follow-up text), and — when `SLACK_WEBHOOK_URL` is configured — one Slack reminder is sent per ticket per ping date. |
+| **Staleness wording / my activity** | wording always; "my activity" off | The stale-ticket item now says **"No ticket activity for N business days"**, because Jira's `updated` changes on anyone's edit. Optionally (off by default) measure from **your own** last comment/transition where the sync could see it ("No activity by you for N business days") — available only for tickets whose comments or changelog the sync fetched. |
+| **Send reports to Slack / email draft** | on | Reports gets "Send to Slack…" (explicit click + confirmation, through the existing notify route) and "Email draft" (a `mailto:` draft your mail app opens). Nothing is ever sent automatically. |
+
+## Task status model (V2.31) — one status per ticket, the same on every page
+
+Every surface that shows a ticket reads the same status from one record. Before V2.31 there
+were five parallel stores, which is why lists diverged. The full audit (before/after, plus
+the surface-by-surface table) is in [AUDIT_TASK_STATE.md](AUDIT_TASK_STATE.md).
+
+**The model.** `StoreState.ticketWorkStates[ticketKey]`, defined in `types.ts`
+`TicketWorkState` and handled in `ticket-work-state.ts`:
+
+`{ ticketKey, status: TODO | IN_PROGRESS | BLOCKED | SKIPPED | DEFERRED | DONE, reason?, until?, updatedAt, updatedBy?, history[≤50] }`
+
+- **TODO is implicit.** A missing record means TODO. A record with status TODO exists only
+  after a ticket came back to TODO, so its history survives.
+- **Jira status is a read-only overlay.** It is shown next to the personal status
+  ("Jira: In Review") and never stored in it.
+- **Only one write path:** `store.setTicketStatus(ticketKey, status, { reason, until, surface })`.
+  The named wrappers (`completeTicketInDailyCommand`, `skip…`, `block…`, `reopen…`,
+  `reactivate…`, `unblock…`, `startTicket`, `stopTicket`, `deferTicket`) all call it.
+  Focus Session start/complete/block/skip, My Day Defer, Action Plan "Complete action" and
+  the Attention card's ticket row call it too when the item has a ticket.
+- **One change, everything updated together.** Each change applies the transition table,
+  appends history, records a `TICKET_*` memory event (reports read only these), and updates
+  linked plan items, actions and attention items — all in one store write:
+  - **DONE:** plan items are completed, open actions completed, attention items resolved.
+  - **BLOCKED / SKIPPED / DEFERRED / IN_PROGRESS:** linked plan items mirror the status;
+    BLOCKED keeps the reason, and no Follow-up Action is created automatically.
+  - **TODO:** today's plan items go back to planned. On a Reopen, the latest completed
+    linked action reopens too.
+
+**Transition table.** Every pair is tested.
+
+| from \ to | TODO | IN_PROGRESS | BLOCKED | SKIPPED | DEFERRED | DONE |
+|---|---|---|---|---|---|---|
+| TODO | no-op | ✔ | ✔ | ✔ | ✔ | ✔ |
+| IN_PROGRESS | ✔ Stop | update | ✔ | ✔ | ✔ | ✔ |
+| BLOCKED | ✔ Unblock | ✔ | update | ✔ | ✔ | ✔ |
+| SKIPPED | ✔ Reactivate | ✔ | ✔ | update | ✔ | ✔ |
+| DEFERRED | ✔ Reactivate | ✔ | ✔ | ✔ | update | ✔ |
+| DONE | ✔ **Reopen only** | ✘ | ✘ | ✘ | ✘ | no-op |
+
+**Buckets.** `ticketBucket` puts every ticket in exactly one bucket:
+
+| Bucket | Rule |
+|---|---|
+| Today | TODO, or DEFERRED with `until ≤ today` |
+| In progress | IN_PROGRESS |
+| Blocked | BLOCKED |
+| Skipped / Deferred | SKIPPED, or DEFERRED until a future date |
+| Done | DONE |
+
+**Migration (on load, idempotent, lossless).** `dailyCommandCompletions` → DONE,
+`dailyCommandSkips` → SKIPPED, `dailyCommandBlocks` → BLOCKED. Ticket-linked plan items
+(completed / blocked / skipped / in-progress / deferred) migrate when they are newer than any
+existing record. `PersonalPlanItem.ticketKey` is backfilled from the plan item's attention
+id.
+
+**Deprecated maps.** The old maps stay in the state and in the synced blob for one version,
+**derived** from `ticketWorkStates` on every write, so older code and older devices see the
+same truth. Engines read the today-aware projection, `selectDailyCommandMaps(state, today)`.
+
+**Cross-device sync.** `ticketWorkStates` merges per ticket; the newest `updatedAt` wins.
+An older device's legacy records and tombstones are migrated in only when strictly newer.
+
+**Surface → selector map.**
+
+| Surface | Population | Status per row |
+|---|---|---|
+| **My Work** (`/my-work`: Today · New · In progress · Blocked · Skipped/Deferred · Done 7d) | `buildMyWork()` (`my-work.ts`): assigned work ∪ Your Delivery Focus ∪ today's plan ∪ recorded statuses ∪ Daily Review New — views partition the tickets | `getTicketView` → `TaskRow` |
+| Command Center → My Work summary | `buildMyWork()` counts + top Today rows | `TaskRow` |
+| Your Delivery Focus / 30-minute plan | `computePersonalFocus` (excludes `ticketExclusionSets` done/paused), **one row per ticket**, signals as chips | `TaskRow` |
+| My Day agenda (My Work → Today) | today's `personalPlan`; a ticket row's status is the ticket's | `TaskRow` (ticketless rows: plan status, same labels) |
+| Focus Session | one plan item | read-only `TaskRow`; its buttons call `setTicketStatus` |
+| Daily Review (My Work → New, plus the Blocked / Skipped / Done views) | `buildDailyReview(selectDailyCommandMaps(...))` | `TaskRow` |
+| Priorities | `derived.scores`; Skipped/Deferred and Blocked tabs from `ticketExclusionSets` | `TaskRow` on every card (Block / Done added) |
+| Action Plan | `buildPlan(…, doneIds, pausedIds)` | ticket line `TaskRow` (ticket-scoped labels) |
+| Attention | `proactive.attentionQueue` | `TaskRow` on every card with a ticket |
+| Risk / Decision / Loop / Dependency / Change cards | linked work items | `RelatedTickets` → `TaskRow` |
+
+**Same actions everywhere.** Every `TaskRow` offers Open in Jira · Start · Done · Block
+(+reason) · Skip (+reason) · Defer (+date), plus Reopen / Unblock / Reactivate / Stop when
+they apply. A surface hides actions only through the documented `readOnly` / `hideActions`
+props.
+
+**Navigation.** One "My Work" entry. Its badge counts unreviewed New tickets plus
+skips/blocks due for a re-check today, plus deferrals coming back today. `/focus` redirects
+to `/my-work?view=today` and `/daily-review` to `/my-work?view=new`.
+
+## Page smoke test (C3)
+
+`npm test` renders **every route** with `react-dom/server` against the real app store, twice — once with the demo dataset and once with a seeded Jira-like dataset (synced through the real `syncJira` path with a mocked sync endpoint) — and asserts: no runtime error, no `undefined`/`NaN` text, no empty/`undefined` link, and every ticket row links to its Jira URL. It then runs every ticket action the rows expose (Mark completed, Reopen, Skip with reason + re-check date, Reactivate, Block with reason, Unblock, Daily Review "Seen") through the exact functions the buttons call and checks each result again after a reload. The same 16 routes were also loaded in a real browser (dev server, demo data) with console errors captured.
+
+| Route | Demo data | Jira-like data | Browser |
+| --- | --- | --- | --- |
+| `/` Command Center | ✅ | ✅ | ✅ |
+| `/my-work` (absorbs Daily Review + My Day) | ✅ | ✅ | ✅ |
+| `/daily-review` → redirect to `/my-work?view=new` | ✅ (redirect asserted) | ✅ | ✅ |
+| `/focus` → redirect to `/my-work?view=today` | ✅ (redirect asserted) | ✅ | ✅ |
+| `/priorities` | ✅ | ✅ | ✅ |
+| `/action-plan` | ✅ | ✅ | ✅ |
+| `/attention` | ✅ | ✅ | ✅ |
+| `/risks` | ✅ | ✅ | ✅ |
+| `/dependencies` | ✅ | ✅ | ✅ |
+| `/changes` | ✅ | ✅ | ✅ |
+| `/loops` | ✅ | ✅ | ✅ |
+| `/decisions` | ✅ | ✅ | ✅ |
+| `/meeting` | ✅ | ✅ | ✅ |
+| `/reports` | ✅ | ✅ | ✅ |
+| `/weekly-review` | ✅ | ✅ | ✅ |
+| `/memory` | ✅ | ✅ | ✅ |
+| `/data-settings` | ✅ | ✅ | ✅ |
+
+Every ticket action (complete / reopen / skip / reactivate / block / unblock / seen) changed state and survived a reload.
+
+**Found and fixed while building it:**
+- `/priorities` read `useSearchParams().get(...)` without a null check — crashes wherever the search-params context is absent (it now reads `searchParams?.get(...)`).
+- `ReleaseHealthPanel` used JSX without importing React, so it could not be rendered outside the Next.js compiler (fixed in B5).
+- Weekly Report counted days that haven't happened yet as "missing" (fixed in B4's review).
+
+**Notes for C1:** `ai-context.ts` (`buildAIContext`) was **deleted**, not wired in: no AI call ever used it — every AI task builds its own task-scoped prompt (`src/lib/command-center/ai/prompts/*`) from deterministic facts over the same scope-filtered data every page uses. Making one global context blob the input of every call would have meant rewriting every prompt and sending more tokens per call, not fewer.
+
+## Validation Status
+
+| Claim | Status |
+| --- | --- |
+| Verified locally (tests/typecheck/build) | ✅ Yes — see report |
+| Fixture-validated (Jira conformance, mock AI) | ✅ Yes |
+| Browser-verified (manual golden-path walkthrough) | ✅ Yes |
+| Live Jira validated | ❌ NOT AVAILABLE — no credentials in this environment |
+| Live Claude validated | ❌ NOT AVAILABLE — no `ANTHROPIC_API_KEY` in this environment |
+
+Live Jira and Live Claude validation should be the **first thing done after deployment**, once real credentials are configured in Vercel.
+
+---
+
+# V2.25 — Completion-Truth Audit, Jira-Aware Daily Report, Stale-Ticket Detector, Setup Health
+
+Four independent pieces of work, each its own task below, followed by a consolidated summary.
+
+**Task 1 — "is this ticket done?" consistency audit.** `jira/work-relevance.ts`'s own
+`isWorkItemDoneOrExcluded`/`isWorkItemOperationallyOpen` doc (V2.19/V2.21) already named the bug
+class this closes: a scattered raw `work item.status === "Done"` / `!== "Done"` check silently
+disagrees with the Work Relevance Policy's COMPLETED/EXCLUDED classification and with Daily
+Command Completion. Task 1's own audit comment named seven remaining call sites that still used
+the raw check instead of the canonical gate: `dependency-radar.ts` (blocked-item counting behind
+Dependency Heat), `waiting-for.ts` (its own local "what's still blocking" list), `client-attention-map.ts`
+(Delivery Confidence's overdue count, both the per-client and per-project formulas),
+`stakeholder-radar.ts` (unowned-high-priority and ownership-concentration scans),
+`memory.ts` (`buildSnapshotMetrics`'s `openItems` — feeding every persisted `DailySnapshot`'s
+blocked/overdue/deliveryConfidence, and so every day-over-day drift/trajectory/weekly-review
+comparison built on it), `action-effectiveness.ts` (the no-outcome-recorded fallback heuristic's
+`isDone`), and `change-detection.ts` (the Status-change diff's "Completed." impact text). Fixed by
+threading `workRelevanceIndex`/`dailyCommandCompletedWorkItemIds` as additive/optional trailing
+parameters into all seven (same no-op-when-omitted contract every other engine using this gate
+already follows), and threading them through the full call chain from
+`use-command-center.ts`/`ExecutiveView.tsx`/`WaitingFor.tsx`/`CloseDayModal.tsx` down to
+`proactive.ts`, `selectors.ts`, and `store.ts`'s own internal `closeDay()`/`computeMemoryEvents()`
+(which build the index directly from `state.jiraWorkRelevancePolicy`/`state.dailyCommandCompletions`
+via a new small `resolveDailyCommandCompletedWorkItemIds` helper, since those run outside the React
+hook tree). `change-detection.ts` deliberately does NOT thread Daily Command Completion — it
+describes a raw Jira-side status transition event, not a personal-execution exclusion filter, so
+only the two Jira-side completion signals (native Done, Work Relevance Policy) apply there.
+14 new regression tests (one pair — "index omitted reproduces old behavior" / "index passed fixes
+it" — per file, `scripts/tests/`, `V2.25 <file>` group) confirm each engine now
+agrees with the canonical gate on a work item whose native status isn't literally "Done" but whose
+real Jira status name is classified COMPLETED in the policy. `ai-context.ts`'s `buildAIContext`
+and `demo-data.ts` were deliberately left untouched — the former has no caller wiring
+`workRelevanceIndex` through it at all today (out of scope for this audit), and the latter
+generates synthetic historical data with no user-configured policy to apply; both already
+reproduce their pre-existing behavior exactly via the additive/optional parameter's own
+no-op-when-omitted contract.
+
+**Task 2 — Daily/Weekly Report reflects real Jira activity, not only manual actions.**
+Confirmed real gap: `daily-report.ts`/`store.ts`'s `generateDailyReport` only ever read
+`memoryEvents`, and every `memoryEvents` entry before this pass was appended by an explicit
+in-app action (completing an Action, finishing a Focus session, a Decision made/outcome
+recorded). A ticket a Dev/QA closed directly in Jira produced no `memoryEvent` at all, so it
+silently disappeared from both the Daily and Weekly Report even though real work genuinely
+finished. Fixed with a new `jira-completion-detection.ts`, using the exact same
+diff-against-the-previous-`DailySnapshot` pattern `assignment-detection.ts` already uses for "did
+ownerId become mine since the last snapshot" — narrowed to "did this Jira work item's completion
+state (native status or Work Relevance Policy) flip from open to done since the last snapshot".
+Each detected transition becomes a new `MemoryEvent` kind, `JIRA_STATUS_COMPLETED`, captured at
+sync time with the same point-in-time ticket/project/client context discipline every other
+`MemoryEvent` already follows. `daily-report.ts`'s `COMPLETED_KINDS` now folds this new kind into
+"Completed" for both reports — but never blended into one undifferentiated list: `completedInApp`
+("Completed via Daily Command") and `completedInJira` ("Completed in Jira") are separate buckets
+in `DailyReportSummary`/`WeeklyReportSummary`, both rendered as distinctly-labeled sections in
+`dailyReportToMarkdown`/`weeklyReportToMarkdown`, so a reader never mistakes "the app observed
+this in Jira" for "you did this in the app". A report's existence no longer depends on the user
+opening Close Day: a new `auto-daily-report.ts` (mirroring V2.24's `auto-sync.ts` structure — a
+pure eligibility function plus a thin, module-guarded orchestrator) generates today's report from
+`Nav.tsx`'s single app-wide mount point on load, covering Demo/Local Import installs and a Jira
+install whose data is still "fresh" enough that auto-sync's own tick is a no-op; `store.ts`'s
+`syncJira()` itself also force-regenerates today's report at the end of every successful sync
+(deliberately unconditional, not gated by day-change, so a second/third same-day sync's newly
+detected Jira completions are reflected immediately — see that method's own comment for why
+gating this by day-change would defeat the point for the common multiple-syncs-per-day case).
+Close Day keeps its exact existing role — review and confirm, calling the same
+`generateDailyReport` — this pass only removes the requirement that it be the sole entry point.
+21 new tests (`scripts/tests/`, `V2.25 jira-completion-detection`/`V2.25
+daily-report label split`/`V2.25 Daily Report e2e`/`V2.25 Auto Daily Report gate` groups) cover
+the pure diff function (open→done, no-change, first-sync-has-no-history, already-done-not-
+re-reported, non-Jira items excluded, policy-COMPLETED-without-native-Done), the label-split
+aggregation and markdown rendering at both daily and weekly granularity, the eligibility gate,
+and a full end-to-end scenario: two mocked syncs against the real `commandCenterStore` — the
+first with an open ticket, the second with the same ticket now Done and zero in-app actions
+taken — after which today's Daily Report genuinely lists it under "Completed in Jira".
+
+**Task 3 — Stale Assigned Ticket detector (miss-ticket safety net).** No mechanism previously
+existed to answer "a ticket is assigned to me, still open, but nobody has touched it in days" —
+the most common way a BA/PO/PM covering several parallel projects genuinely misses a ticket, since
+nothing else (no mention, no fresh risk, no drift) would surface it. Added `personal-staleness.ts`
+with `computeStaleAssignedTickets`, a pure function over the candidate population
+`getActiveAssignedWorkItems` (assigned-work.ts) already defines — no second "what's mine and
+still open" concept — using `WorkItem.lastUpdated` (already the Jira `updated` field, already
+the exact signal `scoring.ts`'s own Aging factor reads) as "the last time anyone observably
+touched this ticket." A new `businessDaysBetween` helper (`date-utils.ts`) counts only weekdays,
+so a ticket untouched over a weekend isn't treated the same as one untouched for two weekdays.
+Thresholds are genuinely user-configurable, never hardcoded: a new `staleAssignedTicketThresholds`
+field on the store (default `{ warnBusinessDays: 3, escalateBusinessDays: 5 }`), with a
+`setStaleAssignedTicketThresholds` setter and a new "Stale Assigned Ticket thresholds" control in
+Data & Settings — both the setter and the persisted-state parser clamp `escalateBusinessDays` to
+never fall below `warnBusinessDays`, so severity ordering can never invert. Wired into the
+Attention Queue as a new `STALE` category (`AttentionCategory`, `attention-queue.ts`'s
+`buildRawItems`) — appended after `ASSIGNMENT`, never inserted, exactly the precedent V2.10's
+MENTION/ASSIGNMENT categories set — reusing the existing NEW/ACTIVE/ACKNOWLEDGED lifecycle
+machinery verbatim, no second lifecycle mechanism. Computed in `proactive.ts` from
+`getAssignedWorkItems` (the real identity-matching primitive) composed with the same
+`isWorkItemOperationallyOpen` gate this whole pass's Task 1 audit standardized on, and threaded
+through `use-command-center.ts`'s two `computeProactiveIntelligence` call sites. Deliberately
+scoped to the Attention Queue only (not Personal Focus/My Day, per this task's own spec) —
+`personal-focus.ts`'s `candidateFromAttentionItem` explicitly excludes `STALE` early rather than
+needing its own `FocusCategory`/scoring wiring. 26 new tests cover `businessDaysBetween`'s pure
+math (including weekend exclusion), `computeStaleAssignedTickets` (default thresholds, WARN vs.
+ESCALATE boundaries, below-threshold exclusion, custom/tighter thresholds, a missing
+`lastUpdated` never guessed as infinitely stale), the Attention Queue's STALE wiring (severity
+mapping, lifecycle reuse, additive/optional no-op-when-omitted), and the store's threshold
+setter/persistence (defaults, clamp, JSON round-trip, malformed-value fallback).
+
+**Task 4 — Setup Health checklist, closing fail-silent configuration gaps.** Several
+capabilities were failing silently with no visible signal: no Jira account ID configured meant
+Mention/Assignment tracking was a complete no-op; an unclassified ("UNKNOWN") Jira status meant
+its tickets were correctly excluded from Action Plan/Priorities but looked like they'd simply
+vanished; no `SLACK_WEBHOOK_URL` (or no `PERSONAL_JIRA_ACCOUNT_ID` + Vercel KV) meant real-time
+notify silently stayed tab-dependent. Added a new `SetupHealthBanner` component, rendered at the
+top of the Command Center page (`src/app/page.tsx`), that surfaces exactly the unresolved items
+— never a static list, never a new source of truth: it reads the same store/derived data every
+other trust surface already reads (`state.personalIdentity`, `workRelevanceIndex` over
+`filteredData` via the existing `countUnclassifiedJiraStatuses`/`listUnclassifiedJiraStatuses`,
+and the existing `/api/command-center/notify` status endpoint via `checkSlackNotifyStatus` —
+the same call `data-settings/page.tsx` already makes). The actual show/hide decision is a pure,
+exported `computeSetupHealthRows` function — same "decision function separate from the thin
+UI/orchestration wrapper" discipline `auto-sync.ts`'s `shouldAutoSyncJira` and
+`auto-daily-report.ts`'s `shouldAutoGenerateDailyReport` already established — so every
+condition is directly unit-testable without a DOM/React renderer. The unclassified-status row
+lists up to 5 real status names (never more, per this task's own spec) and honestly signals
+when the true count exceeds that. A companion "Stale Assigned Ticket thresholds" control was
+added to Data & Settings for Task 3's own configurable thresholds, landing in the same pass.
+18 new tests cover every row's independent show/hide condition (identity present/absent,
+demo/local-import never showing the Jira-only unclassified-status row, the display cap and its
+honest "more exist" signal, the notify row's two distinct wordings depending on whether Slack
+itself vs. only the server-side path is unconfigured, a still-loading notify status never
+producing a false-positive row) and their combination (zero rows when everything is resolved,
+all three appearing together when nothing is).
+
+## Summary — What was found, what was fixed, evidence
+
+**What was found:** four independent, real gaps, each confirmed before any fix — (1) seven
+engines used a raw `status !== "Done"` check that silently disagreed with the Work Relevance
+Policy and Daily Command Completion, the exact bug class `work-relevance.ts`'s own
+`isWorkItemDoneOrExcluded` doc had already named but not fully closed; (2) Daily/Weekly Report
+only ever reflected explicit in-app actions, so a ticket closed directly in Jira by Dev/QA
+silently disappeared from both reports; (3) no mechanism existed to catch "assigned to me, still
+open, untouched for days" — the most common way a BA/PO/PM covering several parallel projects
+genuinely misses a ticket; (4) several capabilities (mention/assignment tracking, personal-work
+visibility, real-time notify) failed silently on missing configuration, with no signal anywhere
+in the UI.
+
+**What was fixed:** (1) `isWorkItemOperationallyOpen`/`isWorkItemDoneOrExcluded` threaded as
+additive/optional parameters through `dependency-radar.ts`, `waiting-for.ts`,
+`client-attention-map.ts`, `stakeholder-radar.ts`, `memory.ts`, `action-effectiveness.ts`, and
+`change-detection.ts`, and through their full call chains (`proactive.ts`, `selectors.ts`,
+`store.ts`'s internal `closeDay`/`computeMemoryEvents`, `ExecutiveView.tsx`, `WaitingFor.tsx`,
+`CloseDayModal.tsx`) — every existing caller that omits the new parameters reproduces the exact
+old behavior, so nothing else in the app changed. (2) A new `jira-completion-detection.ts`
+diffs Jira-side completion state against the previous sync snapshot (same pattern
+`assignment-detection.ts` already uses for ownership), emitting a new `JIRA_STATUS_COMPLETED`
+memory-event kind, labeled distinctly from in-app completions ("Completed in Jira" vs.
+"Completed via Daily Command") in both reports; a new `auto-daily-report.ts` plus a
+`store.syncJira()` hook mean a report exists and stays current without ever requiring Close Day.
+(3) A new `personal-staleness.ts` + `businessDaysBetween` (`date-utils.ts`) detect a stale
+assigned ticket using user-configurable thresholds (`store.ts`'s `staleAssignedTicketThresholds`,
+a new Data & Settings control), surfaced as a new `STALE` Attention Queue category reusing the
+existing lifecycle machinery. (4) A new `SetupHealthBanner` (`src/app/page.tsx`) surfaces every
+unresolved configuration gap live, self-hiding each row the moment it's resolved.
+
+**Test evidence:** typecheck (`npx tsc --noEmit`) and `npm run build` both clean; the full
+deterministic-engine suite (`npm test`) went from 1967 checks (V2.24's own count) to 2045 — 78
+new checks across all four tasks, zero regressions in the pre-existing suite. No new data model
+or "completion" concept was introduced anywhere in this pass — every fix reuses
+`isWorkItemOperationallyOpen`/`isWorkItemDoneOrExcluded` as the one canonical truth for "is this
+ticket done," exactly as the dev prompt required.
+
+**Version at the end of the V2.25 pass:** V2.25.
+
+# V2.13 — Server-Side Real-Time Notify (Option B) + Five Bug Fixes
+
+Two independent pieces of work, both in this pass.
+
+**Server-Side Real-Time Notify:** see the [Server-Side Real-Time Notify](#server-side-real-time-notify-v213-optional) section above for the full picture. In short: a small, single-key server-side store (`src/lib/server/notify-store.ts`, `@vercel/kv`-backed) tracks a personal Jira account's assigned-issue-keys and already-notified comment IDs, so `src/lib/command-center/cron-notify.ts`'s `runServerSideNotifyCheck` (wired into `jira/sync/route.ts`'s GET handler, the one Vercel Cron/GitHub Actions actually calls) can detect a genuinely new assignment/mention and Slack it with no browser open — reusing V2.10's own `detectNewAssignments`/`buildMentionEvents` rather than a second implementation. The client (`use-command-center.ts`) checks a new `serverSideNotifyActive` status flag and defers entirely to the server path once it's active, preventing the two independent tracking systems (server KV vs. browser localStorage) from double-sending the same signal. `cron-notify.ts` itself is deliberately NOT `import "server-only"` (unlike the dev prompt's literal instruction) and takes an injected `fetchImpl`/`NotifyStateStore`, so the cold-start, double-notification-prevention, and connectivity-failure-never-corrupts-state guarantees are all covered by real, offline, dependency-injected tests (`scripts/tests/`) rather than a manual trace — the credential/env-var-touching pieces (`notify-store.ts`'s real KV client, the sync route's wiring) stay server-only and are verified the same way the existing `jira-client.ts`/`jira/sync/route.ts` split already is (source-text assertions, never imported into the test process).
+
+**Five bug fixes**, reported directly by the user:
+1. **Jira Work Relevance Policy "resets on deploy"** — investigated thoroughly; the policy is persisted in browser `localStorage` (`command-center:v1`, unchanged since it was introduced) with fully defensive parsing/migration, and no code path in this app ever clears or version-gates it. No code bug was found. The overwhelmingly likely real cause is environmental: Vercel gives every deployment (including Production ones without a stable custom domain) its own unique `*.vercel.app` URL in addition to the stable aliased production URL — visiting a fresh per-deployment URL after each deploy is a different browser origin, hence empty `localStorage`, which looks exactly like "reset on deploy" without actually being one. If you're seeing this, check which URL you're opening after each deploy; visiting the same stable Production URL every time should persist the policy correctly.
+2. **Attention Queue showing tickets that need no action** — confirmed and fixed: the Attention Queue (`attention-queue.ts` → `proactive.ts`) never consulted the Work Relevance Policy at all, unlike My Day/Action Plan. A risk/dependency/decision/mention/assignment tied to a ticket the user has classified COMPLETED or EXCLUDED now drops out of the Attention Queue entirely, on both the dashboard panel and the full `/attention` page. Deliberately narrower than My Day's own gate: WAITING and UNKNOWN tickets stay visible (this is delivery intelligence, not "is this my personal work", and the queue must not go quiet just because a status hasn't been classified yet).
+3. **Completing a task did nothing** — the clearest instance was Priorities/Take Action's "Mark as handled" button, which only ever flipped local component state (forgotten the instant the panel closed) with no persisted effect whatsoever. It now creates/completes a real `Action` record via the same `completeAction` path Action Plan's own "Complete" button uses, and the Priorities card shows a persisted "Handled" badge.
+4. **No link for ticket numbers** — Priorities/Take Action already had real ticket links from an earlier same-day pass, but Your Delivery Focus (My Day) and the Attention Queue never carried a ticket key/URL on their own data models at all. `AttentionItem` and `PersonalFocusCandidate` gained `ticketKey`/`ticketUrl` fields (resolved from the same `sourceRef` → `WorkItem` logic Personal Focus already used, reused rather than duplicated), wired into `PersonalFocusCard`, `FocusSession`, and `AttentionItemCard` via the shared `TicketLink` component. Demo/Local Import data still shows plain text, never a fabricated link, matching `TicketLink`'s existing discipline.
+5. **"Send test notification" not working** — tested end-to-end locally against a real local webhook receiver; the feature works correctly. The likely real-world cause is a Vercel configuration issue (an unset or unpropagated `SLACK_WEBHOOK_URL` in Production, or a revoked/mistyped webhook URL) rather than a code bug. Improved regardless: a failed test now surfaces Slack's real HTTP status/response body (or the network error) instead of a bare "delivery failed", so a misconfigured webhook is actually debuggable from the Data & Settings UI.
+
+# V2.10 — Real-Time Mention & Assignment Tracking
+
+See the assistant's final report for this pass in the project conversation history. Summary: identity matching now prefers a configured Jira `accountId` over display name (disambiguating two people who share one on a multi-org instance); the Attention Queue/Personal Focus gained two new, append-only categories — MENTION (a comment mentioning you) and ASSIGNMENT (a new direct assignment) — both 100% deterministic, zero AI calls; a diff-based Slack notifier fires only for genuinely new personal signals; and sync can now run on a schedule (Vercel Cron or a GitHub Actions fallback), gated by an optional `CRON_SECRET`. The six pre-existing Attention Queue/Personal Focus categories are untouched — same order, same output, same tests.
+
+**Version-line reconciliation:** this README's "Current version" line had drifted stale at V2.2.1 even though the codebase's own doc-comments (`src/`) had already moved through V2.3–V2.9 (Focus Project Scope, Work Relevance Policy, Execution Path & Work Signal Calibration, and more) without ever being reflected here. That gap was closed as part of this pass — the line was corrected to V2.9 (the real pre-V2.10 state) before V2.10's own changes were layered on top, which is why it reads V2.2.1 → V2.10 above rather than skipping a step silently.
+
+**Post-deploy fix:** `vercel.json`'s cron was originally `*/15 * * * *`, which Vercel Hobby plans reject outright at deploy time ("Hobby accounts are limited to daily cron jobs") — every deploy since V2.10 landed had been silently failing because of this, leaving production stuck on the pre-V2.10 build despite successful pushes. Fixed to a Hobby-safe daily schedule (`0 6 * * *`); the GitHub Actions workflow still covers the tighter 15-minute cadence.
+
+# V2.2.1 — Production Completion & Deployment Readiness
+
+See the assistant's final report for this pass (baseline, fixes made, production readiness gate, and the full Post-V2.2.1 backlog) in the project conversation history. Summary: no new product capabilities were added — this was a completion/stabilization pass fixing trust-label inconsistencies, a duplicate-memory-event bug, a static-rendering bug on two Jira API routes, and adding request timeouts to every outbound Jira/Claude call.

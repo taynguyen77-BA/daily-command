@@ -6,6 +6,7 @@
 import { availableFixVersions } from "./filters";
 import { buildPlan } from "./action-plan";
 import { selectReleaseHealth } from "./release-health";
+import type { ScoringOptions } from "./scoring";
 import { clientName } from "./selectors";
 import { makeEvidence } from "./evidence";
 import { explainWorkItemRelevance, listStatusesByRelevance, listUnclassifiedJiraStatuses, workItemsByRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
@@ -397,7 +398,9 @@ export function answerFromRoute(
   // contract as every other one above: threaded into buildPlan()/computeExecutionPathTrace()/
   // listCandidatePoolActionableItems() below so a Command Bar query (global or explicit
   // per-project override) agrees with the main dashboard about a Daily-Command-completed item.
-  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  /** C2 — the scoring options of the dashboard, so a release answer agrees with Release Health. */
+  scoring?: ScoringOptions
 ): QueryFacts {
   const none = (msg: string): QueryFacts => ({ facts: [msg], evidence: [], recommendedAction: "No action needed right now." });
   if (!proactive && route.intent !== "unrecognized" && isProactiveIntent(route.intent)) {
@@ -839,7 +842,7 @@ export function answerFromRoute(
     }
     case "release-risk": {
       if (!route.target) return { facts: ["No matching release/fix version found in the current data."], evidence: [], recommendedAction: "Specify a valid fix version." };
-      const health = selectReleaseHealth(data, route.target, today, workRelevanceIndex);
+      const health = selectReleaseHealth(data, route.target, today, workRelevanceIndex, scoring);
       return {
         facts: [
           `Completion: ${health.completionPct}%`,

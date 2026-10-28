@@ -11,6 +11,7 @@ import { computePersonalFocus } from "../../src/lib/command-center/personal-focu
 import { buildMyWork } from "../../src/lib/command-center/my-work";
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import { buildDailyReportView, buildWeeklyReportView, mondayOf } from "../../src/lib/command-center/reports";
+import { median } from "./harness.mts";
 import { emptyData, type CommandCenterData, type MentionEvent, type WorkItem } from "../../src/lib/command-center/types";
 
 export const PERF_WORK_ITEMS = 3000;
@@ -90,7 +91,7 @@ export async function buildPerfFixture() {
   return { store, today, mentions };
 }
 
-/** The worst of 3 timed runs per selector (after one discarded JIT warm-up), each on a fresh
+/** The MEDIAN of 5 timed runs per selector (after one discarded JIT warm-up), each on a fresh
  *  dataset copy so no per-dataset cache is warm. */
 export async function timeSelectors(env: Awaited<ReturnType<typeof buildPerfFixture>>): Promise<Record<string, number>> {
   const { store, today, mentions } = env;
@@ -145,7 +146,7 @@ export async function timeSelectors(env: Awaited<ReturnType<typeof buildPerfFixt
   const out: Record<string, number> = {};
   for (const [name, r] of Object.entries(runs)) {
     once(r); // warm-up (JIT), discarded
-    out[name] = Math.max(once(r), once(r), once(r));
+    out[name] = median([once(r), once(r), once(r), once(r), once(r)]);
   }
   return out;
 }

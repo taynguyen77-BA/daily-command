@@ -113,8 +113,8 @@ export function computeProactiveIntelligence(
   const trajectory = computeTrajectory(dailyHistory, currentMetrics);
   const riskEscalations = computeRiskEscalations(derived.risks, dailyHistory, today);
   const dependencyRadar = computeDependencyRadar(data, derived.risks, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-  const releaseHealths = selectAllReleaseHealth(data, today, workRelevanceIndex);
-  const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today, workRelevanceIndex, data.workItems);
+  const releaseHealths = selectAllReleaseHealth(data, today, workRelevanceIndex, scoring);
+  const releaseDrift = computeReleaseDrift(releaseHealths, previousSnapshot, today, workRelevanceIndex, data.workItems, scoring);
   const actionEffectiveness = computeActionEffectiveness(data, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
   const ineffective = ineffectiveActions(actionEffectiveness, data.actions);
   const ineffectiveActionWorkItemIds = new Set(ineffective.map(({ action }) => action.relatedWorkItemId).filter((id): id is string => !!id));

@@ -29,6 +29,7 @@ export async function planCronMembers(directory: UserDirectory, env: Env, key: B
       notify: profile.notifyEnabled,
       snapshot: profile.dailySnapshotEnabled,
       timezoneOffsetMinutes: profile.timezoneOffsetMinutes,
+      ...(profile.jira.timeZone ? { timeZone: profile.jira.timeZone } : {}),
       ...(lastProcessedFor ? { lastProcessedAt: (await lastProcessedFor(user.uid)) ?? undefined } : {}),
     });
   }

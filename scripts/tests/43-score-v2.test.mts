@@ -10,7 +10,7 @@ import { parseStoredState } from "../../src/lib/command-center/store";
 import { normalizeIssues } from "../../src/lib/command-center/jira/normalize";
 import { emptyData, type CommandCenterData, type Dependency, type MentionReply, type SnapshotMetrics, type WorkItem } from "../../src/lib/command-center/types";
 import { buildPerfData } from "./perf-fixture.mts";
-import { ok, perfBudget } from "./harness.mts";
+import { measureMedianMs, ok, perfBudget } from "./harness.mts";
 import { makeJiraIssue } from "./helpers.mts";
 
 const today = "2026-10-27"; // a Tuesday
@@ -158,8 +158,6 @@ const f = (r: ReturnType<typeof s2>, name: string) => r.factors.find((x) => x.na
 {
   const group = "P3.1 Performance";
   const { data } = buildPerfData(today);
-  const t0 = performance.now();
-  const scores = scoreAllWorkItems(data, today, undefined, undefined, { model: "v2", awaitingMeByKey: {} });
-  const ms = performance.now() - t0;
+  const { ms, result: scores } = measureMedianMs(() => scoreAllWorkItems(data, today, undefined, undefined, { model: "v2", awaitingMeByKey: {} })); // C3: warm-up discarded, median of 5
   ok(group, scores.length > 1000 && ms <= perfBudget(200), `v2 scores the ${scores.length} open items of the 3,000-item fixture in ${ms.toFixed(1)} ms (budget ${perfBudget(200)} ms)`);
 }

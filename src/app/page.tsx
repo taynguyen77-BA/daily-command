@@ -95,7 +95,7 @@ export default function CommandCenterPage() {
         <KpiStrip kpis={derived.kpis} />
         <NextBestActions compact />
         <MyWorkSummary />
-        <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} />
+        <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} scoring={scoring} />
       </div>
     );
   }
@@ -198,7 +198,7 @@ export default function CommandCenterPage() {
 
           <HealthTrend trend={trend} currentConfidence={currentMetrics.deliveryConfidence} />
           <GettingBetterWorse trend={trend} />
-          <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} />
+          <ReleaseHealthPanel data={filteredData} today={today} workRelevanceIndex={workRelevanceIndex} scoring={scoring} />
 
           {reEscalations.length > 0 && (
             <section>

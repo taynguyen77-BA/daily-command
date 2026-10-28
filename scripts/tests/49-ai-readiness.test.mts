@@ -5,7 +5,7 @@ import { AI_FEATURES, AI_PRESETS, aiReadiness, aiReadinessMatrix, applyPreset, p
 import { DEFAULT_FEATURE_TOGGLES } from "../../src/lib/command-center/types";
 import { DEFAULT_AI_MODEL_FAST, isAlwaysThinkingModel, resolveAiModel, aiModelStatus } from "../../src/lib/command-center/ai/model-config";
 import { v226Store } from "./helpers.mts";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 
 const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
 const allOn = Object.fromEntries(AI_FEATURES.map((f) => [f.id, true])) as Record<AiFeatureId, boolean>;
@@ -103,5 +103,5 @@ const other = AI_FEATURES.filter((f) => !f.ticketContent).map((f) => f.id);
   ok(group, DEFAULT_AI_MODEL_FAST === "claude-haiku-5-5" && resolveAiModel("interpretTrend", {}).model === "claude-haiku-5-5" && resolveAiModel("interpretTrend", {}).tier === "fast", "the fast tier now defaults to claude-haiku-5-5");
   ok(group, resolveAiModel("interpretTrend", { ANTHROPIC_MODEL_FAST: "claude-haiku-4-5" }).model === "claude-haiku-4-5" && aiModelStatus({ ANTHROPIC_MODEL_FAST: "claude-haiku-4-5" }).fastModelFromEnv && !aiModelStatus({}).fastModelFromEnv, "the ANTHROPIC_MODEL_* overrides still win (Haiku 4.5 stays selectable)");
   ok(group, isAlwaysThinkingModel("claude-haiku-5-5") && isAlwaysThinkingModel("claude-sonnet-5-5") && !isAlwaysThinkingModel("claude-haiku-4-5"), "the always-thinking pattern was updated together with the default (Haiku 5.5 gets the larger output budget; Haiku 4.5 does not)");
-  ok(group, /claude-haiku-5-5/.test(read("README.md")) && /legacy/.test(read("README.md")), "README documents the change");
+  ok(group, /claude-haiku-5-5/.test(readDocs()) && /legacy/.test(readDocs()), "README documents the change");
 }

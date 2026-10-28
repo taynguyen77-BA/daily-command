@@ -52,7 +52,7 @@ const EXAMPLES = [
  *  (query-router.ts) to a known intent; Claude only narrates the retrieved facts. */
 export function CommandBar() {
   const nlReadiness = useAiReadiness("nlCommands");
-  const { state, today, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds } = useCommandCenter();
+  const { state, today, filteredData, derived, proactive, personalFocus, workRelevanceIndex, dailyCommandCompletedWorkItemIds, scoring } = useCommandCenter();
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<QueryAnswer | null>(null);
@@ -168,7 +168,8 @@ export function CommandBar() {
       view.personalReview,
       view.workRelevanceIndex,
       state.workItemCalibrationHistory,
-      view.dailyCommandCompletedWorkItemIds
+      view.dailyCommandCompletedWorkItemIds,
+      scoring
     );
     const answer = await getAIProvider().answerQuery(q, facts, evidence, recommendedAction);
     setResult(answer);
@@ -211,7 +212,7 @@ export function CommandBar() {
         setArtifactNote("No release/fix version found in the current data.");
         return;
       }
-      setArtifactDraft(buildReleaseUpdateDraft(selectReleaseHealth(viewData, version, today, workRelevanceIndex), viewData, sourceContext));
+      setArtifactDraft(buildReleaseUpdateDraft(selectReleaseHealth(viewData, version, today, workRelevanceIndex, scoring), viewData, sourceContext));
       return;
     }
     if (artifactIntent === "create-decision-brief") {

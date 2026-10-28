@@ -19,6 +19,13 @@ export interface PersonalNotifyState {
   pendingMentions?: { commentId: string; issueKey: string; mentionedAt: string; author?: string; excerpt: string; url?: string }[];
   /** P3.5 — comment ids already escalated, so each mention is re-announced at most once (<= 500, FIFO). */
   escalatedCommentIds?: string[];
+  /** C1 — failed Slack posts per undelivered signal (<= 100, FIFO); a signal is dropped after too many. Optional: older blobs lack it. */
+  deliveryAttempts?: { id: string; n: number }[];
+  /** C1 — when the current Slack failure streak began (cleared by a fully delivered run). */
+  undeliveredSince?: string;
+  /** C1 — the Jira user's IANA zone learned from /myself (single-user mode), re-checked weekly. */
+  jiraTimeZone?: string;
+  jiraTimeZoneCheckedAt?: string;
 }
 
 export interface NotifyStateStore {

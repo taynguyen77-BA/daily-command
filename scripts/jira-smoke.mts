@@ -139,8 +139,9 @@ export async function runSmoke(env: SmokeEnv, options: { fetcher?: Fetcher; now?
     add({
       id: "tz",
       title: "User-timezone offset vs JIRA_TIMEZONE_OFFSET_MINUTES",
-      verdict: actual === undefined ? "WARN" : configured === undefined ? "WARN" : configured === actual ? "PASS" : "WARN",
-      detail: actual === undefined ? "/myself returned no usable timeZone" : `Jira user timeZone ${myTimeZone} is UTC${actual >= 0 ? "+" : ""}${actual / 60} now (${actual} min); ${configured === undefined ? "JIRA_TIMEZONE_OFFSET_MINUTES is not set (day-level cursor in use)" : configured === actual ? "matches JIRA_TIMEZONE_OFFSET_MINUTES" : `JIRA_TIMEZONE_OFFSET_MINUTES=${configured} differs (a DST change can cause this)`}`,
+      // C1: the server now learns the zone from /myself, so an unset offset is fine; only a DISAGREEMENT (the DST symptom) warns.
+      verdict: actual === undefined ? "WARN" : configured === undefined || configured === actual ? "PASS" : "WARN",
+      detail: actual === undefined ? "/myself returned no usable timeZone" : `Jira user timeZone ${myTimeZone} is UTC${actual >= 0 ? "+" : ""}${actual / 60} now (${actual} min); ${configured === undefined ? "JIRA_TIMEZONE_OFFSET_MINUTES is not set (the server uses the zone learned from /myself)" : configured === actual ? "matches JIRA_TIMEZONE_OFFSET_MINUTES" : `JIRA_TIMEZONE_OFFSET_MINUTES=${configured} differs (a DST change can cause this)`}`,
     });
   } catch (e) {
     add({ id: "jql-date", title: "JQL dates", verdict: "FAIL", detail: `Network error: ${(e as Error).message}` });

@@ -58,7 +58,7 @@ import type { DataSourceSyncResult } from "../../src/lib/command-center/datasour
 import { addDays } from "../../src/lib/command-center/date-utils";
 import { computeStaleAssignedTickets } from "../../src/lib/command-center/personal-staleness";
 import { computeSetupHealthRows } from "../../src/components/command-center/SetupHealthBanner";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStore, v226JiraItem, v226Tick } from "./helpers.mts";
 
 // ===== A1 — cross-device sync carries personal execution state (LWW + tombstones) =====
@@ -721,7 +721,7 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
     const seen = [panel.includes("Completion: 50%"), askFacts.includes("Completion: 50%"), pctOf(commandBarDraft)?.startsWith("50%"), pctOf(rebuilt)?.startsWith("50%"), exported.includes("Completion: 50%")];
     ok(group, seen.every(Boolean), `Panel, Ask, CommandBar draft, rebuilt release update draft and the release export all show 50% for 2.0 (${seen.join(",")})`);
     const sources = ["src/components/command-center/CommandBar.tsx", "src/components/command-center/ReleaseHealthPanel.tsx", "src/lib/command-center/communicate.ts", "src/lib/command-center/query-router.ts", "src/lib/command-center/proactive.ts", "src/lib/command-center/release-drift.ts", "src/lib/command-center/store.ts"].map((f) => fs.readFileSync(path.join(process.cwd(), f), "utf8"));
-    ok(group, sources.every((s) => !/computeReleaseHealth\(|computeAllReleaseHealth\(/.test(s)) && /<ReleaseHealthPanel data=\{filteredData\} today=\{today\} workRelevanceIndex=\{workRelevanceIndex\} \/>/.test(fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8")), "every caller goes through selectReleaseHealth / selectAllReleaseHealth, and the dashboard panel gets the Work Relevance index");
+    ok(group, sources.every((s) => !/computeReleaseHealth\(|computeAllReleaseHealth\(/.test(s)) && /<ReleaseHealthPanel data=\{filteredData\} today=\{today\} workRelevanceIndex=\{workRelevanceIndex\}( scoring=\{scoring\})? \/>/.test(fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8")), "every caller goes through selectReleaseHealth / selectAllReleaseHealth, and the dashboard panel gets the Work Relevance index");
     // Drift scope added/removed.
     const prevSnap = { date: "2026-09-30", workItems: items.filter((w) => w.key !== "REL-5").concat([makeItem({ id: "rel-6", key: "REL-6", fixVersion: "2.0" })]), risks: [], requirements: [], dependencies: [], projects: [] };
     const drift = computeReleaseDrift([truth], prevSnap, TODAY, index, items).find((d) => d.fixVersion === "2.0");
@@ -865,7 +865,7 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
     ok(group, live && reloaded, `"${label}" changes state and the change survives a reload (live ${live}, reloaded ${reloaded})`);
   }
   delete (globalThis as unknown as { window?: unknown }).window;
-  const reportsSrc = fs.readFileSync(path.join(process.cwd(), "README.md"), "utf8");
+  const reportsSrc = readDocs();
   ok(group, /## Page smoke test/.test(reportsSrc), "README lists the page smoke-test results");
 }
 
@@ -957,7 +957,7 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
   ok(group, parsedToggles.morningBrief === false && parsedToggles.keyboardTriage === true && !("bogus" in parsedToggles) && parseStoredState("{}").features.reportExport === true, "stored toggles parse defensively; pre-D state gets the defaults");
   const settingsSrc = src("src/app/data-settings/page.tsx");
   ok(group, Object.keys(DEFAULT_FEATURE_TOGGLES).every((k) => settingsSrc.includes(`key: "${k}"`)) && /store\.setFeatureToggle\(key, e\.target\.checked\)/.test(settingsSrc), "each of the 7 features has a toggle in Data & Settings");
-  const readme = src("README.md");
+  const readme = readDocs();
   ok(group, ["Morning Brief", "Keyboard triage", "Sync history", "Mention reply tracking", "Follow-up reminders", "No ticket activity", "Send reports to Slack"].every((t) => readme.includes(t)), "each feature has a README entry");
 
   // ---- D1 Morning Brief ----

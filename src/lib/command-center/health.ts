@@ -12,6 +12,14 @@ export interface CronHeartbeat {
   warnings: string[];
   /** P2.3 — how long the longest-waiting member had waited for this run (team mode only). */
   oldestWaitMinutes?: number;
+  /** C1 — signals waiting for a Slack retry after a failed post (0/absent: none). */
+  undelivered?: number;
+  /** C1 — signals given up on after too many failed posts (this run). */
+  droppedUndelivered?: number;
+  /** C1 — the last Slack error, while undelivered > 0. */
+  lastSlackError?: string;
+  /** C1 — when the current Slack failure streak began. */
+  undeliveredSince?: string;
 }
 
 export interface HeartbeatStore {
@@ -70,7 +78,7 @@ export function describeServerCheck(health: CronHealth): { label: string; tone: 
   return { label, tone, tooltip: health.message };
 }
 
-export function buildHeartbeat(input: { startedAt: number; finishedAt: number; notified: number; warnings: string[]; previous: CronHeartbeat | null; oldestWaitMinutes?: number }): CronHeartbeat {
+export function buildHeartbeat(input: { startedAt: number; finishedAt: number; notified: number; warnings: string[]; previous: CronHeartbeat | null; oldestWaitMinutes?: number; slack?: { undelivered: number; droppedUndelivered: number; lastSlackError?: string; undeliveredSince?: string } }): CronHeartbeat {
   const failed = input.warnings.length > 0;
   const runAt = new Date(input.finishedAt).toISOString();
   const lastOkAt = failed ? input.previous?.lastOkAt : runAt;
@@ -82,6 +90,14 @@ export function buildHeartbeat(input: { startedAt: number; finishedAt: number; n
     notified: input.notified,
     warnings: input.warnings.slice(0, MAX_HEARTBEAT_WARNINGS).map((w) => w.slice(0, 300)),
     ...(input.oldestWaitMinutes !== undefined ? { oldestWaitMinutes: input.oldestWaitMinutes } : {}),
+    ...(input.slack && (input.slack.undelivered > 0 || input.slack.droppedUndelivered > 0)
+      ? {
+          undelivered: input.slack.undelivered,
+          droppedUndelivered: input.slack.droppedUndelivered,
+          ...(input.slack.lastSlackError ? { lastSlackError: input.slack.lastSlackError.slice(0, 300) } : {}),
+          ...(input.slack.undeliveredSince ? { undeliveredSince: input.slack.undeliveredSince } : {}),
+        }
+      : {}),
   };
 }
 

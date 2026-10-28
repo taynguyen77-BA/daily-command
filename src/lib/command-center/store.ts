@@ -2256,6 +2256,8 @@ export class CommandCenterStore {
     // no timezone is configured).
     const sinceIso =
       !options?.full && this.state.dataSource === "jira" && this.state.jiraSync.lastSyncCompletedAt ? this.state.jiraSync.lastSyncCompletedAt : undefined;
+    // C2 (R5) — a first sync that hit the issue cap is still "initial": its resume keeps the bootstrap window.
+    const bootstrapPending = sinceIso !== undefined && this.state.jiraSync.initialSyncComplete === false;
 
     // V2.10 §2 — mention tracking is opt-in: only sent when the user has configured an
     // accountId in Data & Settings (see setPersonalIdentity). Absent means the server route
@@ -2265,6 +2267,7 @@ export class CommandCenterStore {
     try {
       result = await (this.deps.createJiraDataSource?.() ?? new JiraDataSource()).sync({
         sinceIso,
+        ...(bootstrapPending ? { bootstrapPending } : {}),
         scopeMode: scope.mode,
         projectKeys: scope.mode === "FOCUSED" ? scope.projectKeys : undefined,
         accountId: this.state.personalIdentity?.accountId,
@@ -2529,6 +2532,8 @@ export class CommandCenterStore {
         // data that was never actually fetched.
         lastSyncCompletedAt: truncated ? (result.resumeSinceIso ?? this.state.jiraSync.lastSyncCompletedAt) : (result.syncedAt ?? new Date().toISOString()),
         lastSyncStatus: truncated ? "partial" : "success",
+        // R5 — complete once a sync is not truncated; a truncated FIRST (or still-unfinished) sync stays incomplete. Otherwise unchanged (undefined = complete).
+        ...(truncated && (isFullSync || this.state.jiraSync.initialSyncComplete === false) ? { initialSyncComplete: false } : !truncated && this.state.jiraSync.initialSyncComplete === false ? { initialSyncComplete: true } : this.state.jiraSync.initialSyncComplete !== undefined ? { initialSyncComplete: this.state.jiraSync.initialSyncComplete } : {}),
         lastSyncError: undefined,
         lastSyncErrorKind: undefined,
         recordsFetched: result.recordsFetched,
@@ -2849,8 +2854,8 @@ export class CommandCenterStore {
     const openRisks = dedupeRisks(dataAfter.risks, detectRisks(dataAfter, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds));
     const riskEscalations = computeRiskEscalations(openRisks, historyBeforeAppend, today);
     const dependencyRadar = computeDependencyRadar(dataAfter, openRisks, today, workRelevanceIndex, dailyCommandCompletedWorkItemIds);
-    const releaseHealths = selectAllReleaseHealth(dataAfter, today, workRelevanceIndex);
-    const releaseDrift = computeReleaseDrift(releaseHealths, lastPrior ?? null, today, workRelevanceIndex, dataAfter.workItems);
+    const releaseHealths = selectAllReleaseHealth(dataAfter, today, workRelevanceIndex, this.scoringOptions());
+    const releaseDrift = computeReleaseDrift(releaseHealths, lastPrior ?? null, today, workRelevanceIndex, dataAfter.workItems, this.scoringOptions());
 
     const events = deriveMemoryEvents(previousDrift, currentDrift, riskEscalations, dependencyRadar, releaseDrift, today, dataAfter);
 

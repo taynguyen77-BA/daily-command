@@ -70,6 +70,15 @@ export interface AppearanceInput {
   resetAt?: string;
   /** P3.6 — "Useful" / "Not now" answers on Next Best Action cards: extra signals, weighted lower than real status changes. */
   nbaSignals?: readonly { date: string; ticketKey: string; accepted: boolean; kind: SignalKind }[];
+  /** C2 (R6) — the user's LOCAL date of a history timestamp, so it is compared with `plannedDate` (also a local date)
+   *  in the same zone. Omitted = the UTC date (the pre-V2.45 behaviour). */
+  localDateOf?: (iso: string) => string;
+}
+
+/** C2 (R6) — the local date of an ISO instant for a fixed offset (minutes east of UTC), e.g. 420 for UTC+7. */
+export function localDateAtOffset(iso: string, offsetMinutes: number): string {
+  const ms = new Date(iso).getTime();
+  return Number.isFinite(ms) ? new Date(ms + offsetMinutes * 60_000).toISOString().slice(0, 10) : iso.slice(0, 10);
 }
 
 /** The business day on which the 2-business-day window ends. */
@@ -98,7 +107,8 @@ export function collectAppearances(input: AppearanceInput): Appearance[] {
     const w = byKey.get(p.ticketKey);
     if (!w) continue;
     const end = actWindowEnd(p.plannedDate);
-    const hist = (input.ticketWorkStates[p.ticketKey]?.history ?? []).filter((t) => t.at.slice(0, 10) >= p.plannedDate && t.at.slice(0, 10) <= end);
+    const dayOf = input.localDateOf ?? ((iso: string) => iso.slice(0, 10));
+    const hist = (input.ticketWorkStates[p.ticketKey]?.history ?? []).filter((t) => dayOf(t.at) >= p.plannedDate && dayOf(t.at) <= end);
     const acted = hist.some((t) => t.to === "DONE" || t.to === "IN_PROGRESS" || (t.to === "BLOCKED" && !!t.reason?.trim()));
     const ignoredExplicitly = hist.some((t) => t.to === "SKIPPED" || t.to === "DEFERRED");
     const windowOver = input.today > end;

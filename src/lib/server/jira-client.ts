@@ -20,6 +20,7 @@ import {
   type JiraFetchResult,
 } from "../command-center/jira/http";
 import type { JiraChangelogHistory, JiraComment, JiraConnectionConfig, JiraIssue, JiraProject } from "../command-center/jira/types";
+import { isValidTimeZone } from "../command-center/jira/http";
 import { fetchIssueContextWith, type IssueContext } from "../command-center/jira/issue-context";
 
 export function getJiraConfig(): JiraConnectionConfig | null {
@@ -54,6 +55,12 @@ export function getJiraTimezoneOffsetMinutes(): number | undefined {
   if (!raw) return undefined;
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** C1 — JIRA_TIMEZONE (IANA, e.g. "America/New_York"): DST-aware, wins over JIRA_TIMEZONE_OFFSET_MINUTES. Invalid -> undefined. */
+export function getJiraTimeZone(): string | undefined {
+  const raw = process.env.JIRA_TIMEZONE?.trim();
+  return raw && isValidTimeZone(raw) ? raw : undefined;
 }
 
 /** Project key -> client display name, for §8 "one client can have many projects". */

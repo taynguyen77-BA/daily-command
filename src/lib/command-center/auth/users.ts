@@ -22,6 +22,8 @@ export interface UserRecord {
   lastLoginAt?: string;
 }
 
+import { isValidTimeZone } from "../jira/http";
+
 export interface JiraProfile {
   mode: "personal" | "shared" | "none";
   email?: string;
@@ -29,6 +31,8 @@ export interface JiraProfile {
   accountId?: string;
   displayName?: string;
   verifiedAt?: string;
+  /** C1 — the member's Jira IANA time zone (from /myself at connect time). */
+  timeZone?: string;
 }
 
 export interface SlackProfile {
@@ -101,6 +105,7 @@ function asProfile(v: unknown): UserProfile {
       accountId: str(jira.accountId),
       displayName: str(jira.displayName),
       verifiedAt: str(jira.verifiedAt),
+      timeZone: isValidTimeZone(jira.timeZone) ? jira.timeZone : undefined,
     },
     slack: { mode: slack.mode === "personal" || slack.mode === "team" ? slack.mode : "none", webhookEnc: str(slack.webhookEnc), channelLabel: str(slack.channelLabel) },
     notifyEnabled: p.notifyEnabled === true,

@@ -7,7 +7,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import { strictJiraFake } from "./helpers.mts";
 import { isAdminEmail, isEmailAllowed, misconfigurationError, PROVIDER_REQUIREMENT, readAuthSettings, scopedKey, sessionCookieConfig, userIdForEmail } from "../../src/lib/command-center/auth/auth-config";
 import { effectiveAccountId, isSameOrigin, resolvePrincipal } from "../../src/lib/command-center/auth/principal";
@@ -514,6 +514,6 @@ const ctxFor = (email: string, over: Partial<AccountContext> = {}): AccountConte
   ok(group, rows.some((r) => r.id === "auth-config" && /NEXTAUTH_SECRET/.test(r.text)), "Setup Health names the missing sign-in variable");
   const files = ["src/lib/server/auth.ts", "src/lib/command-center/auth/account-handlers.ts", "src/lib/command-center/auth/connections.ts", "src/lib/command-center/auth/secret-box.ts"];
   ok(group, files.every((f) => !/console\.(log|info|warn|error)\(/.test(read(f))), "no auth module logs anything (so no secret can be logged)");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, /\| `AUTH_ENABLED`/.test(readme) && /\| `AUTH_ENCRYPTION_KEY`/.test(readme) && /Google/.test(readme) && /Entra/.test(readme) && /AUTH_LEGACY_DATA_OWNER/.test(readme) && /## Team sign-in \(V2\.40\)/.test(readme), "README: env table, Google/Entra setup, KV, migration");
 }

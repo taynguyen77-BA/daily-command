@@ -38,6 +38,7 @@ import { latestSnapshotRunLocal, localHourOf } from "@/lib/command-center/report
 import { checkJiraWriteServerStatus, type JiraWriteServerStatus } from "@/lib/command-center/jira-write-client";
 import { getJiraWriteSecret, isSessionAuthMode } from "@/lib/command-center/device-pairing";
 import { fetchServerHealthCached, selectServerCheck } from "@/lib/command-center/health-client";
+import { describeTimeZoneInUse, type TimeZoneInUse } from "@/lib/command-center/time-zone-source";
 import type { CommandCenterData, DataSourceType, PersonalIdentity } from "@/lib/command-center/types";
 
 /** C4 — additional, independently-loaded facts. Every field optional: undefined/null means
@@ -59,7 +60,7 @@ export interface SetupHealthExtras {
   /** L1 — team sign-in switched on but missing required variables (from /api/command-center/me). */
   authMissing?: string[];
   /** G3 — the sync cron's UTC hours, Jira's offset (minutes) and the snapshot hour, when known. */
-  snapshotSchedule?: { cronHoursUtc: number[]; offsetMinutes?: number; snapshotHourLocal: number };
+  snapshotSchedule?: { cronHoursUtc: number[]; offsetMinutes?: number; snapshotHourLocal: number; /** C1 — the zone in use and where it came from. */ timeZone?: TimeZoneInUse };
   /** P2.2 — the scheduled server check, via selectServerCheck (null/undefined: unknown or not in use). */
   serverCheck?: { tone: "green" | "amber" | "red"; tooltip: string } | null;
 }
@@ -161,15 +162,20 @@ export function computeSetupHealthRows(
   // G3 — the server's daily snapshot should run after the workday ends.
   const sched = extras.snapshotSchedule;
   if (sched) {
-    const offset = sched.offsetMinutes ?? 0;
+    const offset = sched.timeZone?.offsetMinutes ?? sched.offsetMinutes ?? 0;
     const latest = latestSnapshotRunLocal(sched.cronHoursUtc, offset);
     if (latest !== undefined && latest < Math.max(17, sched.snapshotHourLocal)) {
       const utc = sched.cronHoursUtc.find((h) => localHourOf(h, offset) === latest)!;
       rows.push({
         id: "snapshot-hour",
-        text: `The server's daily report runs at ${String(latest).padStart(2, "0")}:00 local time (${String(utc).padStart(2, "0")}:00 UTC${sched.offsetMinutes === undefined ? ", JIRA_TIMEZONE_OFFSET_MINUTES not set" : ""}) — before 17:00, so afternoon Jira closes land in the next day's report. Move the cron in vercel.json (see README).`,
+        text: `The server's daily report runs at ${String(latest).padStart(2, "0")}:00 local time (${String(utc).padStart(2, "0")}:00 UTC${sched.timeZone ? `, timezone ${describeTimeZoneInUse(sched.timeZone)}` : sched.offsetMinutes === undefined ? ", JIRA_TIMEZONE_OFFSET_MINUTES not set" : ""}) — before 17:00, so afternoon Jira closes land in the next day's report. Move the cron in vercel.json (see README).`,
       });
     }
+  }
+
+  // C1 — Slack posts keep failing: say so (the chip tooltip carries the same text).
+  if (extras.serverCheck?.tooltip.startsWith("Slack delivery failing")) {
+    rows.push({ id: "slack-delivery", text: extras.serverCheck.tooltip.split(". ")[0] + ". Check SLACK_WEBHOOK_URL / the member's webhook; waiting notifications are retried automatically (up to 5 times each)." });
   }
 
   if (notifyStatus && !notifyStatus.serverSideNotifyActive) {

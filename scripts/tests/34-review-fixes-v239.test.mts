@@ -10,7 +10,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import { makeJiraIssue, strictJiraFake } from "./helpers.mts";
 import type { IssueContext } from "../../src/lib/command-center/jira/issue-context";
 import { CommandCenterStore } from "../../src/lib/command-center/store";
@@ -252,7 +252,7 @@ async function withIssueContextEndpoint<T>(serverCtx: IssueContext, run: (store:
 // ===== K5 — README no longer documents the removed flag =====
 {
   const group = "V2.39 K5 Legacy path docs";
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, !/\| `AI_LEGACY_PROMPT_PATH`/.test(readme) && /\| `AI_ALLOWED_PROJECT_KEYS`/.test(readme), "the env table drops AI_LEGACY_PROMPT_PATH and documents AI_ALLOWED_PROJECT_KEYS");
 }
 

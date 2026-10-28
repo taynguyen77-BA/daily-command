@@ -40,7 +40,7 @@ Team sign-in (NextAuth v4) is OFF unless `AUTH_ENABLED=true`.
    `ok(group, cond, msg)` from `harness.mts`. Offline only. Bug fixes are red-first (show the test failing before the fix).
    Fakes for Jira must validate JQL (use `strictJiraFake()` once it exists) — a fake that ignores the JQL hides bugs.
 4. **Version line.** `package.json` `version` is the source of truth; README has exactly one `**Current version:** V2.NN`
-   line and must match (test E6). Add ONE short `(V2.NN)` section per release; never a heading newer than package.json.
+   line and must match (test E6). Add ONE short `(V2.NN)` section per release to `docs/RELEASE-NOTES.md` (README is a short entry point; env vars live in `docs/CONFIG.md`); never a heading newer than package.json.
 5. **Security.** Jira/Anthropic/Slack secrets never reach the browser, logs or responses. Secret comparisons are
    constant-time (`secure-compare.ts`). Jira writes only through the existing gated route.
 6. **AI.** Prompts are built on the server, outputs validated by schema + grounding guard, deterministic fallback always

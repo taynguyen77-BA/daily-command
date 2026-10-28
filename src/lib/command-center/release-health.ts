@@ -20,7 +20,7 @@
 
 import { computeDeliveryConfidence } from "./executive";
 import { detectRisks, RISK_LEVEL_ORDER } from "./risk-detection";
-import { isOverdue, scoreAllWorkItems } from "./scoring";
+import { isOverdue, scoreAllWorkItems, type ScoringOptions } from "./scoring";
 import { isWorkItemDoneOrExcluded, type WorkRelevanceIndex } from "./jira/work-relevance";
 import { isWorkItemFinishedInJira } from "./task-execution";
 import type { CommandCenterData, ReleaseHealth, ReleaseItemRef, ReleaseReadiness, WorkItem } from "./types";
@@ -55,7 +55,7 @@ function itemRef(w: WorkItem): ReleaseItemRef {
 
 /** B5 — THE release selector. Every caller passes the same Work Relevance index it uses
  *  everywhere else (omitted = native Jira Done only, nothing excluded). */
-export function selectReleaseHealth(data: CommandCenterData, fixVersion: string, today: string, workRelevanceIndex?: WorkRelevanceIndex): ReleaseHealth {
+export function selectReleaseHealth(data: CommandCenterData, fixVersion: string, today: string, workRelevanceIndex?: WorkRelevanceIndex, /** C2 — the scoring model + signals every other surface uses (omitted = v1, as before). */ scoring?: ScoringOptions): ReleaseHealth {
   const all = data.workItems.filter((w) => isInRelease(w, fixVersion));
   const isDone = (w: WorkItem) => isWorkItemFinishedInJira(w, workRelevanceIndex);
   const isExcluded = (w: WorkItem) => !isDone(w) && isWorkItemDoneOrExcluded(w, workRelevanceIndex);
@@ -72,7 +72,7 @@ export function selectReleaseHealth(data: CommandCenterData, fixVersion: string,
   const avgUatCompletionPct = withUat.length > 0 ? Math.round(withUat.reduce((s, w) => s + (w.uatCompletionPct ?? 0), 0) / withUat.length) : undefined;
 
   const releaseData = { ...data, workItems: items };
-  const scores = scoreAllWorkItems(releaseData, today, workRelevanceIndex);
+  const scores = scoreAllWorkItems(releaseData, today, workRelevanceIndex, undefined, scoring);
   const releaseRisks = [...data.risks.filter((r) => r.sourceWorkItemIds.some((id) => itemIds.has(id))), ...detectRisks(releaseData, today, workRelevanceIndex)]
     .filter((r) => r.status === "open")
     .sort((a, b) => RISK_LEVEL_ORDER[a.level] - RISK_LEVEL_ORDER[b.level]);
@@ -106,9 +106,9 @@ export function selectReleaseHealth(data: CommandCenterData, fixVersion: string,
   };
 }
 
-export function selectAllReleaseHealth(data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex): ReleaseHealth[] {
+export function selectAllReleaseHealth(data: CommandCenterData, today: string, workRelevanceIndex?: WorkRelevanceIndex, scoring?: ScoringOptions): ReleaseHealth[] {
   const versions = Array.from(new Set(data.workItems.flatMap(releaseVersionsOf)));
-  return versions.map((v) => selectReleaseHealth(data, v, today, workRelevanceIndex)).sort((a, b) => a.deliveryConfidence - b.deliveryConfidence);
+  return versions.map((v) => selectReleaseHealth(data, v, today, workRelevanceIndex, scoring)).sort((a, b) => a.deliveryConfidence - b.deliveryConfidence);
 }
 
 /** Pre-B5 name, kept for compatibility. Delegates to selectReleaseHealth;
@@ -119,10 +119,10 @@ export function computeReleaseHealth(
   fixVersion: string,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  _dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): ReleaseHealth {
-  return selectReleaseHealth(data, fixVersion, today, workRelevanceIndex);
+  return selectReleaseHealth(data, fixVersion, today, workRelevanceIndex, scoring);
 }
 
 /** Pre-B5 name, kept for compatibility — see computeReleaseHealth. */
@@ -130,10 +130,10 @@ export function computeAllReleaseHealth(
   data: CommandCenterData,
   today: string,
   workRelevanceIndex?: WorkRelevanceIndex,
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _dailyCommandCompletedWorkItemIds?: ReadonlySet<string>
+  _dailyCommandCompletedWorkItemIds?: ReadonlySet<string>,
+  scoring?: ScoringOptions
 ): ReleaseHealth[] {
-  return selectAllReleaseHealth(data, today, workRelevanceIndex);
+  return selectAllReleaseHealth(data, today, workRelevanceIndex, scoring);
 }
 
 // ===== Release update export (Markdown + Slack) =========================================

@@ -760,7 +760,7 @@ import { TODAY, globalPolicy, jiraItem, makeAttentionItem, makeDecision, makeDep
   process.env.APP_STATE_SECRET = "test-app-state-secret";
   const authHeaders = { Authorization: "Bearer test-app-state-secret" };
 
-  const statusUnconfigured = (await (await notifyStatusGET()).json()) as { configured: boolean; channelLabel?: string };
+  const statusUnconfigured = (await (await notifyStatusGET(new Request("http://localhost/api/command-center/notify", { headers: authHeaders }))).json()) as { configured: boolean; channelLabel?: string };
   ok("V2.11 Notify status", statusUnconfigured.configured === false, "GET /notify reports configured:false when SLACK_WEBHOOK_URL is unset");
 
   const unauthorizedTest = await notifyPOST(new Request("http://localhost/api/command-center/notify", { method: "POST", body: JSON.stringify({ test: true }) }));
@@ -778,7 +778,7 @@ import { TODAY, globalPolicy, jiraItem, makeAttentionItem, makeDecision, makeDep
   process.env.SLACK_WEBHOOK_URL = "https://hooks.slack.example/services/mock";
   process.env.SLACK_CHANNEL_LABEL = "#daily-command-alerts";
 
-  const statusConfigured = (await (await notifyStatusGET()).json()) as { configured: boolean; channelLabel?: string };
+  const statusConfigured = (await (await notifyStatusGET(new Request("http://localhost/api/command-center/notify", { headers: authHeaders }))).json()) as { configured: boolean; channelLabel?: string };
   ok("V2.11 Notify status", statusConfigured.configured === true && statusConfigured.channelLabel === "#daily-command-alerts", "GET /notify reports configured:true and the real SLACK_CHANNEL_LABEL");
   ok("V2.11 Notify status", JSON.stringify(statusConfigured).includes("hooks.slack.example") === false, "the webhook URL itself is never present anywhere in the status response — only the boolean and the non-secret label");
 

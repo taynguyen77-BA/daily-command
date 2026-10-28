@@ -111,7 +111,7 @@ export async function handleJiraConnect(ctx: AccountContext, body: unknown, fetc
   const verified = await verifyJiraCredentials(fetchImpl, baseUrl, email, apiToken);
   if (!verified.ok) return fail(verified.status, verified.error);
   const profile = await ctx.directory.getProfile(ctx.user.uid);
-  const next: UserProfile = { ...profile, jira: { mode: "personal", email, tokenEnc: encryptSecret(apiToken, ctx.key, ctx.user.uid), accountId: verified.accountId, displayName: verified.displayName, verifiedAt: ctx.now().toISOString() } };
+  const next: UserProfile = { ...profile, jira: { mode: "personal", email, tokenEnc: encryptSecret(apiToken, ctx.key, ctx.user.uid), accountId: verified.accountId, displayName: verified.displayName, verifiedAt: ctx.now().toISOString(), ...(verified.timeZone ? { timeZone: verified.timeZone } : {}) } };
   await ctx.directory.setProfile(ctx.user.uid, next);
   return { status: 200, body: await meBody(ctx, next) };
 }

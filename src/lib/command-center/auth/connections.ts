@@ -8,7 +8,7 @@
 // Slack: "personal" (their own incoming-webhook URL, encrypted), "team" (the server's
 // SLACK_WEBHOOK_URL) or "none".
 
-import { authHeader, buildUrl, JIRA_FETCH_TIMEOUT_MS, type FetchLike } from "../jira/http";
+import { authHeader, buildUrl, isValidTimeZone, JIRA_FETCH_TIMEOUT_MS, type FetchLike } from "../jira/http";
 import type { JiraConnectionConfig } from "../jira/types";
 import type { Env } from "./auth-config";
 import { decryptSecret } from "./secret-box";
@@ -32,7 +32,7 @@ export function serverJiraConfig(env: Env): JiraConnectionConfig | null {
   return baseUrl && email && apiToken ? { baseUrl, email, apiToken } : null;
 }
 
-export type JiraVerifyResult = { ok: true; accountId: string; displayName: string } | { ok: false; status: number; error: string };
+export type JiraVerifyResult = { ok: true; accountId: string; displayName: string; /** C1 — IANA zone from /myself, when valid. */ timeZone?: string } | { ok: false; status: number; error: string };
 
 /** GET {JIRA_BASE_URL}/rest/api/3/myself with the member's own email + token. */
 export async function verifyJiraCredentials(fetchImpl: FetchLike, baseUrl: string, email: string, apiToken: string): Promise<JiraVerifyResult> {
@@ -40,9 +40,9 @@ export async function verifyJiraCredentials(fetchImpl: FetchLike, baseUrl: strin
     const res = await fetchImpl(buildUrl(baseUrl, "/rest/api/3/myself", {}), { headers: { Authorization: authHeader({ baseUrl, email, apiToken }), Accept: "application/json" }, signal: AbortSignal.timeout(JIRA_FETCH_TIMEOUT_MS) });
     if (res.status === 401 || res.status === 403) return { ok: false, status: 400, error: "Jira rejected this email / API token." };
     if (!res.ok) return { ok: false, status: 502, error: `Jira answered HTTP ${res.status}.` };
-    const me = (await res.json()) as { accountId?: unknown; displayName?: unknown };
+    const me = (await res.json()) as { accountId?: unknown; displayName?: unknown; timeZone?: unknown };
     if (typeof me.accountId !== "string" || !me.accountId) return { ok: false, status: 502, error: "Jira's /myself response had no accountId." };
-    return { ok: true, accountId: me.accountId, displayName: typeof me.displayName === "string" ? me.displayName : me.accountId };
+    return { ok: true, accountId: me.accountId, displayName: typeof me.displayName === "string" ? me.displayName : me.accountId, ...(isValidTimeZone(me.timeZone) ? { timeZone: me.timeZone } : {}) };
   } catch {
     return { ok: false, status: 502, error: "Couldn't reach Jira." };
   }

@@ -33,6 +33,7 @@ import type { WhyShouldICareContent } from "./why-should-i-care";
 import type { WaitingForItem } from "./waiting-for";
 import { deriveDontForget } from "./personal-focus";
 import { isInRelease, selectReleaseHealth } from "./release-health";
+import type { ScoringOptions } from "./scoring";
 import type { WorkRelevanceIndex } from "./jira/work-relevance";
 
 const NO_UNKNOWN_TEXT = "No owner/deadline is available in the source data.";
@@ -109,7 +110,9 @@ export function rebuildDraftFromSourceRef(
   today: string,
   // B5 — additive: the same Work Relevance index every other surface uses, so a rebuilt
   // release update shows the same % as the panel.
-  workRelevanceIndex?: WorkRelevanceIndex
+  workRelevanceIndex?: WorkRelevanceIndex,
+  /** C2 — the scoring options the panel uses, so a rebuilt release update shows the same confidence. */
+  scoring?: ScoringOptions
 ): ArtifactDraft | null {
   if (!sourceRef) return null;
   switch (sourceRef.type) {
@@ -124,7 +127,7 @@ export function rebuildDraftFromSourceRef(
     }
     case "release": {
       if (!data.workItems.some((w) => isInRelease(w, sourceRef.fixVersion))) return null;
-      const release = selectReleaseHealth(data, sourceRef.fixVersion, today, workRelevanceIndex);
+      const release = selectReleaseHealth(data, sourceRef.fixVersion, today, workRelevanceIndex, scoring);
       return buildReleaseUpdateDraft(release, data, sourceContext);
     }
     default:

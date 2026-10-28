@@ -22,7 +22,7 @@ export interface SlackNotifyStatus {
 
 export async function checkSlackNotifyStatus(): Promise<SlackNotifyStatus> {
   try {
-    const res = await fetch(NOTIFY_ENDPOINT, { method: "GET" });
+    const res = await fetch(NOTIFY_ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
     if (!res.ok) return { configured: false };
     return (await res.json()) as SlackNotifyStatus;
   } catch {

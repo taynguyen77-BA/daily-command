@@ -217,24 +217,53 @@ const JQL_DATE_LITERAL = /^\d{4}[-/]\d{2}[-/]\d{2}( \d{2}:\d{2})?$/;
  *  JQL date literal (passed through untouched, so a caller that formatted it itself is never
  *  double-buffered). Anything unparseable falls back to nothing (undefined) rather than a string
  *  Jira would reject. Raw ISO strings never reach JQL. */
-export function formatJqlSince(sinceIso: string | undefined, timezoneOffsetMinutes?: number): string | undefined {
+export function formatJqlSince(sinceIso: string | undefined, timezoneOffsetMinutes?: number, timeZone?: string): string | undefined {
   if (!sinceIso) return undefined;
   if (JQL_DATE_LITERAL.test(sinceIso)) return sinceIso;
-  if (!Number.isFinite(new Date(sinceIso).getTime())) return undefined;
-  return buildIncrementalSinceParam(sinceIso, timezoneOffsetMinutes);
+  const ms = new Date(sinceIso).getTime();
+  if (!Number.isFinite(ms)) return undefined;
+  // C1 — resolution order: IANA zone (DST-aware, evaluated at the cursor's own instant) -> fixed offset -> safe fallback.
+  const zoned = timeZone ? zoneOffsetMinutesAt(timeZone, ms) : undefined;
+  if (zoned !== undefined) return buildIncrementalSinceParam(sinceIso, zoned);
+  if (timezoneOffsetMinutes !== undefined && Number.isFinite(timezoneOffsetMinutes)) return buildIncrementalSinceParam(sinceIso, timezoneOffsetMinutes);
+  // Unknown zone: the UTC date MINUS ONE DAY. Jira reads a bare date in the user's zone, so the UTC date can be
+  // later than the user's local day (west of UTC) and skip hours; a wider window is harmless (comment ids and the
+  // assigned-issue diff dedupe), a narrower one loses updates. No zone on Earth is further west than UTC-12.
+  return new Date(ms - 86_400_000).toISOString().slice(0, 10);
 }
 
-export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: string[]; timezoneOffsetMinutes?: number; bootstrapDays?: number }): string {
+/** C1 — offset (minutes east of UTC) of an IANA zone at the instant `atMs`, via Intl (no dependency).
+ *  undefined for an unknown zone name. */
+export function zoneOffsetMinutesAt(timeZone: string, atMs: number): number | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(new Date(atMs));
+    const g = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+    const asUtc = Date.UTC(g("year"), g("month") - 1, g("day"), g("hour"), g("minute"), g("second"));
+    const offset = Math.round((asUtc - Math.floor(atMs / 1000) * 1000) / 60_000);
+    return Number.isFinite(offset) ? offset : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** C1 — true for a name Intl accepts as an IANA zone. */
+export function isValidTimeZone(timeZone: unknown): timeZone is string {
+  return typeof timeZone === "string" && timeZone.length > 0 && zoneOffsetMinutesAt(timeZone, 0) !== undefined;
+}
+
+export function buildIssuesJql(options: { sinceIso?: string; projectKeys?: string[]; timezoneOffsetMinutes?: number; /** C1 — IANA zone; wins over the offset. */ timeZone?: string; bootstrapDays?: number; /** C2 (R5) — also add the bootstrap clause when there IS a cursor. */ keepBootstrap?: boolean }): string {
   const clauses: string[] = [];
   if (options.projectKeys && options.projectKeys.length > 0) {
     clauses.push(`project in (${options.projectKeys.map((k) => `"${k}"`).join(",")})`);
   }
-  const since = formatJqlSince(options.sinceIso, options.timezoneOffsetMinutes);
+  const since = formatJqlSince(options.sinceIso, options.timezoneOffsetMinutes, options.timeZone);
   if (since) clauses.push(`updated >= "${since}"`);
+  const bootstrap = options.bootstrapDays && options.bootstrapDays > 0 ? `(statusCategory != Done OR updated >= -${Math.floor(options.bootstrapDays)}d)` : undefined;
   // P2.1 — first/reset sync (no cursor): open tickets + the last N days, so the 2,000-issue cap is
   // not spent on years of closed history. Ascending order + computeResumeCursor still work: the
-  // clause only narrows the set. Incremental syncs never get it (their JQL is unchanged).
-  else if (options.bootstrapDays && options.bootstrapDays > 0) clauses.push(`(statusCategory != Done OR updated >= -${Math.floor(options.bootstrapDays)}d)`);
+  // clause only narrows the set. Incremental syncs never get it (their JQL is unchanged) — except
+  // C2 (R5): while the first sync is still unfinished (it hit the cap), its resume keeps the window.
+  if (bootstrap && (!since || options.keepBootstrap)) clauses.push(bootstrap);
   // V2.2.4 — Jira's search/jql endpoint rejects a fully unbounded query (no WHERE clause at
   // all, `order by` only) with 400 "Unbounded JQL queries are not allowed here." This hits a
   // first full sync with no JIRA_PROJECT_KEYS configured — exactly the common case, since
@@ -326,8 +355,10 @@ export interface FetchIssuesOptions {
   projectKeys?: string[];
   /** B4 — extra custom fields to request (validated by isValidCustomFieldId; others dropped). */
   extraFields?: string[];
-  /** P2.1 — see buildIssuesJql. Only used when `sinceIso` is absent. */
+  /** P2.1 — see buildIssuesJql. Only used when `sinceIso` is absent (unless `keepBootstrap`). */
   bootstrapDays?: number;
+  /** C2 (R5) — keep the bootstrap clause together with the cursor (a resumed, still-unfinished first sync). */
+  keepBootstrap?: boolean;
 }
 
 /**
@@ -487,14 +518,16 @@ export async function fetchMentionedIssuesWith(
   sinceIso?: string,
   projectKeys?: string[],
   /** P1.1 — the Jira user's UTC offset, used when `sinceIso` is an ISO instant (see formatJqlSince). */
-  timezoneOffsetMinutes?: number
+  timezoneOffsetMinutes?: number,
+  /** C1 — IANA zone; wins over the offset. */
+  timeZone?: string
 ): Promise<JiraFetchResult<JiraIssue[]>> {
   const safeAccountId = accountId.replace(/"/g, '\\"');
   const clauses = [`comment ~ "accountid:${safeAccountId}"`];
   if (projectKeys && projectKeys.length > 0) {
     clauses.push(`project in (${projectKeys.map((k) => `"${k}"`).join(",")})`);
   }
-  const since = formatJqlSince(sinceIso, timezoneOffsetMinutes);
+  const since = formatJqlSince(sinceIso, timezoneOffsetMinutes, timeZone);
   if (since) clauses.push(`updated >= "${since}"`);
   const jql = `${clauses.join(" AND ")} order by updated desc`;
   return fetchIssuesByJqlCursor(fetchImpl, config, jql);
@@ -665,5 +698,19 @@ export async function fetchIssueChangelogWith(fetchImpl: FetchLike, config: Jira
     return { ok: true, data: parsed.data.values, recordsFetched: parsed.data.values.length };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "Network error contacting Jira.", errorKind: "network-error" };
+  }
+}
+
+/** C1 — the Jira user's IANA time zone from GET /rest/api/3/myself (`timeZone`). Best-effort: any failure,
+ *  or a value Intl does not know, is undefined (the caller falls back to the offset / the safe day-level cursor). */
+export async function fetchMyTimeZoneWith(fetchImpl: FetchLike, config: JiraConnectionConfig): Promise<string | undefined> {
+  const http = withJiraRetry(fetchImpl);
+  try {
+    const res = await http(buildUrl(config.baseUrl, "/rest/api/3/myself", {}), { method: "GET", headers: { Authorization: authHeader(config), Accept: "application/json" } });
+    if (!res.ok) return undefined;
+    const me = (await res.json()) as { timeZone?: unknown };
+    return isValidTimeZone(me.timeZone) ? me.timeZone : undefined;
+  } catch {
+    return undefined;
   }
 }

@@ -21,13 +21,19 @@ export interface ScoringContextState {
   data: { workItems: WorkItem[] };
 }
 
+/** C2 (R6) — plan dates are the BROWSER's local dates, so history timestamps are read in the same zone (UTC when there is no clock zone, e.g. the offline tests). */
+const browserLocalDate = (iso: string): string => {
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}` : iso.slice(0, 10);
+};
+
 // One-entry memo: the adjustments only depend on these inputs (a handful of plan items and histories), but the hook,
 // the override view and every TaskRow chip ask for them per render.
 let memo: { deps: unknown[]; value: LearnedAdjustment[] } | null = null;
 export function learnedAdjustmentsFor(state: Pick<ScoringContextState, "personalPlan" | "ticketWorkStates" | "learningResetAt" | "memoryEvents"> & { data: { workItems: WorkItem[] } }, today: string): LearnedAdjustment[] {
   const deps = [state.personalPlan, state.ticketWorkStates, state.data.workItems, state.learningResetAt, state.memoryEvents, today];
   if (memo && memo.deps.length === deps.length && memo.deps.every((d, i) => Object.is(d, deps[i]))) return memo.value;
-  const value = computeLearnedAdjustments(collectAppearances({ today, planItems: state.personalPlan ?? [], ticketWorkStates: state.ticketWorkStates ?? {}, workItems: state.data.workItems, resetAt: state.learningResetAt, nbaSignals: nbaSignals(state.memoryEvents ?? []) }), today);
+  const value = computeLearnedAdjustments(collectAppearances({ today, planItems: state.personalPlan ?? [], ticketWorkStates: state.ticketWorkStates ?? {}, workItems: state.data.workItems, resetAt: state.learningResetAt, nbaSignals: nbaSignals(state.memoryEvents ?? []), localDateOf: browserLocalDate }), today);
   memo = { deps, value };
   return value;
 }

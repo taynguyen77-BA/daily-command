@@ -15,6 +15,7 @@ import {
   getConfiguredProjectKeys,
   getJiraConfig,
   getJiraTimezoneOffsetMinutes,
+  getJiraTimeZone,
   getProjectClientMap,
 } from "@/lib/server/jira-client";
 import { createServerReportStore } from "@/lib/server/server-report-store";
@@ -39,7 +40,7 @@ import { mapWithConcurrency, jiraBootstrapDays, jiraConcurrency } from "@/lib/co
 import type { ConversationState } from "@/lib/command-center/conversation-state";
 import { conversationEnrichCap } from "@/lib/command-center/conversation-select";
 import { enrichConversations } from "@/lib/command-center/conversation-enrich";
-import { buildIncrementalSinceParam, computeResumeCursor, isValidCustomFieldId, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
+import { formatJqlSince, computeResumeCursor, isValidCustomFieldId, JIRA_MAX_ISSUES, JIRA_PAGE_SIZE } from "@/lib/command-center/jira/http";
 import { resolveEffectiveProjectKeys } from "@/lib/command-center/jira/project-scope";
 import type { MentionEvent, MyTicketActivity } from "@/lib/command-center/types";
 
@@ -51,6 +52,8 @@ const SYNC_DEADLINE_MS = 50_000;
 
 const syncRequestSchema = z.object({
   sinceIso: z.string().optional(),
+  /** C2 (R5) — the first sync was truncated: keep the bootstrap window while resuming. */
+  bootstrapPending: z.boolean().optional(),
   // V2.3 §7 — Focus Project Scope, enforced BEFORE issue ingestion (never fetch-then-filter).
   scopeMode: z.enum(["ALL", "FOCUSED"]).optional(),
   projectKeys: z.array(z.string()).optional(),
@@ -151,11 +154,12 @@ export async function POST(req: Request) {
   // V1.7 §10 — the client sends the raw lastSyncCompletedAt ISO datetime; only this route
   // knows any configured JIRA_TIMEZONE_OFFSET_MINUTES, so the actual JQL cursor is computed
   // here. See jira/http.ts buildIncrementalSinceParam for the safety reasoning.
-  const jqlSinceIso = parsedRequest.data.sinceIso ? buildIncrementalSinceParam(parsedRequest.data.sinceIso, getJiraTimezoneOffsetMinutes()) : undefined;
+  const jqlSinceIso = parsedRequest.data.sinceIso ? formatJqlSince(parsedRequest.data.sinceIso, getJiraTimezoneOffsetMinutes(), getJiraTimeZone()) : undefined;
 
   const sprintFieldId = isValidCustomFieldId(parsedRequest.data.sprintFieldId) ? parsedRequest.data.sprintFieldId : undefined;
-  const bootstrapDays = jqlSinceIso ? 0 : jiraBootstrapDays();
-  const issuesResult = await fetchJiraIssues(config, { sinceIso: jqlSinceIso, projectKeys, extraFields: sprintFieldId ? [sprintFieldId] : undefined, bootstrapDays });
+  const keepBootstrap = !!jqlSinceIso && parsedRequest.data.bootstrapPending === true;
+  const bootstrapDays = jqlSinceIso && !keepBootstrap ? 0 : jiraBootstrapDays();
+  const issuesResult = await fetchJiraIssues(config, { sinceIso: jqlSinceIso, projectKeys, extraFields: sprintFieldId ? [sprintFieldId] : undefined, bootstrapDays, ...(keepBootstrap ? { keepBootstrap } : {}) });
   if (!issuesResult.ok) {
     return NextResponse.json({ ok: false, error: issuesResult.error, errorKind: issuesResult.errorKind }, { status: 502 });
   }
@@ -366,6 +370,7 @@ export async function GET(req: Request) {
   const result = await runCronTickWithHeartbeat(fetch, config, accountId, {
     notifyStore: isNotifyStoreConfigured() ? createNotifyStore() : undefined,
     timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(),
+    ...(getJiraTimeZone() ? { timeZone: getJiraTimeZone() } : {}),
     smartNotify: { prefsStore: createNotifyPrefsStore(), digestStore: createDigestStore() },
     snapshot: isServerDailyReportConfigured(process.env)
       ? { store: createServerReportStore(), now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) }

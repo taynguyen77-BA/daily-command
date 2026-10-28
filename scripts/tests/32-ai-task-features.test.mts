@@ -4,7 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import type { IssueContext } from "../../src/lib/command-center/jira/issue-context";
 import { DEFAULT_AI_DATA_PROTECTION, type AiDataProtectionSettings } from "../../src/lib/command-center/ai/data-protection";
 import { handleAiRequest, ResponseCache, type ModelCallParams, type ModelCallResult, type AiServerDeps } from "../../src/lib/command-center/ai/server-runner";
@@ -92,7 +92,7 @@ function fakeStatusStore() {
   ok(group, !DEFAULT_FEATURE_TOGGLES.ticketBrief && !DEFAULT_FEATURE_TOGGLES.smartTriage && !DEFAULT_FEATURE_TOGGLES.mentionReplyDrafter && !DEFAULT_FEATURE_TOGGLES.audienceReports, "all four features are off by default");
   const ds = read("src/app/data-settings/page.tsx");
   ok(group, ["ticketBrief", "smartTriage", "mentionReplyDrafter", "audienceReports"].every((k) => ds.includes(`key: "${k}"`)), "each has a switch in Data & Settings → Features");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, /Ticket Brief/.test(readme) && /Smart triage/i.test(readme) && /Mention reply/i.test(readme) && /Rewrite for/.test(readme), "README documents all four");
 }
 

@@ -722,6 +722,10 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
 // both PERSONAL_JIRA_ACCOUNT_ID and Vercel KV are configured, reusing notify-state.ts's own
 // isNotifyStoreConfigured() rather than a duplicated check. -----
 {
+  // C2 (R4) — the full status body needs the pairing secret; an unpaired GET now gets only { configured }.
+  const originalPairSecret = process.env.APP_STATE_SECRET;
+  process.env.APP_STATE_SECRET = "test-status-pair-secret";
+  const pairedStatusGET = () => notifyStatusGET(new Request("http://localhost/api/command-center/notify", { headers: { Authorization: "Bearer test-status-pair-secret" } }));
   const originalAccountId = process.env.PERSONAL_JIRA_ACCOUNT_ID;
   const originalKvUrl = process.env.KV_REST_API_URL;
   const originalKvToken = process.env.KV_REST_API_TOKEN;
@@ -730,19 +734,21 @@ import { TODAY, calAction, fakeProactive, globalPolicy, jiraItem, makeItem, mock
   delete process.env.KV_REST_API_URL;
   delete process.env.KV_REST_API_TOKEN;
   ok("V2.13 Server Notify status", isNotifyStoreConfigured() === false, "isNotifyStoreConfigured() is false with no KV env vars set");
-  const statusNeither = (await (await notifyStatusGET()).json()) as { serverSideNotifyActive?: boolean };
+  const statusNeither = (await (await pairedStatusGET()).json()) as { serverSideNotifyActive?: boolean };
   ok("V2.13 Server Notify status", statusNeither.serverSideNotifyActive === false, "with neither PERSONAL_JIRA_ACCOUNT_ID nor KV configured, serverSideNotifyActive is false");
 
   process.env.PERSONAL_JIRA_ACCOUNT_ID = "acc-x";
-  const statusAccountOnly = (await (await notifyStatusGET()).json()) as { serverSideNotifyActive?: boolean };
+  const statusAccountOnly = (await (await pairedStatusGET()).json()) as { serverSideNotifyActive?: boolean };
   ok("V2.13 Server Notify status", statusAccountOnly.serverSideNotifyActive === false, "PERSONAL_JIRA_ACCOUNT_ID alone (no KV) is not enough — both are required");
 
   process.env.KV_REST_API_URL = "https://kv.example.test";
   process.env.KV_REST_API_TOKEN = "kv-tok";
   ok("V2.13 Server Notify status", isNotifyStoreConfigured() === true, "isNotifyStoreConfigured() is true once both KV env vars are set");
-  const statusBoth = (await (await notifyStatusGET()).json()) as { serverSideNotifyActive?: boolean };
+  const statusBoth = (await (await pairedStatusGET()).json()) as { serverSideNotifyActive?: boolean };
   ok("V2.13 Server Notify status", statusBoth.serverSideNotifyActive === true, "with both PERSONAL_JIRA_ACCOUNT_ID and KV configured, serverSideNotifyActive is true");
 
+  if (originalPairSecret === undefined) delete process.env.APP_STATE_SECRET;
+  else process.env.APP_STATE_SECRET = originalPairSecret;
   if (originalAccountId === undefined) delete process.env.PERSONAL_JIRA_ACCOUNT_ID;
   else process.env.PERSONAL_JIRA_ACCOUNT_ID = originalAccountId;
   if (originalKvUrl === undefined) delete process.env.KV_REST_API_URL;

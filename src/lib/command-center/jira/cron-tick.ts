@@ -25,6 +25,8 @@ export interface CronTickResult {
   warnings: string[];
   /** P2.2 — Slack messages delivered by the notify step this run (0 when it did not run). */
   notified?: number;
+  /** C1 — Slack delivery state after the notify step (absent: the step did not run). */
+  slack?: { undelivered: number; droppedUndelivered: number; lastSlackError?: string; undeliveredSince?: string };
 }
 
 export async function runCronTick(
@@ -38,6 +40,8 @@ export async function runCronTick(
     snapshot?: { store: ServerReportStore; now: Date; timezoneOffsetMinutes?: number; snapshotHourLocal?: number };
     /** P1.1 — the Jira user's UTC offset for the notify step's `updated >=` cursor. */
     timezoneOffsetMinutes?: number;
+    /** C1 — the Jira user's IANA zone (DST-aware); wins over the offset. */
+    timeZone?: string;
     /** P3.5 — notification preferences + digest queue (omitted: the V2.41 behaviour). */
     smartNotify?: { prefsStore: NotifyPrefsStore; digestStore: DigestStore };
   }
@@ -46,14 +50,18 @@ export async function runCronTick(
   // modules only write after every fetch succeeded) — it is surfaced as a warning.
   const warnings: string[] = [];
   let notified = 0;
+  let slack: CronTickResult["slack"];
   if (steps.notifyStore) {
     try {
       const result = await runServerSideNotifyCheck(fetchImpl, config, accountId, steps.notifyStore, undefined, {
         ...("webhookUrl" in steps ? { webhookUrl: steps.webhookUrl } : {}),
         timezoneOffsetMinutes: steps.timezoneOffsetMinutes,
+        ...(steps.timeZone ? { timeZone: steps.timeZone } : {}),
         ...(steps.smartNotify ? { smart: steps.smartNotify } : {}),
       });
       notified = result.notified;
+      slack = { undelivered: result.undelivered ?? 0, droppedUndelivered: result.droppedUndelivered ?? 0, ...(result.lastSlackError ? { lastSlackError: result.lastSlackError } : {}), ...(result.undeliveredSince ? { undeliveredSince: result.undeliveredSince } : {}) };
+      if (result.droppedUndelivered) warnings.push(`${result.droppedUndelivered} notification(s) dropped after repeated Slack failures.`);
       if (result.error) warnings.push(`Server-side notify check failed: ${result.error}`);
     } catch (err) {
       warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
@@ -68,7 +76,7 @@ export async function runCronTick(
       warnings.push(`Server-side daily report failed: ${err instanceof Error ? err.message : "unknown error"}`);
     }
   }
-  return { ok: true, cron: true, ran: { notify: !!steps.notifyStore, snapshot: !!steps.snapshot }, warnings, notified };
+  return { ok: true, cron: true, ran: { notify: !!steps.notifyStore, snapshot: !!steps.snapshot }, warnings, notified, ...(slack ? { slack } : {}) };
 }
 
 /** P2.2 — runCronTick plus the heartbeat: written after every run, success OR failure, and a
@@ -93,7 +101,7 @@ export async function runCronTickWithHeartbeat(
   if (heartbeat) {
     try {
       const previous = await heartbeat.get();
-      await heartbeat.set(buildHeartbeat({ startedAt, finishedAt: clock(), notified: result.notified ?? 0, warnings: result.warnings, previous, ...extra }));
+      await heartbeat.set(buildHeartbeat({ startedAt, finishedAt: clock(), notified: result.notified ?? 0, warnings: result.warnings, previous, ...(result.slack ? { slack: result.slack } : {}), ...extra }));
     } catch {
       // best-effort — a heartbeat write failure never fails the run
     }
@@ -117,6 +125,8 @@ export interface CronMemberPlan {
   notify: boolean;
   snapshot: boolean;
   timezoneOffsetMinutes?: number;
+  /** C1 — the member's Jira IANA zone (learned from /myself). */
+  timeZone?: string;
   /** P2.3 — when this member was last processed (set by planCronMembers when fairness is on). */
   lastProcessedAt?: string;
 }
@@ -166,6 +176,7 @@ export async function runCronForMembers(
         notifyStore: plan.notify ? stores.notifyStore : undefined,
         webhookUrl: plan.webhookUrl,
         timezoneOffsetMinutes: plan.timezoneOffsetMinutes,
+        ...(plan.timeZone ? { timeZone: plan.timeZone } : {}),
         ...(deps.smartNotifyFor?.(plan.uid) ? { smartNotify: deps.smartNotifyFor(plan.uid) } : {}),
         snapshot: plan.snapshot && stores.reportStore ? { store: stores.reportStore, now: deps.now(), timezoneOffsetMinutes: plan.timezoneOffsetMinutes, snapshotHourLocal: deps.snapshotHourLocal } : undefined,
       }, deps.heartbeatFor?.(plan.uid), clock, { oldestWaitMinutes: waited });

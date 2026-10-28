@@ -11,7 +11,7 @@ import { computeSetupHealthRows } from "../../src/components/command-center/Setu
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import { emptyData } from "../../src/lib/command-center/types";
 import type { FetchLike } from "../../src/lib/command-center/jira/http";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 
 const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
 const ENV = { JIRA_WRITE_ENABLED: "true", JIRA_WRITE_PROJECT_KEYS: "PAY, ops", JIRA_WRITE_SECRET: "write-s3cret", APP_STATE_SECRET: "app-s3cret", CRON_SECRET: "cron-s3cret" };
@@ -133,6 +133,6 @@ const WRITES: JiraWriteGateRequest[] = [comment, { action: "flag", issueKey: "PA
   ok(group, off.length === 1 && /set JIRA_WRITE_ENABLED=true, JIRA_WRITE_SECRET on the server/.test(off[0].text), `client on, server off → Setup Health names the exact missing variables ("${off[0]?.text}")`);
   ok(group, /isn't paired with JIRA_WRITE_SECRET/.test(rows({ clientOn: true, server: { missing: [] }, devicePaired: false })[0]?.text ?? ""), "server ready but this device unpaired → says so");
   ok(group, rows({ clientOn: false, server: { missing: ["JIRA_WRITE_ENABLED=true"] }, devicePaired: false }).length === 0 && rows({ clientOn: true, server: null, devicePaired: false }).length === 0 && rows({ clientOn: true, server: { missing: [] }, devicePaired: true }).length === 0, "nothing when the client switch is off, the status is unknown, or everything is ready");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, ["JIRA_WRITE_ENABLED", "JIRA_WRITE_PROJECT_KEYS", "JIRA_WRITE_SECRET"].every((v) => readme.includes(`\`${v}\``)), "README documents the three variables");
 }

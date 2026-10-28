@@ -11,7 +11,7 @@ import { computeSetupHealthRows } from "../../src/components/command-center/Setu
 import { buildWorkRelevanceIndex } from "../../src/lib/command-center/jira/work-relevance";
 import { emptyData } from "../../src/lib/command-center/types";
 import type { FetchLike } from "../../src/lib/command-center/jira/http";
-import { ok } from "./harness.mts";
+import { ok, readDocs } from "./harness.mts";
 import { strictJiraFake } from "./helpers.mts";
 
 const read = (f: string) => fs.readFileSync(path.join(process.cwd(), f), "utf8");
@@ -83,6 +83,6 @@ const jira = (assigned: unknown[]): FetchLike => strictJiraFake(async (url, init
   ok(group, rows({ cronHoursUtc: [0, 11], offsetMinutes: OFFSET, snapshotHourLocal: 17 }).length === 0, "an extra morning cron doesn't trigger the warning when an evening run exists");
   const route = read("src/app/api/command-center/reports/schedule/route.ts");
   ok(group, /cronHoursUtc\(vercelConfig/.test(route) && /snapshotHourLocal: reportSnapshotHourLocal\(process\.env\)/.test(route), "the schedule the banner checks comes from vercel.json and the server's env");
-  const readme = read("README.md");
+  const readme = readDocs();
   ok(group, /`0 11 \* \* \*`/.test(readme) && /REPORT_SNAPSHOT_HOUR_LOCAL/.test(readme), "README documents the 11:00 UTC default, how to change it, and REPORT_SNAPSHOT_HOUR_LOCAL");
 }
