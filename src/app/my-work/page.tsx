@@ -14,6 +14,7 @@ import { Suspense, useCallback, useMemo, useRef, useEffect, useState } from "rea
 import { useSearchParams } from "next/navigation";
 import { useMyWork } from "@/components/command-center/use-my-work";
 import { EmptyState, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
+import { ProgressiveGrid } from "@/components/command-center/progressive-list";
 import { TaskRow } from "@/components/command-center/TaskReferenceRow";
 import { YourDeliveryFocus } from "@/components/command-center/YourDeliveryFocus";
 import { MyDayAgenda } from "@/components/command-center/MyDayAgenda";
@@ -178,7 +179,7 @@ function MyWorkInner() {
           <Panel className="p-4 text-sm text-text3">{view === "new" ? "Nothing new to review." : "Nothing here."}</Panel>
         ) : (
           <Panel className="p-4">
-            <ul>{visibleRows.map(row)}</ul>
+            <ProgressiveGrid items={visibleRows} resetKey={`${view}|${conversationFilter}|${myActionItemsOnly}`} as="ul" className="" noun="tickets" render={(r) => row(r, visibleRows.indexOf(r))} />
           </Panel>
         )}
     </>

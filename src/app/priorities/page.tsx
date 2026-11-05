@@ -4,6 +4,7 @@ import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { EmptyState, Filter, FilterPanel, SectionHeading } from "@/components/command-center/ui";
+import { ProgressiveGrid } from "@/components/command-center/progressive-list";
 import { PriorityCard } from "@/components/command-center/PriorityCard";
 import { TakeActionPanel } from "@/components/command-center/TakeActionPanel";
 import { itemForScore } from "@/lib/command-center/selectors";
@@ -136,8 +137,7 @@ function PrioritiesInner() {
       {filtered.length === 0 ? (
         <p className="py-10 text-center text-sm text-text3">No items match this filter.</p>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
-          {filtered.map((result) => {
+        <ProgressiveGrid items={filtered} resetKey={`${filter}|${relationFilter}|${myActionItemsOnly}`} noun="items" render={(result) => {
             const item = itemForScore(filteredData, result);
             if (!item) return null;
             return (
@@ -157,8 +157,7 @@ function PrioritiesInner() {
                 surface="priorities"
               />
             );
-          })}
-        </div>
+          }} />
       )}
 
       <TakeActionPanel key={selected?.item.id ?? "none"} item={selected?.item ?? null} result={selected?.result ?? null} onClose={() => setSelected(null)} />

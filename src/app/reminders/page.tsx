@@ -7,6 +7,7 @@
 import { useMemo, useState } from "react";
 import { TaskRow } from "@/components/command-center/TaskReferenceRow";
 import { Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
+import { ProgressiveGrid } from "@/components/command-center/progressive-list";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { buildReminderCenter, SNOOZE_CHOICES, type ReminderRow } from "@/lib/command-center/reminder-center";
 import { asReminderPrefs } from "@/lib/command-center/reminder-schedule";
@@ -132,8 +133,7 @@ export default function RemindersPage() {
         ) : rows.length === 0 ? (
           <p className="text-sm text-text3">{EMPTY[tab]}</p>
         ) : (
-          <ul>
-            {rows.map((r) => (
+          <ProgressiveGrid items={rows} as="ul" className="" resetKey={`${tab}|${project}|${status}`} noun="reminders" render={(r) => (
               <li key={r.ticketKey} className="border-b border-border last:border-b-0">
                 <label className="flex items-center gap-2 pt-2 text-xs text-text3">
                   <input type="checkbox" checked={picked.has(r.ticketKey)} onChange={() => toggle(r.ticketKey)} aria-label={`Select ${r.ticketKey}`} />
@@ -153,8 +153,7 @@ export default function RemindersPage() {
                   onStop={() => store.updateTicketReminder(r.ticketKey, { kind: "stop" })}
                 />
               </li>
-            ))}
-          </ul>
+            )} />
         )}
       </Panel>
     </div>

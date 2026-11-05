@@ -231,9 +231,18 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
     });
   }
 
+  // Several stakeholder rows can share the same (owner, reason) — e.g. every unassigned dependency of one team. They are ONE attention item
+  // (same id) covering all their related ids; pushing each separately produced duplicate React keys and a bloated queue.
+  const stakeholderGroups = new Map<string, (typeof inputs.stakeholderAttention)[number] & { relatedIds: string[] }>();
   for (const s of inputs.stakeholderAttention) {
+    const gid = `COMMUNICATION:stakeholder-${slug(s.ownerKey + "-" + s.reason)}`;
+    const g = stakeholderGroups.get(gid);
+    if (g) g.relatedIds = Array.from(new Set([...g.relatedIds, ...s.relatedIds]));
+    else stakeholderGroups.set(gid, { ...s, relatedIds: [...s.relatedIds] });
+  }
+  for (const [gid, s] of stakeholderGroups) {
     out.push({
-      id: `COMMUNICATION:stakeholder-${slug(s.ownerKey + "-" + s.reason)}`,
+      id: gid,
       category: "COMMUNICATION",
       severity: s.ownerKey === "unassigned" ? "HIGH" : "LOW",
       what: s.reason,
@@ -329,7 +338,11 @@ function buildRawItems(inputs: AttentionQueueInputs): RawItem[] {
     });
   }
 
-  return out;
+  // One attention item per id. State is keyed by id, so two raw items with the same id (e.g. several dependencies of one team escalating
+  // under the same title) were already one item as far as the user could act on it — but both were rendered, giving duplicate React keys
+  // and a bloated queue on large installs. The first (highest-priority, by push order) wins.
+  const seen = new Set<string>();
+  return out.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
 }
 
 /** V1.5 §23 — re-escalate only when there is a real new signal (severity worsened since

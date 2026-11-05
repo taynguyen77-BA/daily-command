@@ -5,6 +5,7 @@
 // the full lifecycle control set.
 
 import { useState } from "react";
+import { ProgressiveGrid } from "@/components/command-center/progressive-list";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { AttentionItemCard, groupMentionAttentionItems } from "@/components/command-center/AttentionQueuePanel";
 import { EmptyState, Filter, FilterPanel, Panel, SectionHeading } from "@/components/command-center/ui";
@@ -98,11 +99,7 @@ export default function AttentionPage() {
       {items.length === 0 ? (
         <Panel className="p-6 text-sm text-text3">No attention items match these filters.</Panel>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
-          {items.map((item) => (
-            <AttentionItemCard key={item.id} item={item} />
-          ))}
-        </div>
+        <ProgressiveGrid items={items} resetKey={items.length + "|" + items[0]?.id} noun="items" render={(item) => <AttentionItemCard key={item.id} item={item} />} />
       )}
     </div>
   );

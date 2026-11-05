@@ -1,5 +1,6 @@
 "use client";
 
+import { ProgressiveGrid } from "@/components/command-center/progressive-list";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { RiskCard } from "@/components/command-center/RiskCard";
 import { workItemsForIds } from "@/lib/command-center/task-execution";
@@ -27,8 +28,7 @@ export default function RisksPage() {
       {derived.risks.length === 0 ? (
         <p className="py-10 text-center text-sm text-text3">No emerging risks detected.</p>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
-          {derived.risks.map((r) => (
+        <ProgressiveGrid items={derived.risks} noun="risks" render={(r) => (
             <RiskCard
               key={r.id}
               risk={r}
@@ -37,8 +37,7 @@ export default function RisksPage() {
               showAgingAssessment={r.title === topEscalatingTitle}
               relatedWorkItems={workItemsForIds(filteredData.workItems, r.sourceWorkItemIds)}
             />
-          ))}
-        </div>
+          )} />
       )}
     </div>
   );
