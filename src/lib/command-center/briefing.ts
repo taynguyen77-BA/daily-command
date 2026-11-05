@@ -133,7 +133,7 @@ export function buildBriefing(args: {
 
   const reminders = dueReminderKeys(args.index, today);
   if (reminders.length) sections.push([`*Reminders due* (${reminders.length})`, ...reminders.map((r) => `• ${link(r.key, links)}${tail(r.key, links)} · ${r.line}`)]);
-  if (snap && snap.nba.length) sections.push([`*Do next*`, ...snap.nba.map((n) => `• ${link(n.key, links)} — ${n.headline}`)]);
+  if (snap && snap.nba.length) sections.push([`*Do next*`, ...snap.nba.map((n) => (n.headline.startsWith(n.key) ? `• ${link(n.key, links)}${n.headline.slice(n.key.length)}` : `• ${link(n.key, links)} — ${n.headline}`))]);
   if (args.dueSoon === null) notes.push("Jira could not be reached, so tickets due soon and your mentions are not included.");
   else if (args.dueSoon.length) {
     sections.push([`*Due within 2 days or overdue* (${args.dueSoon.length})`, ...args.dueSoon.slice().sort((a, b) => a.dueDate.localeCompare(b.dueDate)).map((t) => `• ${link(t.key, links)}${t.title ? ` — ${t.title}` : tail(t.key, links)} · due ${t.dueDate}${t.dueDate < today ? " (overdue)" : ""}`)]);

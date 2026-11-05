@@ -46,7 +46,7 @@ export function BriefingCard() {
       <SectionHeading title="Morning briefing" subtitle={prefs.enabled ? `Sent to Slack on workdays at ${prefs.time} (when Slack and server reminders are set up).` : "Turn on the Slack briefing in Data & Settings → Reminders."} />
       <div className="space-y-0.5 text-sm text-text2">
         {content.built.lines.slice(1).map((l, i) => (
-          <p key={i} className={l.startsWith("*") ? "mt-1 font-medium text-text" : ""}>{l.replace(/^\*|\*$/g, "").replace(/<[^|>]*\|([^>]*)>/g, "$1").replace(/^_|_$/g, "")}</p>
+          <p key={i} className={l.startsWith("*") ? "mt-1 font-medium text-text" : ""}>{l.replace(/<[^|>]*\|([^>]*)>/g, "$1").replace(/\*/g, "").replace(/^_|_$/g, "")}</p>
         ))}
       </div>
     </Panel>
