@@ -37,3 +37,5 @@ next-env.d.ts
 
 # P2.5 live Jira smoke output
 /smoke-report.json
+
+ai-smoke-report.json

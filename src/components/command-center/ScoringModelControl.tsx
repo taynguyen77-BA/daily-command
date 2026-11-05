@@ -7,7 +7,9 @@
 import { useCommandCenter } from "./use-command-center";
 
 export function ScoringModelControl() {
-  const { state, store } = useCommandCenter();
+  const { state, store, derived } = useCommandCenter();
+  const counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
+  for (const r of derived.scores) counts[r.classification] += 1;
   const model = state.scoringModel ?? "v2";
   return (
     <div className="mt-4 border-t border-border pt-3 text-sm text-text2" data-scoring-model>
@@ -20,6 +22,9 @@ export function ScoringModelControl() {
       </label>
       <p className="mt-1 text-xs text-text3">
         v2 weights: Priority 20 · Deadline 20 · Awaiting you 15 · Blocker 15 · Aging 10 · Change frequency 10 · Dependency 5 · Ownership 5 (Business impact 10 + Priority 10 when a rating exists). Trends do not compare scores across models.
+      </p>
+      <p className="mt-1 text-xs text-text3" data-severity-distribution>
+        Severity now (CALCULATED, {model === "v2" ? "v2.1 thresholds + hard-rule floors" : "v1 thresholds 80 / 60 / 40"}): Critical {counts.CRITICAL} · High {counts.HIGH} · Medium {counts.MEDIUM} · Low {counts.LOW}
       </p>
     </div>
   );

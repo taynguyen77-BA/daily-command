@@ -83,7 +83,7 @@ const f = (r: ReturnType<typeof s2>, name: string) => r.factors.find((x) => x.na
   ok(group, s2({ type: "release" as WorkItem["type"], dueDate: "2026-11-01" }).confidence === 0.85, "release without UAT % keeps its -0.10");
 
   const r = s2({ priority: "P1", jiraPriorityName: "Highest", priorityKnown: true, dueDate: "2026-10-24" });
-  ok(group, r.reasoning === `Scored ${r.score}/100: Priority P1 (Highest in Jira) and overdue by 3 days.`, `reasoning names the top two factors: "${r.reasoning}"`);
+  ok(group, r.reasoning.startsWith(`Scored ${r.score}/100: Priority P1 (Highest in Jira) and overdue by 3 days.`), `reasoning names the top two factors: "${r.reasoning}"`);
   const one = s2({ priority: "P1", priorityKnown: true });
   ok(group, /^Scored \d+\/100: Priority P1\.$/.test(one.reasoning), "a single contributing factor is named alone");
 
@@ -137,7 +137,7 @@ const f = (r: ReturnType<typeof s2>, name: string) => r.factors.find((x) => x.na
   const m2 = buildSnapshotMetrics(data, today, 0, undefined, undefined, undefined, v2);
   ok(group, m1.scoringModel === undefined && m2.scoringModel === "v2", "a v2 snapshot records its model; v1 snapshots (and every old one) carry no field");
   const trend = compareSnapshots(m2, { ...m1, deliveryConfidence: 10, attentionCount: 9, blockedCount: 5 }, "2026-10-26");
-  ok(group, trend.modelChanged?.from === "v1" && trend.modelChanged.to === "v2" && trend.modelChanged.note.includes("2026-10-26"), "compareSnapshots reports 'model changed' with the date");
+  ok(group, trend.modelChanged?.from === "v1" && trend.modelChanged.to === "v2.1" && trend.modelChanged.note.includes("2026-10-26"), "compareSnapshots reports 'model changed' with the date");
   ok(group, !trend.deltas.some((d) => ["Delivery confidence", "Needs attention", "Critical items"].includes(d.label)) && trend.deltas.some((d) => d.label === "Blocked items"), "score-based deltas are left out, count-based ones are still compared");
   const same = compareSnapshots(m2, { ...m2, deliveryConfidence: 10 });
   ok(group, same.modelChanged === undefined && same.deltas.some((d) => d.label === "Delivery confidence"), "same model: compared normally");

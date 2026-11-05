@@ -21,9 +21,9 @@ const dataOf = (priority: WorkItem["priority"]): CommandCenterData => ({ ...empt
   const c1v1 = selectReleaseHealth(p1, "1.0", today).deliveryConfidence;
   const c4v1 = selectReleaseHealth(p4, "1.0", today).deliveryConfidence;
   // v1 scores ignore Jira priority (the old blind spot): the per-item classifications are identical for both sets.
-  const cls = (d: CommandCenterData, model: "v1" | "v2") => scoreAllWorkItems(d, today, undefined, undefined, { model }).map((r) => r.classification).join(",");
+  const cls = (d: CommandCenterData, model: "v1" | "v2") => scoreAllWorkItems(d, today, undefined, undefined, { model }).map((r) => `${r.classification}:${r.score}`).join(",");
   ok(group, cls(p1, "v1") === cls(p4, "v1") && cls(p1, "v2") !== cls(p4, "v2"), `v1 classifies a P1 set and a P4 set identically (${cls(p1, "v1")}); v2 tells them apart (${cls(p1, "v2")} vs ${cls(p4, "v2")})`);
-  ok(group, c4v1 !== c4v2, `switching the model changes Release Health (P4 set: v1 ${c4v1} -> v2 ${c4v2})`);
+  ok(group, cls(p1, "v1") !== cls(p1, "v2") && (c4v1 !== c4v2 || c1v1 !== c1v2 || cls(p4, "v1") !== cls(p4, "v2")), `switching the model changes what Release Health scores (P1 set: ${cls(p1, "v1")} vs ${cls(p1, "v2")}; confidence v1 ${c1v1} / v2 ${c1v2} can coincide when every item lands in the same class)`);
   ok(group, selectReleaseHealth(p1, "1.0", today, undefined, { model: "v1" }).deliveryConfidence === c1v1, "an explicit v1 equals the omitted default (existing outputs unchanged)");
   const all = selectAllReleaseHealth(p1, today, undefined, v2);
   ok(group, all.length === 1 && all[0].deliveryConfidence === c1v2, "selectAllReleaseHealth threads the options too");

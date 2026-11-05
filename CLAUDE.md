@@ -41,7 +41,7 @@ Team sign-in (NextAuth v4) is OFF unless `AUTH_ENABLED=true`.
    Fakes for Jira must validate JQL (use `strictJiraFake()` once it exists) — a fake that ignores the JQL hides bugs.
 4. **Version line.** `package.json` `version` is the source of truth; README has exactly one `**Current version:** V2.NN`
    line and must match (test E6). Add ONE short `(V2.NN)` section per release to `docs/RELEASE-NOTES.md` (README is a short entry point; env vars live in `docs/CONFIG.md`); never a heading newer than package.json.
-5. **Security.** Jira/Anthropic/Slack secrets never reach the browser, logs or responses. Secret comparisons are
+5. **Security.** Jira/Anthropic/Slack secrets never reach the browser, logs or responses. **Provider secrets are write-only, server-side (sealed in KV), and never in client state, backups, sync blobs, logs, errors or test snapshots** (a saved Anthropic key shows only its last 4 characters and a key id). Secret comparisons are
    constant-time (`secure-compare.ts`). Jira writes only through the existing gated route.
 6. **AI.** Prompts are built on the server, outputs validated by schema + grounding guard, deterministic fallback always
    available. Respect the daily token cap. Prefer reusing an existing task over adding one; prefer fast tier for narration.

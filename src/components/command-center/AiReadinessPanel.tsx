@@ -7,10 +7,10 @@
 import { useState } from "react";
 import { AI_FEATURES, AI_PRESETS, aiReadinessMatrix, presetDiff, type AiPreset, type PresetChange } from "@/lib/command-center/ai/readiness";
 import { Panel, SectionHeading } from "./ui";
-import { useAiReadinessFacts } from "./use-ai-readiness";
+import { latestProviderError, useAiReadinessFacts } from "./use-ai-readiness";
 import { useCommandCenter } from "./use-command-center";
 
-const STATE_STYLE: Record<string, string> = { READY: "text-green", OFF: "text-text3", NEEDS_KEY: "text-yellow", NEEDS_ALLOWLIST: "text-yellow", SERVER_POLICY_BLOCKED: "text-red", CAP_REACHED: "text-red" };
+const STATE_STYLE: Record<string, string> = { READY: "text-green", OFF: "text-text3", NEEDS_KEY: "text-yellow", KEY_REJECTED: "text-red", MODEL_UNAVAILABLE: "text-red", NEEDS_ALLOWLIST: "text-yellow", SERVER_POLICY_BLOCKED: "text-red", CAP_REACHED: "text-red" };
 
 export function AiReadinessPanel() {
   const { state, store } = useCommandCenter();
@@ -20,7 +20,7 @@ export function AiReadinessPanel() {
 
   const rows = aiReadinessMatrix({
     features: state.features,
-    ai: facts?.ai ? { available: facts.ai.available, ...("aiAllowedProjectKeys" in facts.ai ? { aiAllowedProjectKeys: facts.ai.aiAllowedProjectKeys } : {}) } : null,
+    ai: facts?.ai ? { available: facts.ai.available, ...(typeof facts.ai.canStoreKey === "boolean" ? { canStoreKey: facts.ai.canStoreKey } : {}), providerError: latestProviderError(), ...("aiAllowedProjectKeys" in facts.ai ? { aiAllowedProjectKeys: facts.ai.aiAllowedProjectKeys } : {}) } : null,
     usage: facts?.usage ?? null,
     allowedProjectKeys: state.aiDataProtection.allowedProjectKeys,
     projectKeys: state.data.projects.map((p) => p.sourceId ?? "").filter(Boolean),

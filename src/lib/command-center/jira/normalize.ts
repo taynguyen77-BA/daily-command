@@ -90,6 +90,8 @@ export function normalizeIssue(issue: JiraIssue, options: NormalizeOptions): { w
         workItemId: `jira-${issue.key}`,
         description: `Blocked by ${blocker.key}${blocker.fields?.summary ? `: ${blocker.fields.summary}` : ""}`,
         dependsOnTeam: blocker.key.split("-")[0],
+        blockerKey: blocker.key,
+        ...(link.type?.name ? { linkType: link.type.name } : {}),
         status: resolved ? ("resolved" as const) : ("unresolved" as const),
         // Jira's issue-search response doesn't include the link's own creation date without
         // an extra changelog expansion — the issue's own `created` date is the closest

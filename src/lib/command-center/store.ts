@@ -136,6 +136,9 @@ import type { CustomTerm } from "./ai/redaction";
 import type { IssueContext } from "./jira/issue-context";
 import { asAiBriefCache, putBrief, type AiBriefCache, type StoredTicketBrief } from "./ai/ticket-brief";
 import { addTriageStats, asTriageStats, type TriageCategory, type TriageStatsByDay } from "./ai/smart-triage";
+import { asReminderPrefs, type ReminderPrefs } from "./reminder-schedule";
+import { asBriefingPrefs, type BriefingPrefs } from "./briefing";
+import { patchReminder, type ReminderPatch } from "./reminder-model";
 import { asWeeklyInsights, type StoredWeeklyInsights } from "./ai/weekly-insights";
 export type { MyActionItemsOnlyByPage };
 
@@ -356,6 +359,10 @@ export interface StoreState {
   commandCenterCompact: boolean;
   /** P3.1 — priority scoring model. Absent/unknown = "v2" (the default); "v1" is the original model. */
   scoringModel?: ScoreModel;
+  /** D4 — Reminder Center settings (absent = defaults: nothing required, 09:00, skip weekends, ladder 1/3/7). */
+  reminderPrefs?: ReminderPrefs;
+  /** W1 — Morning Briefing settings (absent = off). */
+  briefingPrefs?: BriefingPrefs;
   /** P3.3 — the personal learning loop: "off" | "shadow" (default: computed and shown, never changes a score) | "on". */
   learnedPriority?: LearnedMode;
   /** P3.3 — the day shadow learning started (the Weekly Review proposes "on" after 14 days). */
@@ -435,6 +442,9 @@ function initialState(): StoreState {
     morningTriage: {},
     commandCenterCompact: false,
     scoringModel: "v2",
+    // D4 — a NEW install requires a reminder date (or an explicit "No reminder"); a stored state from before keeps it off (asReminderPrefs on parse).
+    reminderPrefs: { ...asReminderPrefs(undefined), requireReminderDate: true },
+    briefingPrefs: asBriefingPrefs(undefined),
     learnedPriority: "shadow",
     learnedShadowSince: getTodayIso(),
     blockerSlaBusinessDays: DEFAULT_BLOCKER_SLA_BUSINESS_DAYS,
@@ -1042,6 +1052,8 @@ function parseStoredStateRaw(raw: string): StoreState {
       morningTriage: asMorningTriage(parsed.morningTriage),
       commandCenterCompact: parsed.commandCenterCompact === true,
       scoringModel: parsed.scoringModel === "v1" ? "v1" : "v2",
+      reminderPrefs: asReminderPrefs(parsed.reminderPrefs),
+      briefingPrefs: asBriefingPrefs(parsed.briefingPrefs),
       learnedPriority: asLearnedMode(parsed.learnedPriority),
       learnedShadowSince: typeof parsed.learnedShadowSince === "string" ? parsed.learnedShadowSince : getTodayIso(),
       learningResetAt: typeof parsed.learningResetAt === "string" ? parsed.learningResetAt : undefined,
@@ -1929,6 +1941,24 @@ export class CommandCenterStore {
   /** F1 — Command Center compact mode (header toggle). */
   setCommandCenterCompact(on: boolean) {
     this.set({ ...this.state, commandCenterCompact: on });
+  }
+
+  /** D4 — Reminder Center settings (validated; an invalid value keeps its default). */
+  setReminderPrefs(next: Partial<ReminderPrefs>) {
+    this.set({ ...this.state, reminderPrefs: asReminderPrefs({ ...this.state.reminderPrefs, ...next }) });
+  }
+
+  /** W1 — Morning Briefing settings (validated; an invalid value keeps its default). */
+  setBriefingPrefs(next: Partial<BriefingPrefs>) {
+    this.set({ ...this.state, briefingPrefs: asBriefingPrefs({ ...this.state.briefingPrefs, ...next }) });
+  }
+
+  /** D4 — snooze / change date / stop reminding / record progress on a parked ticket. Rides the ticket's LWW clock, so devices converge. */
+  updateTicketReminder(ticketKey: string, patch: ReminderPatch): boolean {
+    const next = patchReminder(this.state.ticketWorkStates, ticketKey, patch, new Date().toISOString());
+    if (next === this.state.ticketWorkStates) return false;
+    this.set({ ...this.state, ticketWorkStates: next, ...deriveLegacyDailyCommandState(next, new Date().toISOString(), this.state.dailyCommandTombstones) });
+    return true;
   }
 
   /** P3.1 — switch the priority scoring model (device-local setting). */

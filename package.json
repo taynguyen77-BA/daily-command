@@ -1,6 +1,6 @@
 {
   "name": "ba-po-pm-command-center",
-  "version": "2.45.0",
+  "version": "2.48.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,8 @@
     "test": "tsx scripts/tests/run.mts",
     "test:perf": "tsx scripts/tests/run-perf.mts",
     "check": "tsc --noEmit && eslint . --max-warnings 0 && tsx scripts/tests/run.mts",
-    "smoke:jira": "tsx scripts/jira-smoke.mts"
+    "smoke:jira": "tsx scripts/jira-smoke.mts",
+    "smoke:ai": "tsx scripts/ai-smoke.mts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",

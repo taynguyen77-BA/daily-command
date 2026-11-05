@@ -6,6 +6,7 @@ import type { CommandCenterStore } from "./store";
 import { getTodayIso, selectDailyCommandMaps } from "./store";
 import { dueFollowUps, followUpSlackPayloads, followUpsToNotify } from "./follow-up-reminders";
 import { checkSlackNotifyStatus, sendFollowUpReminders } from "./notify-client";
+import { getServerReminderStatus, isServerReminderActive, pullServerReminders } from "./reminder-sync";
 
 const INTERVAL_MS = 30 * 60 * 1000;
 let started = false;
@@ -15,6 +16,9 @@ export async function runFollowUpRemindersOnce(store: CommandCenterStore, deps: 
   if (running) return 0;
   const state = store.getSnapshot();
   if (!state.loaded || !state.features.followUpReminders) return 0;
+  // D4 — when the server reminds (cron + mirrored index) the browser must not send the same message again.
+  if (!getServerReminderStatus().checked) await pullServerReminders();
+  if (isServerReminderActive()) return 0;
   const pending = followUpsToNotify(dueFollowUps(selectDailyCommandMaps(state).dailyCommandBlocks, getTodayIso(), state.data.workItems), state.followUpNotified);
   if (pending.length === 0) return 0;
   running = true;

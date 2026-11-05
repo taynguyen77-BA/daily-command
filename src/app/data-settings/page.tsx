@@ -2,6 +2,8 @@
 
 import { listDailySyncSummaries } from "@/lib/command-center/sync-history";
 import type { FeatureToggles } from "@/lib/command-center/types";
+import { ReminderSettingsPanel } from "@/components/command-center/ReminderSettingsPanel";
+import { AiProviderPanel } from "@/components/command-center/AiProviderPanel";
 import { ScoringModelControl } from "@/components/command-center/ScoringModelControl";
 import { AiReadinessPanel } from "@/components/command-center/AiReadinessPanel";
 import { LearningPanel } from "@/components/command-center/LearningPanel";
@@ -1666,8 +1668,10 @@ export default function DataSettingsPage() {
 
       <DataImportPanel />
 
+      <AiProviderPanel />
+
       <Panel className="p-5">
-        <SectionHeading title="AI provider" />
+        <SectionHeading title="AI provider (server environment)" />
         <p className="text-sm text-text2">
           Server API key configured:{" "}
           <span className="font-mono text-text">
@@ -1690,6 +1694,8 @@ export default function DataSettingsPage() {
       </Panel>
 
       <LearningPanel />
+
+      <ReminderSettingsPanel />
 
       <SlackNotificationsPanel />
 

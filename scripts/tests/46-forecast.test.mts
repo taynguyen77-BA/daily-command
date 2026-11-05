@@ -63,10 +63,9 @@ const ok_ = (e: LeadTimeEstimate) => (e.status === "OK" ? e : (() => { throw new
   const risk = (age: number, dueIn: number | null) => slipRiskFor({ createdDate: addDays(today, -age), dueDate: dueIn === null ? undefined : addDays(today, dueIn) }, today, est);
   ok(group, risk(5, null) === null, "no dueDate -> not computed");
   ok(group, slipRiskFor({ createdDate: "2026-10-20", dueDate: "2026-10-30" }, today, { status: "UNKNOWN", n: 2, reason: "insufficient history" }) === null, "no estimate -> not computed");
-  ok(group, risk(2, 3)!.level === "HIGH" && risk(2, 3)!.expectedRemainingP50 === 8, "age 2, due in 3: typical remaining 8 days > 3 left -> HIGH");
-  ok(group, risk(2, 8)!.level === "LOW" || risk(2, 8)!.level === "MEDIUM", "age 2, due in 8: typical exactly fits");
-  ok(group, risk(2, 8)!.level === "MEDIUM" && risk(2, 15)!.level === "LOW" && risk(2, 14)!.level === "MEDIUM", "P50 fits but P85 (15 more days) does not -> MEDIUM; fits both -> LOW (boundary at 15 days left)");
-  ok(group, risk(2, 0)!.level === "HIGH" && risk(20, 0)!.level === "LOW", "due today: HIGH when work typically remains, LOW when the ticket is already past P85");
+  ok(group, risk(2, 3)!.level === "HIGH" && risk(2, 3)!.expectedRemainingP50 === 9, "age 2, due in 3: conditional typical remaining 9 days > 3 left -> HIGH");
+    ok(group, risk(2, 8)!.level === "HIGH" && risk(2, 9)!.level === "MEDIUM" && risk(2, 16)!.level === "LOW" && risk(2, 15)!.level === "MEDIUM", "conditional P50 9 / P85 16 more days: HIGH while P50 does not fit, MEDIUM while only P85 does not, LOW at 16 days left");
+  ok(group, risk(2, 0)!.level === "HIGH" && risk(20, 0)!.level === "HIGH" && risk(20, 0)!.precedent === "none", "due today: HIGH when work typically remains, and HIGH (no precedent) when the ticket is older than every comparable one");
   ok(group, risk(5, -1)!.level === "HIGH" && risk(30, -3)!.level === "HIGH" && risk(30, -3)!.explanation.includes("overdue by 3 day"), "overdue is always HIGH");
   ok(group, /n = 20/.test(risk(2, 3)!.explanation) && /P50/.test(risk(2, 3)!.explanation) && risk(2, 3)!.n === 20, "the explanation carries the numbers and n");
 }
@@ -127,7 +126,7 @@ const ok_ = (e: LeadTimeEstimate) => (e.status === "OK" ? e : (() => { throw new
   const fc = computeForecast(data, today);
   ok(group, computeForecast(data, today) === fc && fc.resolvedSamples === 12, "the bundle is memoised per dataset and counts its resolved samples");
   const flags = forecastFlags(fc.byTicket.get("OLD-1"));
-  ok(group, flags.agingFlag && !flags.slipHigh && !forecastFlags(fc.byTicket.get("NEW-1")).agingFlag && !forecastFlags(undefined).slipHigh, "a ticket older than P85 is aging-flagged (its expected remaining time is 0, so it is not a slip risk by the max(0, P50 - age) rule); a fresh one is not");
+  ok(group, flags.agingFlag && flags.slipHigh && !forecastFlags(fc.byTicket.get("NEW-1")).agingFlag && !forecastFlags(undefined).slipHigh, "a ticket older than every comparable one is aging-flagged AND slip-high (no precedent, due in 5 days — never LOW); a fresh one is not");
   const slipData = { ...emptyData(), workItems: [...history, wi("SLIP-1", { createdDate: addDays(today, -2), dueDate: addDays(today, 3) })] } as CommandCenterData;
   ok(group, forecastFlags(computeForecast(slipData, today).byTicket.get("SLIP-1")).slipHigh && !forecastFlags(computeForecast(slipData, today).byTicket.get("SLIP-1")).agingFlag, "a young ticket that cannot make its date is slip-flagged but not aging-flagged");
   const rel = fc.releases.find((r) => r.fixVersion === "V9")!;

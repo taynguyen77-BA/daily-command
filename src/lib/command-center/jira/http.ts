@@ -350,6 +350,25 @@ export async function fetchJiraProjectsWith(fetchImpl: FetchLike, config: JiraCo
   }
 }
 
+/** D4 — one batched check of parked tickets before a reminder goes out: `key in (…)`, chunks of 50. Each answer is "open" (still mine and
+ *  not Done), "closed" (statusCategory Done) or "not-mine" (assigned to someone else / nobody). A key Jira did not return (deleted, no
+ *  access) is left out of the map — the caller treats "unknown" as "send anyway". */
+export async function fetchParkedTicketStatesWith(fetchImpl: FetchLike, config: JiraConnectionConfig, accountId: string, keys: readonly string[]): Promise<JiraFetchResult<Map<string, "open" | "closed" | "not-mine">>> {
+  const valid = Array.from(new Set(keys.filter((k) => /^[A-Za-z][A-Za-z0-9_]*-\d+$/.test(k))));
+  const out = new Map<string, "open" | "closed" | "not-mine">();
+  for (let i = 0; i < valid.length; i += 50) {
+    const chunk = valid.slice(i, i + 50);
+    const res = await fetchIssuesByJqlCursor(fetchImpl, config, `key in (${chunk.map((k) => `"${k}"`).join(",")})`);
+    if (!res.ok) return res;
+    for (const issue of res.data) {
+      const done = issue.fields.status?.statusCategory?.key === "done";
+      const assignee = issue.fields.assignee?.accountId;
+      out.set(issue.key, done ? "closed" : assignee === accountId ? "open" : "not-mine");
+    }
+  }
+  return { ok: true, data: out, recordsFetched: out.size };
+}
+
 export interface FetchIssuesOptions {
   sinceIso?: string;
   projectKeys?: string[];

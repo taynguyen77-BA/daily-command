@@ -2,7 +2,7 @@
 
 A Next.js app that turns Jira project data into deterministic delivery intelligence — priorities, risks, decisions, attention queue, personal focus — and, as of V2.2, into stakeholder-ready artifacts (status updates, decision briefs, meeting summaries) you can edit and copy without leaving the app.
 
-**Current version:** V2.45
+**Current version:** V2.48
 **Status:** READY WITH LIMITATIONS — see the [V2.2.1 report](docs/RELEASE-NOTES.md#v221--production-completion--deployment-readiness) below for the full breakdown. The two limitations are both environment facts (no Jira credentials, no Anthropic API key configured in this environment), not implementation gaps.
 
 **Version line:** this line drifted stale four times (V2.2.1, V2.9, V2.15, V2.25 — see docs/RELEASE-NOTES.md), so it is now enforced: `package.json` `"version"` is the source of truth (`2.45.0` ↔ `V2.45`) and the test suite fails if this line disagrees with it, or if any `(V2.NN)` heading is newer than it (group `E6 Version line`).

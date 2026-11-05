@@ -14,6 +14,8 @@ export interface AiStatusEnv extends AiModelEnv {
 
 export interface AiStatusResponse extends ReturnType<typeof aiModelStatus> {
   available: boolean;
+  /** D1 — a key can be saved from Data & Settings. */
+  canStoreKey?: boolean;
   dailyTokenCap: number;
   /** K6 — "memory": the daily cap and usage are per server instance (no Vercel KV). */
   capStorage: "kv" | "memory";
@@ -21,9 +23,10 @@ export interface AiStatusResponse extends ReturnType<typeof aiModelStatus> {
   aiAllowedProjectKeys?: string[] | null;
 }
 
-export function buildAiStatusResponse(env: AiStatusEnv, facts: { available: boolean; kvConfigured: boolean; authorized: boolean }): AiStatusResponse {
+export function buildAiStatusResponse(env: AiStatusEnv, facts: { available: boolean; kvConfigured: boolean; authorized: boolean; canStoreKey?: boolean }): AiStatusResponse {
   return {
     available: facts.available,
+    ...(facts.canStoreKey !== undefined ? { canStoreKey: facts.canStoreKey } : {}),
     ...aiModelStatus(env),
     dailyTokenCap: resolveDailyTokenCap(env.AI_DAILY_TOKEN_CAP),
     capStorage: facts.kvConfigured ? "kv" : "memory",

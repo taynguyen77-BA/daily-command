@@ -6,7 +6,7 @@ import type { FeatureToggles } from "../types";
 
 export type AiFeatureId = "ticketAi" | "ticketBrief" | "smartTriage" | "mentionReplyDrafter" | "audienceReports" | "baRequirementCheck" | "aiBlockerFollowUp" | "releaseGoNoGo" | "meetingNotesActions" | "nlCommands" | "weeklyInsights" | "nextBestActionAi";
 
-export type AiReadinessState = "READY" | "OFF" | "NEEDS_KEY" | "NEEDS_ALLOWLIST" | "SERVER_POLICY_BLOCKED" | "CAP_REACHED";
+export type AiReadinessState = "READY" | "OFF" | "NEEDS_KEY" | "KEY_REJECTED" | "MODEL_UNAVAILABLE" | "NEEDS_ALLOWLIST" | "SERVER_POLICY_BLOCKED" | "CAP_REACHED";
 
 /** The 12 AI features. `ticketContent` = it sends ticket content to the model, so the project allow-list (and the
  *  server's AI_ALLOWED_PROJECT_KEYS) apply — the same set of features that call isProjectAiAllowed / gateTicketAi. */
@@ -28,7 +28,14 @@ export const AI_FEATURES: { id: AiFeatureId; label: string; ticketContent: boole
 export interface AiReadinessContext {
   features: Pick<FeatureToggles, AiFeatureId>;
   /** GET /api/command-center/ai: null = not known yet (never produces a "needs key" claim). */
-  ai: { available: boolean; aiAllowedProjectKeys?: string[] | null } | null;
+  ai: {
+    available: boolean;
+    aiAllowedProjectKeys?: string[] | null;
+    /** D1 — the server can store a key sent from Data & Settings (encryption material + KV present). */
+    canStoreKey?: boolean;
+    /** D1 — the latest provider failure kind the app saw ("invalid-key" = rejected key, "model-not-found" = unknown model id). */
+    providerError?: string | null;
+  } | null;
   /** Today's usage: null = unknown. */
   usage: { remainingToday: number } | null;
   /** The browser-side allow-list (Data & Settings -> AI data protection). */
@@ -49,7 +56,7 @@ export interface AiReadiness {
 
 export const READY_TEXT = "Ready.";
 
-/** Precedence: OFF > NEEDS_KEY > NEEDS_ALLOWLIST > SERVER_POLICY_BLOCKED > CAP_REACHED > READY. */
+/** Precedence: OFF > NEEDS_KEY > KEY_REJECTED > MODEL_UNAVAILABLE > NEEDS_ALLOWLIST > SERVER_POLICY_BLOCKED > CAP_REACHED > READY. */
 export function aiReadiness(feature: AiFeatureId, ctx: AiReadinessContext): AiReadiness {
   const def = AI_FEATURES.find((f) => f.id === feature)!;
   const upper = (k: string) => k.toUpperCase();
@@ -62,7 +69,9 @@ export function aiReadiness(feature: AiFeatureId, ctx: AiReadinessContext): AiRe
   const done = (state: AiReadinessState, nextStep: string): AiReadiness => ({ feature, state, nextStep, projects });
 
   if (!ctx.features[feature]) return done("OFF", `Turn on “${def.label}” in Data & Settings → Features.`);
-  if (ctx.ai && !ctx.ai.available) return done("NEEDS_KEY", "Set ANTHROPIC_API_KEY on the server — until then this runs in Mock AI mode (deterministic text, no model).");
+  if (ctx.ai && !ctx.ai.available) return done("NEEDS_KEY", ctx.ai.canStoreKey ? "Add your API key in Data & Settings → AI provider — until then this runs in Mock AI mode (deterministic text, no model)." : "Set ANTHROPIC_API_KEY on the server — until then this runs in Mock AI mode (deterministic text, no model).");
+  if (ctx.ai?.providerError === "invalid-key") return done("KEY_REJECTED", "Anthropic rejected the API key (401) — replace it in Data & Settings → AI provider and press Save & test.");
+  if (ctx.ai?.providerError === "model-not-found") return done("MODEL_UNAVAILABLE", "A configured model id was not found for this key — pick another model in Data & Settings → AI provider and press Save & test.");
   if (def.ticketContent) {
     const scope = ctx.projectKey ? [upper(ctx.projectKey)] : null;
     const clientOk = scope ? scope.every((k) => client.has(k)) : client.size > 0;

@@ -25,9 +25,18 @@ export interface AiUsageRecord {
   cacheWriteTokens: number;
   /** Served from the server's dedupe cache — no model call, zero tokens. */
   cached: boolean;
-  outcome: "ok" | "grounding-retry" | "grounding-rejected" | "invalid-output" | "refused" | "truncated" | "error";
+  outcome: "ok" | "grounding-retry" | "grounding-rejected" | "invalid-output" | "schema-retry" | "refused" | "truncated" | "error";
   /** L4 — the signed-in member who made the call (team sign-in on); absent otherwise. */
   uid?: string;
+  /** D2 telemetry (all optional — old records load unchanged). Never contains model text. */
+  errorKind?: string;
+  httpStatus?: number;
+  /** Which grounding rules fired on this call. */
+  violationKinds?: ("key" | "date" | "number" | "person")[];
+  /** This call answered a repair request (grounding or schema). */
+  repaired?: boolean;
+  /** D3 — a self-test call (kept apart from real usage in the displays). */
+  selftest?: boolean;
 }
 
 export interface AiUsageTotals {
@@ -48,6 +57,8 @@ export interface AiUsageSummary {
   byDay: { day: string; totals: AiUsageTotals }[];
   remainingToday: number;
   storage: "kv" | "memory";
+  /** D3 — tokens today that came from self-test runs (they count against the cap, and are shown apart from real usage). */
+  selftestTokensToday?: number;
 }
 
 export interface UsageLedger {
@@ -114,6 +125,7 @@ export function summarizeUsage(records: AiUsageRecord[], cap: number, now: Date,
     byDay: days.map((day) => ({ day, totals: totalsOf(inWindow.filter((r) => r.day === day)) })),
     remainingToday: Math.max(0, cap - todayTotals.totalTokens),
     storage,
+    selftestTokensToday: inWindow.filter((r) => r.day === today && r.selftest).reduce((n, r) => n + recordTokens(r), 0),
   };
 }
 
@@ -173,4 +185,29 @@ export function getUsageLedger(): UsageLedger {
 /** Test-only: swap the process-wide ledger. */
 export function setUsageLedgerForTests(next: UsageLedger | null): void {
   ledger = next;
+}
+
+// ---- D2: AI health (per task, last 7 days) -------------------------------------------------------------------------
+export interface AiTaskHealth {
+  task: AITask;
+  calls: number;
+  byOutcome: Record<string, number>;
+  /** Top grounding violation kinds, most frequent first. */
+  topViolations: { kind: string; count: number }[];
+  repaired: number;
+}
+
+/** Counts by outcome and top violation kinds per task. Cached answers are not model calls and are left out. */
+export function healthByTask(records: readonly AiUsageRecord[]): AiTaskHealth[] {
+  const byTask = new Map<AITask, { calls: number; byOutcome: Record<string, number>; v: Map<string, number>; repaired: number }>();
+  for (const r of records) {
+    if (r.cached || r.selftest) continue;
+    const e = byTask.get(r.task) ?? { calls: 0, byOutcome: {}, v: new Map<string, number>(), repaired: 0 };
+    e.calls += 1;
+    e.byOutcome[r.outcome] = (e.byOutcome[r.outcome] ?? 0) + 1;
+    for (const k of r.violationKinds ?? []) e.v.set(k, (e.v.get(k) ?? 0) + 1);
+    if (r.repaired && r.outcome === "ok") e.repaired += 1;
+    byTask.set(r.task, e);
+  }
+  return Array.from(byTask, ([task, e]) => ({ task, calls: e.calls, byOutcome: e.byOutcome, topViolations: Array.from(e.v, ([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count), repaired: e.repaired })).sort((a, b) => b.calls - a.calls);
 }

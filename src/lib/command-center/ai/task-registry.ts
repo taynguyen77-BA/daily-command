@@ -8,6 +8,8 @@
 // server parses it again before building anything.
 
 import { z } from "zod";
+import type { GroundingPolicy } from "./evaluation";
+import { schemaLimitsText } from "./schema-limits";
 import type { ArtifactType, ChangeEvent, DecisionConflictCandidate, Evidence, FollowUpContext, HealthTrend, PriorityScoreResult, Risk, WorkItem, Action } from "../types";
 import type { WeeklyReviewFacts } from "../weekly-review";
 import { actionOutcomePrompt } from "./prompts/action-outcome";
@@ -410,7 +412,42 @@ export function parseTaskInput(task: AITask, input: unknown): ParsedTaskInput {
   return { ok: true, input: parsed.data };
 }
 
-/** Builds the prompt from an input that has ALREADY been through parseTaskInput. */
+/** D2 — grounding policy per task. "strict" = every number must be in the facts (reports, rewrites, locked facts,
+ *  release brief). "counts" = narrative tasks may state a derived count ("2 blockers") when n <= 12 and n <= the number of
+ *  ticket keys / listed items in the prompt; days, hours, %, points and dates stay strict in both. */
+export const GROUNDING_POLICY: Record<AITask, GroundingPolicy> = {
+  analyzePriorities: "counts",
+  detectRisks: "counts",
+  explainChanges: "counts",
+  generateActionPlan: "counts",
+  generateCommunication: "strict",
+  generateEndOfDaySummary: "counts",
+  interpretTrend: "strict",
+  detectDecisionConflicts: "strict",
+  analyzeActionOutcomes: "strict",
+  generateWeeklyReview: "counts",
+  answerQuery: "counts",
+  assessProactive: "counts",
+  generateProjectStory: "counts",
+  generateDecisionOptions: "strict",
+  interpretOutcome: "strict",
+  generateDailyGuidance: "counts",
+  generateCommunicationArtifact: "strict",
+  polishReportSummary: "strict",
+  checkRequirements: "counts",
+  generateTicketBrief: "counts",
+  triageNewItems: "counts",
+  draftMentionReply: "strict",
+  rewriteReport: "strict",
+  baRequirementCheck: "counts",
+  draftBlockerFollowUps: "strict",
+  releaseGoNoGo: "strict",
+  extractMeetingActions: "counts",
+  parseCommand: "strict",
+  weeklyInsights: "counts",
+};
+
+/** Builds the prompt from an input that has ALREADY been through parseTaskInput. The output limits come from the output schema (D2). */
 export function buildTaskPrompt(task: AITask, parsedInput: unknown): string {
-  return (BUILDERS[task] as (i: unknown) => string)(parsedInput);
+  return (BUILDERS[task] as (i: unknown) => string)(parsedInput) + schemaLimitsText(TASK_OUTPUT_SCHEMAS[task] as z.ZodType);
 }

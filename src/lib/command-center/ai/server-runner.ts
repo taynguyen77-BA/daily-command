@@ -17,7 +17,7 @@
 
 import { createHash } from "node:crypto";
 import { aiStructuredRequestSchema, type AITask } from "./schemas";
-import { buildTaskPrompt, parseTaskInput, TASK_EXTRA_CHECKS, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
+import { buildTaskPrompt, GROUNDING_POLICY, parseTaskInput, TASK_EXTRA_CHECKS, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
 import { isAlwaysThinkingModel, resolveAiModel, supportsDefaultFallbacks, type AiModelEnv, type AiModelTier } from "./model-config";
 import { checkGrounding } from "./evaluation";
 import { redactPatternsDeep } from "./redaction";
@@ -61,6 +61,8 @@ export interface AiServerDeps {
   cache?: ResponseCache;
   /** L4 — team sign-in: the calling member and their own daily cap (null = none). */
   user?: { uid: string; cap: number | null };
+  /** D3 — mark every ledger entry of this request as a self-test call. */
+  selftest?: boolean;
 }
 
 export type AiServerResult = { status: number; body: Record<string, unknown> };
@@ -159,7 +161,7 @@ export async function handleAiRequest(body: unknown, deps: AiServerDeps): Promis
   const pending = cache.pending(key);
   if (pending) return pending;
 
-  const run = callAndValidate(task, prompt, parsedInput, model, tier, deps, now).then(async (r) => {
+  const run = callAndValidate(task, prompt, parsedInput, model, tier, deps, now, cap).then(async (r) => {
     if (r.status === 200) cache.set(key, r.body.data, getUsagePolicy(task).cacheDurationMs, deps.now().getTime());
     const after = summarizeUsage(await deps.ledger.listDays(lastSevenDays(deps.now())), cap, deps.now(), deps.ledger.storage);
     return { ...r, body: { ...r.body, usage: { cap, remainingToday: after.remainingToday, model, tier } } };
@@ -186,55 +188,82 @@ async function log(deps: AiServerDeps, r: Pick<AiUsageRecord, "task" | "model" |
   }
 }
 
-async function callAndValidate(task: AITask, prompt: string, parsedInput: unknown, model: string, tier: AiModelTier, deps: AiServerDeps, now: Date): Promise<AiServerResult> {
+/** Up to 8 Zod issues as "path: message" (never the model text). */
+function schemaIssues(err: unknown): string[] {
+  const issues = (err as { issues?: { path?: (string | number)[]; message?: string }[] } | undefined)?.issues ?? [];
+  return issues.slice(0, 8).map((i) => `${(i.path ?? []).join(".") || "(root)"}: ${i.message ?? "invalid"}`);
+}
+
+async function callAndValidate(task: AITask, prompt: string, parsedInput: unknown, model: string, tier: AiModelTier, deps: AiServerDeps, now: Date, cap?: number): Promise<AiServerResult> {
   const visible = visibleTokenBudget(task);
   const maxTokens = isAlwaysThinkingModel(model) ? visible + 6000 : visible;
   const messages: ModelCallParams["messages"] = [{ role: "user", content: prompt }];
-  const schema = TASK_OUTPUT_SCHEMAS[task] as { safeParse: (v: unknown) => { success: boolean; data?: unknown } };
+  const schema = TASK_OUTPUT_SCHEMAS[task] as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: unknown } };
+  const policy = GROUNDING_POLICY[task];
+  const selftest = deps.selftest ? { selftest: true } : {};
 
+  // At most TWO model calls per request: the first answer, plus ONE repair (grounding OR schema).
   for (let attempt = 0; attempt < 2; attempt++) {
+    // The cap is re-checked before the repair call (a request at the boundary overshoots by at most one call).
+    if (attempt > 0 && cap !== undefined) {
+      const sum = summarizeUsage(await deps.ledger.listDays(lastSevenDays(deps.now())), cap, deps.now(), deps.ledger.storage);
+      if (sum.remainingToday <= 0) return fail(429, `Today's AI budget (${cap.toLocaleString("en-US")} tokens) is used up. Deterministic text is shown until it resets at midnight UTC.`, "budget-exhausted");
+    }
     let res: ModelCallResult;
     try {
       res = await deps.callModel({ model, maxTokens, system: AI_SYSTEM_PROMPT, messages, useFallbacks: supportsDefaultFallbacks(model) });
     } catch (err) {
-      await log(deps, { task, model, tier, cached: false, outcome: "error" }, now);
-      return fail(502, err instanceof Error ? err.message : "Unknown AI provider error.", "provider-error");
+      const errorKind = (err as { errorKind?: string } | undefined)?.errorKind ?? "provider-error";
+      const httpStatus = (err as { status?: number } | undefined)?.status;
+      await log(deps, { task, model, tier, cached: false, outcome: "error", errorKind, ...(typeof httpStatus === "number" ? { httpStatus } : {}), ...(attempt > 0 ? { repaired: true } : {}), ...selftest }, now);
+      return fail(502, err instanceof Error ? err.message : "Unknown AI provider error.", errorKind);
     }
     const usage = res.usage;
-    const base = { task, model, tier, cached: false, ...usage };
+    const base = { task, model, tier, cached: false, ...usage, ...(attempt > 0 ? { repaired: true } : {}), ...selftest };
     if (res.stopReason === "refusal") {
-      await log(deps, { ...base, outcome: "refused" }, now);
+      await log(deps, { ...base, outcome: "refused", errorKind: "refused" }, now);
       return fail(502, "The model declined this request.", "refused");
     }
     if (res.stopReason === "max_tokens") {
-      await log(deps, { ...base, outcome: "truncated" }, now);
+      await log(deps, { ...base, outcome: "truncated", errorKind: "truncated" }, now);
       return fail(502, "Model response was cut off before it finished.", "truncated");
     }
     if (!res.text) {
-      await log(deps, { ...base, outcome: "invalid-output" }, now);
+      await log(deps, { ...base, outcome: "invalid-output", errorKind: "no-text" }, now);
       return fail(502, "Model returned no text content.", "invalid-output");
     }
     let json: unknown;
     try {
       json = extractJson(res.text);
     } catch {
-      await log(deps, { ...base, outcome: "invalid-output" }, now);
+      await log(deps, { ...base, outcome: "invalid-output", errorKind: "invalid-json" }, now);
       return fail(502, "Model response was not valid JSON.", "invalid-output");
     }
     const validated = schema.safeParse(json);
     if (!validated.success) {
-      await log(deps, { ...base, outcome: "invalid-output" }, now);
+      // D2 — ONE repair attempt for a schema failure (a string over its max, a missing field).
+      if (attempt === 0) {
+        const issues = schemaIssues(validated.error);
+        await log(deps, { ...base, outcome: "schema-retry", errorKind: "schema" }, now);
+        messages.push(
+          { role: "assistant", content: res.text },
+          { role: "user", content: `Your JSON did not match the required schema:\n${issues.map((v) => `- ${v}`).join("\n") || "- (unspecified)"}\nReturn the full JSON again, fixing only these.` }
+        );
+        continue;
+      }
+      await log(deps, { ...base, outcome: "invalid-output", errorKind: "schema" }, now);
       return fail(502, "Model response failed schema validation.", "invalid-output");
     }
-    const generic = checkGrounding(validated.data, prompt);
+    const generic = checkGrounding(validated.data, prompt, policy);
     const extra = TASK_EXTRA_CHECKS[task]?.(validated.data, parsedInput, prompt) ?? [];
     const grounding = { ok: generic.ok && extra.length === 0, violations: [...generic.violations, ...extra] };
+    const violationKinds = uniqKinds(generic.kinds);
     if (grounding.ok) {
       await log(deps, { ...base, outcome: "ok" }, now);
       return { status: 200, body: { ok: true, data: validated.data, ...(attempt > 0 ? { retriedForGrounding: true } : {}) } };
     }
     if (attempt === 0) {
-      await log(deps, { ...base, outcome: "grounding-retry" }, now);
+      await log(deps, { ...base, outcome: "grounding-retry", errorKind: "grounding", ...(violationKinds.length ? { violationKinds } : {}) }, now);
       messages.push(
         { role: "assistant", content: res.text },
         {
@@ -244,8 +273,12 @@ async function callAndValidate(task: AITask, prompt: string, parsedInput: unknow
       );
       continue;
     }
-    await log(deps, { ...base, outcome: "grounding-rejected" }, now);
+    await log(deps, { ...base, outcome: "grounding-rejected", errorKind: "grounding", ...(violationKinds.length ? { violationKinds } : {}) }, now);
     return fail(422, "The AI answer referenced facts that were not supplied, so it was rejected.", "grounding-rejected", { violations: grounding.violations.slice(0, 10) });
   }
   return fail(502, "Unknown AI provider error.", "provider-error");
+}
+
+function uniqKinds(k: readonly ("key" | "date" | "number" | "person")[]): ("key" | "date" | "number" | "person")[] {
+  return Array.from(new Set(k));
 }
