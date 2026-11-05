@@ -13,6 +13,8 @@ import type { CronProgressStore } from "../cron-progress";
 import { notifyPrefsSchema, type NotifyPrefs, type NotifyPrefsStore } from "../notify-prefs";
 import type { DigestState, DigestStore } from "../notify-digest";
 import { scopedKey } from "../auth/auth-config";
+import { asBriefingRecord, type BriefingRecord, type BriefingStore } from "../briefing";
+import { asReminderIndex, type ReminderIndex, type ReminderIndexStore } from "../reminder-index";
 import type { KvLike } from "./kv";
 
 export const APP_STATE_KEY = "daily-command:app-state:v1";
@@ -20,6 +22,8 @@ export const NOTIFY_STATE_KEY = "daily-command:personal-notify-state:v1";
 export const SERVER_REPORTS_KEY = "daily-command:server-reports:v1";
 export const NOTIFY_PREFS_KEY = "daily-command:notify-prefs:v1";
 export const NOTIFY_DIGEST_KEY = "daily-command:notify-digest:v1";
+export const REMINDER_INDEX_KEY = "daily-command:reminder-index:v1";
+export const BRIEFING_KEY = "daily-command:briefing:v1";
 export const CRON_PROGRESS_KEY = "daily-command:cron-progress:v1";
 export const CRON_HEARTBEAT_KEY = "daily-command:cron-heartbeat:v1";
 export const JIRA_WRITE_LOG_KEY = "daily-command:jira-write-log:v1";
@@ -127,3 +131,9 @@ export function createKvJiraWriteLogStore(kv: KvLike, uid?: string): JiraWriteLo
     },
   };
 }
+
+// D4 — the member's ReminderIndex (parked tickets + escalation progress), scoped like the notify baseline.
+export const createKvReminderIndexStore = (kv: KvLike, uid?: string): ReminderIndexStore => blobStore<ReminderIndex>(kv, scopedKey(REMINDER_INDEX_KEY, uid), (v): v is ReminderIndex => asReminderIndex(v) !== null);
+
+// W1 — the member's briefing record (prefs + the browser's compact snapshot + delivery progress).
+export const createKvBriefingStore = (kv: KvLike, uid?: string): BriefingStore => blobStore<BriefingRecord>(kv, scopedKey(BRIEFING_KEY, uid), (v): v is BriefingRecord => asBriefingRecord(v) !== null);

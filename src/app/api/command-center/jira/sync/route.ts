@@ -25,6 +25,8 @@ import { isNotifyStoreConfigured } from "@/lib/command-center/notify-state";
 import { runCronForMembers, runCronTickWithHeartbeat } from "@/lib/command-center/jira/cron-tick";
 import { createHeartbeatStore } from "@/lib/server/heartbeat-store";
 import { createDigestStore, createNotifyPrefsStore } from "@/lib/server/notify-prefs-store";
+import { createReminderIndexStore } from "@/lib/server/reminder-index-store";
+import { createBriefingStore } from "@/lib/server/briefing-store";
 import { createCronProgressStore } from "@/lib/server/cron-progress-store";
 import { buildHeartbeat } from "@/lib/command-center/health";
 import { isAuthEnabled } from "@/lib/command-center/auth/auth-config";
@@ -372,6 +374,7 @@ export async function GET(req: Request) {
     timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(),
     ...(getJiraTimeZone() ? { timeZone: getJiraTimeZone() } : {}),
     smartNotify: { prefsStore: createNotifyPrefsStore(), digestStore: createDigestStore() },
+    ...(isNotifyStoreConfigured() ? { reminders: { store: createReminderIndexStore() }, briefing: { store: createBriefingStore(), remindersStore: createReminderIndexStore() } } : {}),
     snapshot: isServerDailyReportConfigured(process.env)
       ? { store: createServerReportStore(), now: new Date(), timezoneOffsetMinutes: getJiraTimezoneOffsetMinutes(), snapshotHourLocal: reportSnapshotHourLocal(process.env) }
       : undefined,
@@ -391,7 +394,7 @@ async function memberCron(req: Request) {
   const { plans, skipped } = await planCronMembers(directory, process.env, encryptionKey(), authSettings().allowSharedJira, (uid) => createCronProgressStore(uid).get());
   const budget = Number(process.env.CRON_RUN_BUDGET_MS);
   const result = await runCronForMembers(fetch, plans, {
-    storesFor: (uid) => ({ notifyStore: isNotifyStoreConfigured() ? createNotifyStore(uid) : undefined, reportStore: isAppStateStoreConfigured() ? createServerReportStore(uid) : undefined }),
+    storesFor: (uid) => ({ notifyStore: isNotifyStoreConfigured() ? createNotifyStore(uid) : undefined, reportStore: isAppStateStoreConfigured() ? createServerReportStore(uid) : undefined, reminderStore: isNotifyStoreConfigured() ? createReminderIndexStore(uid) : undefined, briefingStore: isNotifyStoreConfigured() ? createBriefingStore(uid) : undefined }),
     heartbeatFor: (uid) => createHeartbeatStore(uid),
     smartNotifyFor: (uid) => ({ prefsStore: createNotifyPrefsStore(uid), digestStore: createDigestStore(uid) }),
     progressFor: (uid) => createCronProgressStore(uid),

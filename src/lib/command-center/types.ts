@@ -38,6 +38,9 @@ export interface Dependency {
   ownerId?: string;
   raisedDate: string; // ISO date
   resolvedDate?: string;
+  /** W3 — the blocking issue's key and the Jira link type (additive; absent on data synced before V2.48 — the key is then read from `description`). */
+  blockerKey?: string;
+  linkType?: string;
 }
 
 export interface Requirement {
@@ -331,6 +334,8 @@ export interface SnapshotMetrics {
   /** P3.1 — which scoring model produced the score-based fields (attention/critical counts, deliveryConfidence).
    *  Absent = "v1". Trend code never compares these across models. */
   scoringModel?: "v1" | "v2";
+  /** D5 — severity classification rules used for criticalCount/attentionCount. Absent on v1 and on v2 snapshots written before V2.47. */
+  severityRules?: "v2.1";
 }
 
 export interface PriorityFactor {
@@ -433,7 +438,7 @@ export interface HealthTrend {
   gettingBetter: string[]; // deterministic fact strings, e.g. "Blocked items: 6 → 4 (-2)"
   gettingWorse: string[];
   /** P3.1 — set when the two snapshots were scored by different models: the score-based deltas are left out. */
-  modelChanged?: { from: "v1" | "v2"; to: "v1" | "v2"; note: string };
+  modelChanged?: { from: "v1" | "v2" | "v2.1"; to: "v1" | "v2" | "v2.1"; note: string };
 }
 
 /** BUILD REQUEST V1.2 §5 — Claude's trend narration. Never invents historical facts;
@@ -2070,6 +2075,21 @@ export interface TicketWorkState {
   /** DONE — "jira" when a skipped/blocked ticket was closed in Jira (A4). */
   source?: "user" | "jira";
   closedInJiraOn?: string;
+  /** D4 — reminder bookkeeping for a BLOCKED / SKIPPED / DEFERRED ticket. The date itself stays in `until` (BLOCKED: also `pingOn`). Absent on old records. */
+  reminder?: TicketReminderMeta;
+}
+
+/** D4 — see reminder-model.ts. */
+export interface TicketReminderMeta {
+  /** Snoozed: nothing is sent before this local date. */
+  snoozedUntil?: string;
+  /** Level of the LAST reminder sent (0 = first message, 1-3 = escalations). Meaningful only with lastRemindedOn. */
+  level: number;
+  /** Local date the last reminder was sent. */
+  lastRemindedOn?: string;
+  /** The user chose "No reminder (I'll find it myself)". */
+  noReminder?: boolean;
+  setAt: string;
 }
 
 export const TICKET_HISTORY_CAP = 50;

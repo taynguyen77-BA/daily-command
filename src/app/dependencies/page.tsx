@@ -5,6 +5,7 @@
 
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { EmptyState, Panel, SectionHeading } from "@/components/command-center/ui";
+import { BlastRadiusPanel } from "@/components/command-center/BlastRadiusPanel";
 import { DependencyRadarCard } from "@/components/command-center/DependencyRadarCard";
 import { workItemIdForDependency, workItemsForIds } from "@/lib/command-center/task-execution";
 
@@ -20,6 +21,8 @@ export default function DependenciesPage() {
   return (
     <div className="space-y-6 pb-16">
       <SectionHeading level="page" title="Dependency Radar" subtitle="Age, blocked work, release proximity, and linked risk — never an invented target date." />
+
+      <BlastRadiusPanel />
 
       {items.length === 0 ? (
         <Panel className="p-6 text-sm text-text3">No unresolved dependencies right now.</Panel>

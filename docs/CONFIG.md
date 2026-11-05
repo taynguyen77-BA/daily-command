@@ -47,6 +47,14 @@ Writes are limited to 30 per hour per server instance (429 beyond), and every wr
 | `AI_ALLOWED_PROJECT_KEYS` (V2.39) | Server AI data policy: comma list of Jira project keys whose ticket content `GET /api/command-center/jira/issue-context` will return. Any other project → 403 before Jira is called. The personal allow-list (Data & Settings → AI data protection) still applies on top, so AI works only for projects in both; Data & Settings shows this list read-only to a paired device. Unset = no server restriction. A value with no valid key allows nothing. |
 | `ANTHROPIC_MODEL_FAST` (C4) | Short narration tasks (explain changes, trend/outcome interpretation, end-of-day summary, daily guidance) use the cheaper default `claude-haiku-5-5` (V2.44; was `claude-haiku-4-5`, now a legacy model — set `ANTHROPIC_MODEL_FAST` to keep it). |
 
+**AI provider (D1, V2.46).** The key can also be saved from **Data & Settings → AI provider** (encrypted in KV; needs `AUTH_ENCRYPTION_KEY`, `NEXTAUTH_SECRET` or `APP_STATE_SECRET`, plus KV). Resolution: member key → org key (admin) → `ANTHROPIC_API_KEY`. Saved models override `ANTHROPIC_MODEL*`; the saved daily budget is capped by `AI_DAILY_TOKEN_CAP`.
+
+| Variable | Behavior |
+| --- | --- |
+| `AI_ALLOW_CUSTOM_BASE_URL` (D1) | `true` shows the "custom base URL" field (https only; localhost / private / link-local / metadata hosts refused). Default off. |
+| `AI_SELFTEST_MAX_TOKENS` (D3) | Token ceiling of one AI self-test run (default `60000`); the remaining tasks are reported SKIPPED. |
+| *(no variable)* Reminders (D4) / Briefing (W1) | Need KV, `PERSONAL_JIRA_ACCOUNT_ID` and a Slack webhook (or a member's webhook with sign-in) — the same prerequisites as server-side notify. With sign-in on they run for members who turned server notifications on. |
+
 Read server-only inside `src/app/api/command-center/ai/route.ts`; the browser only ever POSTs `{ task, input }` (the server builds the prompt) and receives back schema-validated JSON — it never talks to Anthropic directly and never sees the key.
 
 ### Slack (optional — real-time "mentioned me" / "assigned to me" notifications, V2.10)

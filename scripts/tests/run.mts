@@ -62,6 +62,16 @@ const FILES = [
   "./50-delivery-and-cursor.test.mts",
   "./51-delivery-guarantees.test.mts",
   "./52-consistency-exposure.test.mts",
+  "./53-forecast-old-tickets.test.mts",
+  "./54-grounding-locales.test.mts",
+  "./55-severity-calibration.test.mts",
+  "./56-ai-quality.test.mts",
+  "./57-ai-provider.test.mts",
+  "./58-ai-selftest.test.mts",
+  "./59-reminders.test.mts",
+  "./60-briefing.test.mts",
+  "./61-readiness.test.mts",
+  "./62-blast-radius.test.mts",
 ];
 
 for (const file of FILES) await import(file);

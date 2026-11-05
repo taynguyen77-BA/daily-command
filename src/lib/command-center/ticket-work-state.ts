@@ -34,6 +34,7 @@ import type {
 import { TICKET_HISTORY_CAP } from "./types";
 import { slug } from "./attention-queue";
 import { resolveWorkRelevance, type EffectiveWorkRelevance, type WorkRelevanceIndex } from "./jira/work-relevance";
+import { asReminderMeta, freshReminderMeta } from "./reminder-model";
 import { emptyTombstones, pruneTombstones, type DailyCommandState } from "./execution-state-merge";
 
 export const TICKET_WORK_STATUSES: TicketWorkStatus[] = ["TODO", "IN_PROGRESS", "BLOCKED", "SKIPPED", "DEFERRED", "DONE"];
@@ -98,6 +99,8 @@ export interface SetTicketStatusOptions {
   by?: string;
   source?: "user" | "jira";
   closedInJiraOn?: string;
+  /** D4 — the user chose "No reminder" for this parked ticket. */
+  noReminder?: boolean;
 }
 
 export interface ApplyTicketStatusResult {
@@ -137,6 +140,8 @@ export function applyTicketStatus(
     ...(pingOn ? { pingOn } : {}),
     ...(to === "DONE" && opts.source === "jira" ? { source: "jira" as const } : {}),
     ...(to === "DONE" && opts.closedInJiraOn ? { closedInJiraOn: opts.closedInJiraOn } : {}),
+    // D4 — a new parking resets the escalation ladder; "No reminder" is remembered so the ticket cannot vanish silently.
+    ...(keepsDates ? { reminder: freshReminderMeta(updatedAt, opts.noReminder === true) } : {}),
   };
   return { states: { ...states, [ticketKey]: next }, from, changed: true, rejected: false };
 }
@@ -396,6 +401,7 @@ export function asTicketWorkStates(v: unknown): Record<string, TicketWorkState> 
       ...(isIsoDate(r.pingOn) ? { pingOn: r.pingOn } : {}),
       ...(r.source === "jira" || r.source === "user" ? { source: r.source } : {}),
       ...(isIsoDate(r.closedInJiraOn) ? { closedInJiraOn: r.closedInJiraOn } : {}),
+      ...(asReminderMeta(r.reminder) ? { reminder: asReminderMeta(r.reminder)! } : {}),
     };
   }
   return out;

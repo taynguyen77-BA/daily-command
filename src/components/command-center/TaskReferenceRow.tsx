@@ -36,6 +36,7 @@ import { BA_CHECK_TYPES } from "@/lib/command-center/ai/ba-requirements";
 import { blockedAgeBusinessDays, isBlockerOverdue } from "@/lib/command-center/blocker-followup";
 import { needsFromOthersForBlockedTicket, type NeedsFromOthersRow } from "@/lib/command-center/communicate";
 import { addDays, todayLocalIso } from "@/lib/command-center/date-utils";
+import { ReminderPicker, reminderConfirmable, useReminderRequired } from "./ReminderPicker";
 import { workItemUpdatedStamp } from "@/lib/command-center/jira/updated-time";
 
 /** Re-exported for existing importers; the list itself lives in types.ts (E3). */
@@ -225,16 +226,15 @@ export function TaskReferenceRowView({
   const [revisitOn, setRevisitOn] = useState("");
   const [pingOn, setPingOn] = useState("");
   const [deferUntil, setDeferUntil] = useState("");
-  const revisitInput = (
-    <input
-      type="date"
-      value={revisitOn}
-      onChange={(e) => setRevisitOn(e.target.value)}
-      aria-label="Re-check on (optional)"
-      title="Re-check on (optional) — shows up in My Work that day; nothing changes until you act"
-      className={FIELD}
-    />
+  const [noReminder, setNoReminder] = useState(false);
+  const requireReminder = useReminderRequired();
+  // D4 — the "Remind me" row (chips + date + "No reminder"); the date lands in `revisitOn` exactly as the plain date input did.
+  const reminderFor = (status: "BLOCKED" | "SKIPPED", value: string, set: (v: string) => void) => (
+    <ReminderPicker status={status} value={value} noReminder={noReminder} onChange={(c) => { set(c.remindOn); setNoReminder(c.noReminder); }} />
   );
+  const parkOk = (value: string) => reminderConfirmable({ remindOn: value, noReminder }, requireReminder).ok;
+  // "No reminder" is remembered on the ticket (so it can surface under "Parked without a date") — after the status write.
+  const afterPark = () => { if (noReminder) commandCenterStore.updateTicketReminder(ticketKey, { kind: "stop" }); };
   const record = formatExecutionRecord(execution, now);
   const Tag = as;
   const k = execution.kind;
@@ -255,6 +255,7 @@ export function TaskReferenceRowView({
     setPingOn("");
     setBlockReason("");
     setDeferUntil("");
+    setNoReminder(false);
   };
 
   return (
@@ -346,8 +347,8 @@ export function TaskReferenceRowView({
           {picker === "skip" && (
             <>
               <SkipReasonSelect value={skipReason} onChange={setSkipReason} className={FIELD} />
-              {revisitInput}
-              <button onClick={() => { actions.onSkip(skipReason || undefined, revisitOn || undefined); close(); }} className={BTN}>
+              {reminderFor("SKIPPED", revisitOn, setRevisitOn)}
+              <button disabled={!parkOk(revisitOn)} onClick={() => { actions.onSkip(skipReason || undefined, noReminder ? undefined : revisitOn || undefined); afterPark(); close(); }} className={BTN}>
                 {L.skip}
               </button>
               <button onClick={close} className={BTN_GHOST}>
@@ -358,7 +359,7 @@ export function TaskReferenceRowView({
           {picker === "block" && (
             <>
               <BlockReasonField listId={`block-reasons-${ticketKey}`} value={blockReason} onChange={setBlockReason} className={`w-44 ${FIELD}`} />
-              {revisitInput}
+              {reminderFor("BLOCKED", revisitOn, setRevisitOn)}
               {showPingOn && (
                 <input
                   type="date"
@@ -369,7 +370,7 @@ export function TaskReferenceRowView({
                   className={FIELD}
                 />
               )}
-              <button onClick={() => { actions.onBlock(blockReason || undefined, revisitOn || undefined, pingOn || undefined); close(); }} className={BTN}>
+              <button disabled={!parkOk(revisitOn)} onClick={() => { actions.onBlock(blockReason || undefined, noReminder ? undefined : revisitOn || undefined, noReminder ? undefined : pingOn || undefined); afterPark(); close(); }} className={BTN}>
                 {L.block}
               </button>
               <button onClick={close} className={BTN_GHOST}>

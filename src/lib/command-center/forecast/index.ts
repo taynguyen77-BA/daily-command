@@ -10,6 +10,7 @@ import { agingFor, type AgingResult } from "./aging";
 import { buildLeadTimeIndex, leadTimeSamples, type LeadTimeIndex } from "./lead-time";
 import { forecastRelease, type ReleaseForecast } from "./release-forecast";
 import { slipRiskFor, type SlipRisk } from "./slip-risk";
+import { daysBetween } from "../score-core";
 import type { CommandCenterData } from "../types";
 
 export interface TicketForecast {
@@ -39,6 +40,19 @@ export function computeForecast(data: CommandCenterData, today: string): Forecas
     const aging = agingFor(w, today, est);
     const slip = slipRiskFor(w, today, est);
     if (aging || slip) byTicket.set(w.key, { ...(aging ? { aging } : {}), ...(slip ? { slip } : {}) });
+  }
+  // Context for the right-censoring limitation: open peers that are already older than each ticket.
+  const openAges = new Map<string, number[]>();
+  for (const w of data.workItems) {
+    if (w.status === "Done" || !w.createdDate) continue;
+    const k = `${w.projectId}|${String(w.type)}`;
+    const age = daysBetween(w.createdDate.slice(0, 10), today);
+    if (Number.isFinite(age)) openAges.set(k, [...(openAges.get(k) ?? []), age]);
+  }
+  for (const w of data.workItems) {
+    const f = byTicket.get(w.key);
+    if (!f?.slip) continue;
+    f.slip.openPeersOlder = (openAges.get(`${w.projectId}|${String(w.type)}`) ?? []).filter((a) => a > f.slip!.ageDays).length;
   }
   const versions = Array.from(new Set(data.workItems.flatMap(releaseVersionsOf))).sort();
   const releases = versions.map((v) => forecastRelease(data, v, data.workItems.filter((w) => releaseVersionsOf(w).includes(v)), today));

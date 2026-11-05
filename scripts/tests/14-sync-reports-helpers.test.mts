@@ -770,7 +770,7 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
   (globalThis as unknown as { React: typeof React }).React = React;
   const routes: [string, string][] = [
     ["/", "../../src/app/page.tsx"],
-    ...["my-work", "priorities", "action-plan", "attention", "risks", "dependencies", "changes", "loops", "decisions", "meeting", "reports", "weekly-review", "memory", "data-settings"].map((r): [string, string] => [`/${r}`, `../../src/app/${r}/page.tsx`]),
+    ...["my-work", "priorities", "action-plan", "attention", "risks", "dependencies", "changes", "loops", "decisions", "meeting", "reports", "weekly-review", "memory", "data-settings", "reminders", "readiness"].map((r): [string, string] => [`/${r}`, `../../src/app/${r}/page.tsx`]),
   ];
   const pages = await Promise.all(routes.map(async ([route, mod]) => [route, (await import(mod)).default as React.ComponentType] as const));
   const failures: string[] = [];
@@ -903,9 +903,9 @@ import { TODAY, makeItem, v226Actionable, v226ActiveSurfaces, v226ConfiguredStor
 
   // C2 — grouped navigation, nothing removed.
   const flat = NAV_GROUPS.flatMap((g) => g.links.map((l) => l.href));
-  const expectedRoutes = ["/", "/my-work", "/meeting", "/attention", "/loops", "/priorities", "/changes", "/risks", "/dependencies", "/action-plan", "/decisions", "/weekly-review", "/reports", "/data-settings"];
+  const expectedRoutes = ["/", "/my-work", "/meeting", "/attention", "/loops", "/priorities", "/changes", "/risks", "/dependencies", "/action-plan", "/decisions", "/weekly-review", "/reports", "/data-settings", "/reminders", "/readiness"];
   ok(group, expectedRoutes.every((r) => flat.includes(r)) && flat.length === expectedRoutes.length, "every previous nav destination is still there, exactly once");
-  ok(group, JSON.stringify(NAV_GROUPS.map((g) => g.label)) === '["Today","Work queues","Project insight","Reports","Settings"]' && JSON.stringify(NAV_GROUPS[0].links.map((l) => l.href)) === '["/my-work","/"]' && JSON.stringify(NAV_GROUPS[1].links.map((l) => l.href)) === '["/priorities","/action-plan","/attention"]' && JSON.stringify(NAV_GROUPS[3].links.map((l) => l.href)) === '["/reports","/weekly-review"]', "groups follow the morning workflow: Today (My Work → Command Center), Work queues, Project insight, Reports, Settings");
+  ok(group, JSON.stringify(NAV_GROUPS.map((g) => g.label)) === '["Today","Work queues","Project insight","Reports","Settings"]' && JSON.stringify(NAV_GROUPS[0].links.map((l) => l.href)) === '["/my-work","/reminders","/"]' && JSON.stringify(NAV_GROUPS[1].links.map((l) => l.href)) === '["/priorities","/action-plan","/attention","/readiness"]' && JSON.stringify(NAV_GROUPS[3].links.map((l) => l.href)) === '["/reports","/weekly-review"]', "groups follow the morning workflow: Today (My Work → Command Center), Work queues, Project insight, Reports, Settings");
   const navStore = new CommandCenterStore({ jiraSyncLockManager: null, stateStorage: createMemoryStateStorage(), stateChannel: null, stateFocusTargets: [] });
   navStore.getSnapshot();
   navStore.setDefaultLandingPage("/daily-review");

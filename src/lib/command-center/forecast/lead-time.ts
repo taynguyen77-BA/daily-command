@@ -17,7 +17,7 @@ export interface LeadTimeSample {
 export type LeadTimeScope = "project-type" | "project" | "global";
 
 export type LeadTimeEstimate =
-  | { status: "OK"; scope: LeadTimeScope; n: number; p50: number; p85: number; p95: number; basis: string; /** share (0-100) of the comparable tickets that took LESS time than `days` */ olderThanPct: (days: number) => number }
+  | { status: "OK"; scope: LeadTimeScope; n: number; p50: number; p85: number; p95: number; basis: string; /** share (0-100) of the comparable tickets that took LESS time than `days` */ olderThanPct: (days: number) => number; /** Survival-conditional remaining time: comparable tickets that took LONGER than `age` days, as days still to go. */ conditional: (age: number) => { n: number; p50: number; p85: number } | null }
   | { status: "UNKNOWN"; n: number; reason: "insufficient history" };
 
 /** Nearest-rank percentile of an ascending array: rank = ceil(q x n). [1..10] -> P50 5, P85 9, P95 10. */
@@ -53,6 +53,10 @@ function estimateFrom(samples: readonly number[], scope: LeadTimeScope, basis: s
     p95: percentile(sorted, 0.95),
     basis,
     olderThanPct: (days) => Math.round((100 * sorted.filter((d) => d < days).length) / sorted.length),
+    conditional: (age) => {
+      const rem = sorted.filter((d) => d > age).map((d) => d - age);
+      return rem.length === 0 ? null : { n: rem.length, p50: percentile(rem, 0.5), p85: percentile(rem, 0.85) };
+    },
   };
 }
 

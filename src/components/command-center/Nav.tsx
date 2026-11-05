@@ -8,6 +8,9 @@ import { initAppStateSync } from "@/lib/command-center/app-state-sync";
 import { initAutoJiraSync } from "@/lib/command-center/auto-sync";
 import { initAutoDailyReport } from "@/lib/command-center/auto-daily-report";
 import { initFollowUpReminders } from "@/lib/command-center/follow-up-runner";
+import { initReminderMirror } from "@/lib/command-center/reminder-sync";
+import { buildReminderCenter } from "@/lib/command-center/reminder-center";
+import { asReminderPrefs } from "@/lib/command-center/reminder-schedule";
 import { shouldRunMorningBrief } from "@/lib/command-center/morning-brief";
 import { MORNING_MODE_LANDING, shouldOpenMorningMode } from "@/lib/command-center/morning-mode";
 import { getTodayIso } from "@/lib/command-center/store";
@@ -42,6 +45,8 @@ export const NAV_GROUPS: NavGroup[] = [
       // Skipped-Deferred / Done. Absorbs Daily Review (/daily-review → New) and My Day
       // (/focus → Today); both old routes still work and redirect there.
       { href: "/my-work", label: "My Work" },
+      // D4 — parked (skipped / blocked / deferred) tickets and when each comes back. Badge = reminders due today.
+      { href: "/reminders", label: "Reminders" },
       { href: "/", label: "Command Center" },
     ],
   },
@@ -51,6 +56,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/priorities", label: "Priorities" },
       { href: "/action-plan", label: "Action Plan" },
       { href: "/attention", label: "Attention Queue" },
+      // W2 — is each ticket entering the next sprint ready to build, and what is missing?
+      { href: "/readiness", label: "Sprint Readiness" },
     ],
   },
   {
@@ -77,6 +84,12 @@ const LINKS: NavLink[] = NAV_GROUPS.flatMap((g) => g.links);
 
 /** My Work's badge: unreviewed New + re-checks due today (store.computeMyWorkBadge — the same
  *  partition the page shows). Recomputed only when the store state object changes. */
+/** D4 — reminders due today (the Reminder Center's Due now list). */
+function useRemindersBadge(): number {
+  const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
+  return useMemo(() => (state.loaded ? buildReminderCenter(state.ticketWorkStates, state.data.workItems, getTodayIso(), asReminderPrefs(state.reminderPrefs)).badge : 0), [state]);
+}
+
 function useMyWorkBadge(): number {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   return useMemo(() => (state.loaded ? commandCenterStore.computeMyWorkBadge() : 0), [state]);
@@ -236,6 +249,7 @@ export function Nav() {
   );
   const links = LINKS.filter((link) => !link.advanced || showAdvanced);
   const myWorkBadge = useMyWorkBadge();
+  const remindersBadge = useRemindersBadge();
   const morningBriefActive = useMorningBrief(pathname);
   useLandingRedirect(morningBriefActive ? "/my-work" : pathname);
   const activeLink = links.find((link) => (link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href))) ?? links[0];
@@ -271,6 +285,7 @@ export function Nav() {
   // D5 — Slack follow-up reminders for blocked tickets whose "ping on" date has come.
   useEffect(() => {
     initFollowUpReminders(commandCenterStore);
+    initReminderMirror(commandCenterStore); // D4 — mirror parked tickets to the server so the cron can remind with the app closed
   }, []);
 
   return (
@@ -315,7 +330,7 @@ export function Nav() {
               <span className="eyebrow px-3 pt-3 md:hidden 2xl:block 2xl:px-1.5 2xl:pt-0">{group.label}</span>
               {groupLinks.map((link) => {
                 const active = link.href === "/" ? pathname === "/" : pathname?.startsWith(link.href);
-                const badge = link.href === "/my-work" ? myWorkBadge : 0;
+                const badge = link.href === "/my-work" ? myWorkBadge : link.href === "/reminders" ? remindersBadge : 0;
                 return (
                   <Link
                     key={link.href}

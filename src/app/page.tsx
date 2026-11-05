@@ -36,6 +36,7 @@ import { buildBeforeYouTrustSummary } from "@/lib/command-center/trust-diagnosti
 import { USAGE_KEYS } from "@/lib/command-center/usage";
 import { AttentionSeverityBadge, FocusCategoryBadge, HeatBadge, LoopHealthBadge } from "@/components/command-center/ui";
 import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
+import { BriefingCard } from "@/components/command-center/BriefingCard";
 
 type ViewMode = "operations" | "executive";
 
@@ -91,6 +92,7 @@ export default function CommandCenterPage() {
     return (
       <div className="space-y-6 pb-16" data-command-center-compact>
         <SetupHealthBanner />
+        <BriefingCard />
         <SectionHeading level="page" title="Command Center" subtitle="Compact view — the numbers, your work, and release health." action={compactToggle} />
         <KpiStrip kpis={derived.kpis} />
         <NextBestActions compact />
@@ -103,6 +105,7 @@ export default function CommandCenterPage() {
   return (
     <div className="space-y-8 pb-16">
       <SetupHealthBanner />
+      <BriefingCard />
       <SectionHeading level="page" title="Command Center" action={compactToggle} />
 
       {state.isDemo && (

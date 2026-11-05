@@ -73,12 +73,46 @@ function setBudget(next: AiBudgetStatus) {
   budgetListeners.forEach((fn) => fn());
 }
 
+// D1/T4 — why the last AI calls failed (task + plain kind + HTTP status only: never a prompt, an input or an output).
+export interface AiCallFailure { task: AITask; errorKind: string; httpStatus?: number; at: string }
+const failureLog: AiCallFailure[] = [];
+const failureListeners = new Set<() => void>();
+export function recordAiFailure(f: Omit<AiCallFailure, "at">): void {
+  failureLog.push({ ...f, at: new Date().toISOString() });
+  if (failureLog.length > 20) failureLog.shift();
+  failureListeners.forEach((fn) => fn());
+}
+export const getAiFailures = (): readonly AiCallFailure[] => failureLog;
+export function subscribeAiFailures(fn: () => void): () => void {
+  failureListeners.add(fn);
+  return () => failureListeners.delete(fn);
+}
+export function clearAiFailures(): void {
+  failureLog.length = 0;
+  failureListeners.forEach((fn) => fn());
+}
+
+// D1 — the availability answer is cached for 60 s (a key added later is noticed without a reload) and can be refreshed on demand.
+export const AI_AVAILABILITY_TTL_MS = 60_000;
+const availabilityListeners = new Set<() => void>();
+let availabilityEpoch = 0;
+export function refreshAiAvailability(): void {
+  availabilityEpoch += 1;
+  availabilityListeners.forEach((fn) => fn());
+}
+export function subscribeAiAvailability(fn: () => void): () => void {
+  availabilityListeners.add(fn);
+  return () => availabilityListeners.delete(fn);
+}
+
 export class ClaudeProvider implements AIProvider {
   private mock = new MockAIProvider();
   private _mode: "mock" | "claude" = "mock";
   // Cache the one-time availability check so a missing server key doesn't cost a
   // failed network round-trip (and a noisy console 503) on every single AI call.
   private availability: Promise<boolean> | null = null;
+  private availabilityAt = 0;
+  private availabilityEpochSeen = -1;
 
   get mode(): "mock" | "claude" {
     return this._mode;
@@ -93,7 +127,11 @@ export class ClaudeProvider implements AIProvider {
   private async call<T extends AITask>(task: T, input: TaskInput<T>): Promise<CallResult<Output<T>>> {
     // V1.7 §27 — every path records a trace entry (never the input itself, never
     // credentials) so the local "AI Trust" diagnostic can show mode/schema/fallback status.
-    if (!this.availability) this.availability = checkClaudeAvailability();
+    if (!this.availability || Date.now() - this.availabilityAt > AI_AVAILABILITY_TTL_MS || this.availabilityEpochSeen !== availabilityEpoch) {
+      this.availability = checkClaudeAvailability();
+      this.availabilityAt = Date.now();
+      this.availabilityEpochSeen = availabilityEpoch;
+    }
     const available = await this.availability;
     if (!available) return this.fallback(task, "CLAUDE_UNAVAILABLE");
     if (lastBudget?.exhausted && lastBudget.at.slice(0, 10) === new Date().toISOString().slice(0, 10)) {
@@ -108,10 +146,11 @@ export class ClaudeProvider implements AIProvider {
         headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
         body: JSON.stringify({ task, input: parsedInput.input }),
       });
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; data?: unknown; error?: string; usage?: { cap?: number; remainingToday?: number } };
+      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; data?: unknown; error?: string; errorKind?: string; usage?: { cap?: number; remainingToday?: number } };
       if (json.usage && typeof json.usage.cap === "number" && typeof json.usage.remainingToday === "number") {
         setBudget({ cap: json.usage.cap, remainingToday: json.usage.remainingToday, exhausted: res.status === 429 || json.usage.remainingToday <= 0, message: res.status === 429 ? json.error : undefined, at: new Date().toISOString() });
       }
+      if (!res.ok || !json.ok) recordAiFailure({ task, errorKind: json.errorKind ?? `http-${res.status}`, httpStatus: res.status });
       if (res.status === 429) return this.fallback(task, "BUDGET_EXHAUSTED");
       if (res.status === 422) return this.fallback(task, "GROUNDING_REJECTED");
       // V2.1 §6/§14 — the request itself failed; Claude was never meaningfully consulted.
@@ -126,6 +165,7 @@ export class ClaudeProvider implements AIProvider {
       return { ok: true, data: parsed.data as Output<T> };
     } catch {
       // Network error, offline, server down — never let this reach the caller as a throw.
+      recordAiFailure({ task, errorKind: "network" });
       return this.fallback(task, "CALL_FAILED");
     }
   }
@@ -375,7 +415,7 @@ export async function checkAiModelStatus(): Promise<Partial<AiStatusResponse> & 
 
 export async function checkClaudeAvailability(): Promise<boolean> {
   try {
-    const res = await fetch(ENDPOINT, { method: "GET" });
+    const res = await fetch(ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
     if (!res.ok) return false;
     const json = (await res.json()) as { available?: boolean };
     return Boolean(json.available);

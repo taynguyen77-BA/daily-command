@@ -14,19 +14,30 @@ import type { NotifyPrefsStore } from "../notify-prefs";
 import type { DigestStore } from "../notify-digest";
 import { buildHeartbeat, type HeartbeatStore } from "../health";
 import { oldestWaitMinutes, type CronProgressStore } from "../cron-progress";
-import type { FetchLike } from "./http";
+import { fetchParkedTicketStatesWith, zoneOffsetMinutesAt, type FetchLike } from "./http";
+import { postToSlack } from "../../server/slack-notify";
+import { localDateOf, localMinutesOfDay } from "../notify-prefs";
+import type { ReminderIndexStore } from "../reminder-index";
+import { runRemindersTick, type RemindersTickResult } from "../reminders-tick";
+import { runBriefingTick, type BriefingStore, type BriefingTickResult } from "../briefing";
+import { fetchAssignedIssuesWith } from "./http";
+import { addDays } from "../reminder-schedule";
 import type { JiraConnectionConfig } from "./types";
 
 export interface CronTickResult {
   ok: true;
   cron: true;
   /** Which steps ran (a step whose store isn't configured is skipped, not an error). */
-  ran: { notify: boolean; snapshot: boolean };
+  ran: { notify: boolean; snapshot: boolean; reminders?: boolean; briefing?: boolean };
   warnings: string[];
   /** P2.2 — Slack messages delivered by the notify step this run (0 when it did not run). */
   notified?: number;
   /** C1 — Slack delivery state after the notify step (absent: the step did not run). */
   slack?: { undelivered: number; droppedUndelivered: number; lastSlackError?: string; undeliveredSince?: string };
+  /** D4 — the reminders step (absent: it did not run). Counters: due / sent / dropped (Done or not mine in Jira) / owed. */
+  reminders?: RemindersTickResult;
+  /** W1 — the morning briefing step (absent: it did not run). */
+  briefing?: BriefingTickResult;
 }
 
 export async function runCronTick(
@@ -44,6 +55,10 @@ export async function runCronTick(
     timeZone?: string;
     /** P3.5 — notification preferences + digest queue (omitted: the V2.41 behaviour). */
     smartNotify?: { prefsStore: NotifyPrefsStore; digestStore: DigestStore };
+    /** D4 — server-side reminders for parked tickets (the member's mirrored ReminderIndex). Needs Slack (webhookUrl / SLACK_WEBHOOK_URL) to send. */
+    reminders?: { store: ReminderIndexStore; now?: Date };
+    /** W1 — the Morning Briefing (one Slack message per workday). Needs Slack to send. */
+    briefing?: { store: BriefingStore; remindersStore?: ReminderIndexStore; now?: Date };
   }
 ): Promise<CronTickResult> {
   // A failure in either step never fails the other, and never corrupts persisted state (both
@@ -67,6 +82,57 @@ export async function runCronTick(
       warnings.push(`Server-side notify check failed: ${err instanceof Error ? err.message : "unknown error"}`);
     }
   }
+  let reminders: RemindersTickResult | undefined;
+  if (steps.reminders) {
+    try {
+      const now = steps.reminders.now ?? new Date();
+      const offset = (steps.timeZone ? zoneOffsetMinutesAt(steps.timeZone, now.getTime()) : undefined) ?? steps.timezoneOffsetMinutes ?? 0;
+      const webhook = "webhookUrl" in steps ? steps.webhookUrl : process.env.SLACK_WEBHOOK_URL;
+      const quiet = steps.smartNotify ? (await steps.smartNotify.prefsStore.get().catch(() => null))?.quietHours : undefined;
+      reminders = await runRemindersTick({
+        store: steps.reminders.store,
+        checkJira: async (keys) => {
+          const res = await fetchParkedTicketStatesWith(fetchImpl, config, accountId, keys);
+          return res.ok ? res.data : null;
+        },
+        send: webhook ? async (text) => (await postToSlack(webhook, text)).ok : null,
+        now,
+        local: { date: localDateOf(now, offset), minutes: localMinutesOfDay(now, offset) },
+        offsetMinutes: offset,
+        ...(quiet ? { quiet } : {}),
+      });
+      if (reminders.error) warnings.push(`Reminders: ${reminders.error}`);
+    } catch (err) {
+      warnings.push(`Reminders step failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    }
+  }
+  let briefing: BriefingTickResult | undefined;
+  if (steps.briefing) {
+    try {
+      const now = steps.briefing.now ?? new Date();
+      const offset = (steps.timeZone ? zoneOffsetMinutesAt(steps.timeZone, now.getTime()) : undefined) ?? steps.timezoneOffsetMinutes ?? 0;
+      const webhook = "webhookUrl" in steps ? steps.webhookUrl : process.env.SLACK_WEBHOOK_URL;
+      const quiet = steps.smartNotify ? (await steps.smartNotify.prefsStore.get().catch(() => null))?.quietHours : undefined;
+      briefing = await runBriefingTick({
+        store: steps.briefing.store,
+        remindersStore: steps.briefing.remindersStore ?? null,
+        fetchDueSoon: async (today) => {
+          const res = await fetchAssignedIssuesWith(fetchImpl, config, accountId);
+          if (!res.ok) return null;
+          const horizon = addDays(today, 2);
+          return res.data.filter((i) => i.fields.duedate && i.fields.duedate.slice(0, 10) <= horizon).slice(0, 30).map((i) => ({ key: i.key, title: (i.fields.summary ?? "").slice(0, 100), dueDate: String(i.fields.duedate).slice(0, 10) }));
+        },
+        send: webhook ? async (text) => (await postToSlack(webhook, text)).ok : null,
+        now,
+        local: { date: localDateOf(now, offset), minutes: localMinutesOfDay(now, offset) },
+        offsetMinutes: offset,
+        ...(quiet ? { quiet } : {}),
+      });
+      if (briefing.error) warnings.push(`Briefing: ${briefing.error}`);
+    } catch (err) {
+      warnings.push(`Briefing step failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    }
+  }
   if (steps.snapshot) {
     const { store, ...options } = steps.snapshot;
     try {
@@ -76,7 +142,7 @@ export async function runCronTick(
       warnings.push(`Server-side daily report failed: ${err instanceof Error ? err.message : "unknown error"}`);
     }
   }
-  return { ok: true, cron: true, ran: { notify: !!steps.notifyStore, snapshot: !!steps.snapshot }, warnings, notified, ...(slack ? { slack } : {}) };
+  return { ok: true, cron: true, ran: { notify: !!steps.notifyStore, snapshot: !!steps.snapshot, ...(steps.reminders ? { reminders: true } : {}), ...(steps.briefing ? { briefing: true } : {}) }, warnings, notified, ...(slack ? { slack } : {}), ...(reminders ? { reminders } : {}), ...(briefing ? { briefing } : {}) };
 }
 
 /** P2.2 — runCronTick plus the heartbeat: written after every run, success OR failure, and a
@@ -146,7 +212,7 @@ export async function runCronForMembers(
   fetchImpl: FetchLike,
   plans: CronMemberPlan[],
   deps: {
-    storesFor: (uid: string) => { notifyStore?: NotifyStateStore; reportStore?: ServerReportStore };
+    storesFor: (uid: string) => { notifyStore?: NotifyStateStore; reportStore?: ServerReportStore; reminderStore?: ReminderIndexStore; briefingStore?: BriefingStore };
     now: () => Date;
     snapshotHourLocal?: number;
     /** Wall-clock budget for the whole run, ms. */
@@ -175,6 +241,8 @@ export async function runCronForMembers(
       const tick = await runCronTickWithHeartbeat(fetchImpl, plan.config, plan.accountId, {
         notifyStore: plan.notify ? stores.notifyStore : undefined,
         webhookUrl: plan.webhookUrl,
+        ...(stores.reminderStore ? { reminders: { store: stores.reminderStore, now: deps.now() } } : {}),
+        ...(stores.briefingStore ? { briefing: { store: stores.briefingStore, ...(stores.reminderStore ? { remindersStore: stores.reminderStore } : {}), now: deps.now() } } : {}),
         timezoneOffsetMinutes: plan.timezoneOffsetMinutes,
         ...(plan.timeZone ? { timeZone: plan.timeZone } : {}),
         ...(deps.smartNotifyFor?.(plan.uid) ? { smartNotify: deps.smartNotifyFor(plan.uid) } : {}),

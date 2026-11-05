@@ -179,7 +179,7 @@ function detectRisksUncached(
         title: `${client} — ${item.key} likely to slip`,
         level: slip.remainingDays < 0 ? "HIGH" : "MEDIUM",
         reason: `Forecast: ${slip.explanation}`,
-        evidence: [`Due date: ${item.dueDate}`, `Forecast (n = ${slip.n}): typical remaining ${slip.expectedRemainingP50} day(s), slow case ${slip.expectedRemainingP85} day(s)`],
+        evidence: [`Due date: ${item.dueDate}`, slip.precedent === "conditional" ? `Forecast (n = ${slip.n}): typical remaining ${slip.expectedRemainingP50} day(s), slow case ${slip.expectedRemainingP85} day(s)` : `Forecast (n = ${slip.n}): ${slip.precedent === "none" ? "no precedent — older than every comparable ticket" : "thin precedent"}`],
         potentialImpact: "The committed date is unlikely to hold at the usual pace.",
         mitigation: "Re-plan, cut scope or tell the stakeholder before the date arrives.",
         confidence: 0.6,

@@ -52,7 +52,7 @@ export function buildSnapshotMetrics(
     unresolvedDependencyTeams: Array.from(new Set(unresolvedDeps.map((d) => d.dependsOnTeam))),
     meaningfulChangeCount,
     // P3.1 — recorded only for v2; a snapshot without it was scored by v1 (older snapshots included).
-    ...(scoring?.model === "v2" ? { scoringModel: "v2" as const } : {}),
+    ...(scoring?.model === "v2" ? { scoringModel: "v2" as const, severityRules: "v2.1" as const } : {}),
   };
 }
 

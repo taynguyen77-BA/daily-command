@@ -11,7 +11,7 @@
 //   Aging            10  days since the status category changed (else last update), max 10
 //   Change frequency 10  min(scope changes, 5) x 2 (as v1)
 //   Ownership         5  no owner
-// Classification thresholds are unchanged (80 / 60 / 40, score-core.ts).
+// Classification: v2.1 thresholds + hard-rule floors (classifyV2 in score-core.ts, table documented there). v1 keeps 80/60/40.
 //
 // DEVIATION from the prompt's table (Dependency 10 / Change 5): with those weights an overdue, blocked
 // P1 ticket with no dependency links and no mention tops out at 75 (HIGH), which contradicts the seed
@@ -19,7 +19,7 @@
 // are rarely modelled as dependencies) to Change frequency (v1's weight). The total stays 100.
 
 import { awaitingMeAgeBusinessDays, awaitingMePoints, REPLY_SLA_BUSINESS_DAYS } from "./awaiting-me";
-import { classify, daysBetween } from "./score-core";
+import { classifyV2, daysBetween } from "./score-core";
 import type { ScoringOptions } from "./scoring";
 import { LEARN_MAX_DELTA, learnedDeltaFor } from "./learned-adjustments";
 import type { CommandCenterData, PriorityFactor, PriorityScoreResult, WorkItem } from "./types";
@@ -117,7 +117,17 @@ export function scoreWorkItemV2(item: WorkItem, data: CommandCenterData, today: 
   const top = factors.filter((f) => f.name !== LEARNED_FACTOR).sort((a, b) => b.contribution - a.contribution).slice(0, 2).filter((f) => f.contribution > 0);
   const reasoning = top.length > 0 ? `Scored ${score}/100: ${top.map((f, i) => (i === 0 ? f.detail : lowerFirst(f.detail))).join(" and ")}.` : `Scored ${score}/100 — no significant risk factors detected.`;
 
-  return { itemId: item.id, score, classification: classify(score), factors, confidence, reasoning, ...(learnedShadow ? { learnedShadow } : {}) };
+  // D5 — severity: calibrated thresholds + hard-rule floors. The score itself is untouched.
+  const dueDays = item.dueDate ? daysBetween(today, item.dueDate) : undefined;
+  const sev = classifyV2(score, {
+    ...(known ? { priority: item.priority } : {}),
+    overdueDays: dueDays !== undefined && dueDays < 0 ? -dueDays : 0,
+    ...(dueDays !== undefined ? { daysToDue: dueDays } : {}),
+    blocked: item.blocked,
+    awaitingPastSla: !!signal && awaiting >= SCORE_V2_MAX.awaitingMe * 0.5,
+  });
+  const floorNote = sev.floor ? ` ${sev.severity}: ${sev.floor.reason}.` : "";
+  return { itemId: item.id, score, classification: sev.severity, factors, confidence, reasoning: reasoning + floorNote, ...(learnedShadow ? { learnedShadow } : {}) };
 }
 
 /** Same idea as v1's eligibilityScore: rescale against only the factors this item's data can speak to. */

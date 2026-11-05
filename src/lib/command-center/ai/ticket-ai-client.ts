@@ -62,3 +62,15 @@ export async function fetchAiTeamUsage(): Promise<AiUsageSummary | null> {
     return null;
   }
 }
+
+/** D2 — per-task outcome counts of the last 7 days (the AI health section). Counts only, never model text. */
+export async function fetchAiHealth(): Promise<import("./usage-ledger").AiTaskHealth[] | null> {
+  try {
+    const res = await fetch(USAGE_ENDPOINT, { headers: { ...pairedAuthHeader() } });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { ok?: boolean; health?: import("./usage-ledger").AiTaskHealth[] };
+    return json.ok && Array.isArray(json.health) ? json.health : null;
+  } catch {
+    return null;
+  }
+}

@@ -4,7 +4,7 @@
 
 import { NextResponse } from "next/server";
 import { checkSyncRequestAuth } from "@/lib/command-center/jira/sync-auth";
-import { getUsageLedger, lastSevenDays, recordsOfUser, resolveDailyTokenCap, resolveUserDailyTokenCap, summarizeUsage } from "@/lib/command-center/ai/usage-ledger";
+import { getUsageLedger, lastSevenDays, recordsOfUser, resolveDailyTokenCap, resolveUserDailyTokenCap, summarizeUsage, healthByTask } from "@/lib/command-center/ai/usage-ledger";
 import { principalError, requestPrincipal } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
@@ -24,7 +24,7 @@ export async function GET(req: Request) {
     const team = summarizeUsage(records, globalCap, now, ledger.storage);
     const mine = summarizeUsage(recordsOfUser(records, p.user.uid), userCap ?? globalCap, now, ledger.storage);
     const you = { ...mine, remainingToday: Math.min(mine.remainingToday, team.remainingToday) };
-    return NextResponse.json({ ok: true, usage: you, scope: "you", ...(p.user.role === "admin" ? { team } : {}) }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ ok: true, usage: you, scope: "you", health: healthByTask(recordsOfUser(records, p.user.uid)), ...(p.user.role === "admin" ? { team } : {}) }, { headers: { "Cache-Control": "no-store" } });
   }
-  return NextResponse.json({ ok: true, usage: summarizeUsage(records, resolveDailyTokenCap(process.env.AI_DAILY_TOKEN_CAP), now, ledger.storage) }, { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json({ ok: true, usage: summarizeUsage(records, resolveDailyTokenCap(process.env.AI_DAILY_TOKEN_CAP), now, ledger.storage), health: healthByTask(records) }, { headers: { "Cache-Control": "no-store" } });
 }

@@ -64,7 +64,7 @@ export async function GET(req: Request) {
       kvReachable: await kvReachable(kvConfigured),
       jiraConfigured: memberJira ?? !!getJiraConfig(),
       slackConfigured: memberSlack ?? !!process.env.SLACK_WEBHOOK_URL,
-      aiAvailable: Boolean(process.env.ANTHROPIC_API_KEY),
+      aiAvailable: (await (await import("@/lib/server/ai-provider-store")).credentialsFor(uid ? { kind: "user", uid, role: "member" } : { kind: "legacy" })).creds !== null,
       heartbeat,
       expectedMinutes: cronExpectedMinutes(process.env),
       now: new Date(),
