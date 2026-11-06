@@ -111,7 +111,7 @@ export function AiProviderPanel() {
       ...(apiKey.trim() ? { apiKey } : {}),
       models: { fast: models.fast.trim(), default: models.default.trim(), deep: models.deep.trim() },
       ...(cap !== undefined ? { dailyTokenCap: cap } : {}),
-      ...(status?.customBaseUrlAllowed && baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
+      ...(status?.customBaseUrlAllowed ? { baseUrl: baseUrl.trim() } : {}), // "" removes a saved URL
     };
     setBusy("save");
     const r = await call("PUT", ENDPOINT, body);
@@ -142,8 +142,19 @@ export function AiProviderPanel() {
 
   return (
     <Panel className="p-5" data-ai-provider-panel>
-      <SectionHeading title="AI provider" subtitle="Anthropic. The key is stored encrypted on the server, never shown again, and never sent to this browser." />
+      <SectionHeading title="AI provider" subtitle="Anthropic or a compatible gateway. The key is stored encrypted on the server, never shown again, and never sent to this browser." />
       {loadError && <p className="text-sm text-red">{loadError}</p>}
+      {!status && (
+        <div className="mt-3 space-y-2 text-sm text-text2" data-provider-unavailable>
+          <p className="rounded border border-border bg-surface2 p-2 text-xs">
+            The form below is disabled until the server status can be read. Fix: set <code>APP_STATE_SECRET</code> (single-user) or turn on team sign-in on the server, make sure a KV store is configured, redeploy, then pair this device in the <strong>Cross-Device Sync</strong> section of this page and reload.
+          </p>
+          <fieldset disabled className="space-y-2 opacity-70">
+            <label className="block"><span className="text-text">API key</span><input type="password" placeholder="sk-ant-… (or your gateway key)" className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 font-mono text-sm" aria-label="Anthropic API key (disabled)" /></label>
+            <label className="block" data-base-url-field><span className="text-text">Base URL <span className="text-text3">(optional — for a compatible gateway)</span></span><input placeholder="https://aiproviders.s3corp.com.vn/v1  (empty = api.anthropic.com)" className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 font-mono text-sm" aria-label="Custom base URL (disabled)" /></label>
+          </fieldset>
+        </div>
+      )}
       {status && (
         <div className="space-y-3 text-sm text-text2">
           <p>
@@ -165,7 +176,7 @@ export function AiProviderPanel() {
           <fieldset disabled={!status.canStoreKey || busy !== null} className="space-y-2">
             <label className="block">
               <span className="text-text">API key</span>
-              <input type="password" autoComplete="off" spellCheck={false} value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={status.last4 ? `saved …${status.last4} — paste a new key to replace it` : "sk-ant-…"} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 font-mono text-sm" aria-label="Anthropic API key (write-only)" />
+              <input type="password" autoComplete="off" spellCheck={false} value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={status.last4 ? `saved …${status.last4} — paste a new key to replace it` : "sk-ant-… (or your gateway key)"} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 font-mono text-sm" aria-label="Anthropic API key (write-only)" />
             </label>
             <div className="grid gap-2 sm:grid-cols-3">
               {(["fast", "default", "deep"] as const).map((tier) => (
@@ -184,12 +195,11 @@ export function AiProviderPanel() {
               <span className="ml-2 text-xs text-text3">server hard cap {status.hardCap.toLocaleString("en-US")}{usage ? ` · today ${usage.today.totalTokens.toLocaleString("en-US")} used` : ""}</span>
             </label>
             {usage && status.cap > 0 && <div className="h-1.5 w-48 overflow-hidden rounded bg-surface2" aria-hidden><div className="h-full bg-accent" style={{ width: `${Math.min(100, Math.round((100 * usage.today.totalTokens) / status.cap))}%` }} /></div>}
-            {status.customBaseUrlAllowed && (
-              <details>
-                <summary className="cursor-pointer text-text3">Advanced: custom base URL</summary>
-                <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…" className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 text-sm" aria-label="Custom base URL" />
-              </details>
-            )}
+            <label className="block" data-base-url-field>
+              <span className="text-text">Base URL <span className="text-text3">(optional — for a compatible gateway)</span></span>
+              <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={!status.customBaseUrlAllowed} placeholder="https://aiproviders.s3corp.com.vn/v1  (empty = api.anthropic.com)" spellCheck={false} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 font-mono text-sm disabled:opacity-60" aria-label="Custom base URL" />
+              {!status.customBaseUrlAllowed && <span className="text-xs text-text3">Not allowed for your account on this server (ask an admin, or set AI_ALLOW_CUSTOM_BASE_URL=true).</span>}
+            </label>
             <div className="flex flex-wrap gap-2">
               <button type="button" onClick={() => void save()} className="rounded bg-accent px-3 py-1 text-sm font-semibold text-white disabled:opacity-50">{busy === "save" ? "Saving…" : "Save & test"}</button>
               <button type="button" onClick={() => void runTest()} disabled={!status.configured} className="rounded border border-border px-3 py-1 text-sm disabled:opacity-50">{busy === "test" ? "Testing…" : "Test connection"}</button>

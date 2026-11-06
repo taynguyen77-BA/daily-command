@@ -51,7 +51,8 @@ Writes are limited to 30 per hour per server instance (429 beyond), and every wr
 
 | Variable | Behavior |
 | --- | --- |
-| `AI_ALLOW_CUSTOM_BASE_URL` (D1) | `true` shows the "custom base URL" field (https only; localhost / private / link-local / metadata hosts refused). Default off. |
+| `ANTHROPIC_BASE_URL` (V2.48.1) | Anthropic-compatible gateway for the env key, e.g. `https://aiproviders.s3corp.com.vn/v1` (a trailing `/v1` is stripped; https only, private hosts ignored). Default: api.anthropic.com. |
+| `AI_ALLOW_CUSTOM_BASE_URL` (D1) | Custom base URL field in Data & Settings: shown to the owner / team admins by default (V2.48.1), to members only with `true`, hidden for everyone with `false`. https only; localhost / private / link-local / metadata hosts refused. |
 | `AI_SELFTEST_MAX_TOKENS` (D3) | Token ceiling of one AI self-test run (default `60000`); the remaining tasks are reported SKIPPED. |
 | *(no variable)* Reminders (D4) / Briefing (W1) | Need KV, `PERSONAL_JIRA_ACCOUNT_ID` and a Slack webhook (or a member's webhook with sign-in) — the same prerequisites as server-side notify. With sign-in on they run for members who turned server notifications on. |
 

@@ -46,6 +46,17 @@ const ERROR_TEXT: Record<AiProviderErrorKind, string> = {
 };
 export const providerErrorText = (k: AiProviderErrorKind): string => ERROR_TEXT[k];
 
+/** For a custom gateway the Anthropic wording is misleading, so name it and quote what it said (redacted, one line, <= 160 chars). */
+export function describeProviderError(err: unknown, gateway: boolean): { kind: AiProviderErrorKind; message: string; httpStatus?: number } {
+  const m = mapProviderError(err);
+  if (!gateway) return m;
+  const e = err as { error?: { error?: { message?: unknown }; message?: unknown } | string; message?: unknown } | null;
+  const inner = typeof e?.error === "string" ? e.error : (e?.error?.error?.message ?? e?.error?.message ?? e?.message);
+  const detail = redactSecrets(String(inner ?? "")).replace(/\s+/g, " ").trim().slice(0, 160);
+  const base = m.message.replace(/Anthropic/g, "the gateway");
+  return { ...m, message: detail ? `${base} Gateway said: “${detail}”.` : base };
+}
+
 /** Never let a key out through an error string, a log line or a trace. */
 export function redactSecrets(text: string): string {
   return text.replace(/sk-ant-[A-Za-z0-9_-]+/g, "[redacted-key]");
@@ -72,13 +83,14 @@ export function mapProviderError(err: unknown): { kind: AiProviderErrorKind; mes
 // ----- validation -----
 export type Validation<T> = { ok: true; value: T } | { ok: false; field: string; message: string };
 
-export function validateApiKey(raw: unknown): Validation<string> {
+/** `custom`: a custom gateway (base URL) issues its own key format, so the Anthropic "sk-ant-" prefix is not required. */
+export function validateApiKey(raw: unknown, custom = false): Validation<string> {
   if (typeof raw !== "string") return { ok: false, field: "apiKey", message: "The API key must be text." };
   const key = raw.trim();
   if (key === "") return { ok: false, field: "apiKey", message: "Paste your Anthropic API key." };
   if (key.length > 300) return { ok: false, field: "apiKey", message: "That is too long to be an API key (max 300 characters)." };
   if (/[\s\u0000-\u001f\u007f]/.test(key)) return { ok: false, field: "apiKey", message: "The key must not contain spaces, line breaks or control characters." };
-  if (!key.startsWith("sk-ant-")) return { ok: false, field: "apiKey", message: "Anthropic keys start with “sk-ant-”." };
+  if (!custom && !key.startsWith("sk-ant-")) return { ok: false, field: "apiKey", message: "Anthropic keys start with “sk-ant-”." };
   return { ok: true, value: key };
 }
 
@@ -121,7 +133,9 @@ export function validateBaseUrl(raw: unknown, allowed: boolean): Validation<stri
   const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal") || host === "metadata.google.internal") return { ok: false, field: "baseUrl", message: "Local and internal hosts are not allowed." };
   if (PRIVATE_V4.test(host) || host === "::1" || host === "::" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host) || /^::ffff:/.test(host)) return { ok: false, field: "baseUrl", message: "Private, loopback and link-local addresses are not allowed." };
-  return { ok: true, value: u.origin + (u.pathname === "/" ? "" : u.pathname.replace(/\/$/, "")) };
+  // The Anthropic SDK appends /v1/messages itself, so a pasted ".../v1" (the form gateways document) would call /v1/v1/messages.
+  const path = u.pathname.replace(/\/+$/, "").replace(/\/v1$/i, "");
+  return { ok: true, value: u.origin + path };
 }
 
 // ----- key sealing -----
@@ -152,7 +166,7 @@ export interface ResolvedCredentials {
   cap?: number;
   baseUrl?: string;
 }
-export interface ProviderEnv extends KeyEnv, AiModelEnv { ANTHROPIC_API_KEY?: string; AI_DAILY_TOKEN_CAP?: string; AI_ALLOW_CUSTOM_BASE_URL?: string }
+export interface ProviderEnv extends KeyEnv, AiModelEnv { ANTHROPIC_API_KEY?: string; ANTHROPIC_BASE_URL?: string; AI_DAILY_TOKEN_CAP?: string; AI_ALLOW_CUSTOM_BASE_URL?: string }
 
 export interface ProviderStore {
   get(id: string): Promise<AiProviderRecord | null>;
@@ -176,7 +190,11 @@ export async function resolveCredentials(args: { store: ProviderStore | null; en
     return { creds: { apiKey: key, source: scope.kind, fingerprint: rec.fingerprint, models: rec.models ?? {}, ...(rec.dailyTokenCap !== undefined ? { cap: rec.dailyTokenCap } : {}), ...(rec.baseUrl ? { baseUrl: rec.baseUrl } : {}) }, skipped };
   }
   const envKey = args.env.ANTHROPIC_API_KEY?.trim();
-  if (envKey) return { creds: { apiKey: envKey, source: "env", fingerprint: fingerprintOf(envKey), models: {} }, skipped };
+  if (envKey) {
+    // ANTHROPIC_BASE_URL is operator-set, so it needs no AI_ALLOW_CUSTOM_BASE_URL — but it gets the same https / SSRF checks.
+    const bu = validateBaseUrl(args.env.ANTHROPIC_BASE_URL?.trim(), true);
+    return { creds: { apiKey: envKey, source: "env", fingerprint: fingerprintOf(envKey), models: {}, ...(bu.ok && bu.value ? { baseUrl: bu.value } : {}) }, skipped };
+  }
   return { creds: null, skipped };
 }
 

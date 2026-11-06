@@ -4,7 +4,7 @@
 
 import { aiModelStatus, type AiModelTier } from "./model-config";
 import {
-  aiEncryptionKey, effectiveCap, mapProviderError, modelEnvFor, providerErrorText, redactSecrets, resolveCredentials, scopeId, scopesFor, sealRecord,
+  aiEncryptionKey, effectiveCap, mapProviderError, describeProviderError, modelEnvFor, providerErrorText, redactSecrets, resolveCredentials, scopeId, scopesFor, sealRecord,
   validateApiKey, validateBaseUrl, validateCap, validateModels,
   type AiProviderErrorKind, type AiProviderRecord, type AuditEntry, type ProviderEnv, type ProviderScope, type ProviderStore,
 } from "./provider-config";
@@ -47,7 +47,13 @@ const TESTS_PER_HOUR = 20;
 const MAX_AUDIT = 100;
 const bad = (status: number, error: string, extra: Record<string, unknown> = {}): HandlerResult => ({ status, body: { ok: false, error: redactSecrets(error), ...extra } });
 const who = (p: ProviderPrincipal) => (p.kind === "user" ? p.uid : "paired-device");
-const customBaseUrlAllowed = (env: ProviderEnv) => env.AI_ALLOW_CUSTOM_BASE_URL === "true";
+/** Custom base URL: the owner (single-user) and team admins may always set one; members need AI_ALLOW_CUSTOM_BASE_URL=true.
+ *  AI_ALLOW_CUSTOM_BASE_URL=false switches it off for everyone. Every URL still passes the https / no-private-host checks. */
+const customBaseUrlAllowed = (env: ProviderEnv, p?: ProviderPrincipal) => {
+  const f = env.AI_ALLOW_CUSTOM_BASE_URL?.trim().toLowerCase();
+  if (f === "false") return false;
+  return f === "true" || !p || p.kind === "legacy" || p.role === "admin";
+};
 
 async function audit(ctx: ProviderCtx, action: AuditEntry["action"], outcome: string, scope: string): Promise<void> {
   try { await ctx.store?.appendAudit({ at: ctx.now().toISOString(), who: who(ctx.principal), action, outcome, scope }); } catch { /* the audit trail must never fail a request */ }
@@ -86,8 +92,8 @@ export async function getProviderStatus(ctx: ProviderCtx): Promise<HandlerResult
       canStoreKey: Boolean(enc && ctx.store),
       storeAvailable: ctx.store !== null,
       ...(enc ? {} : { missing: "AUTH_ENCRYPTION_KEY, NEXTAUTH_SECRET or APP_STATE_SECRET" }),
-      customBaseUrlAllowed: customBaseUrlAllowed(ctx.env),
-      baseUrl: rec?.baseUrl ?? null,
+      customBaseUrlAllowed: customBaseUrlAllowed(ctx.env, ctx.principal),
+      baseUrl: creds?.baseUrl ?? rec?.baseUrl ?? null,
       models: aiModelStatus(modelEnvFor(ctx.env, creds)),
       savedModels: rec?.models ?? {},
       cap: effectiveCap(ctx.env, creds),
@@ -111,11 +117,12 @@ export async function putProvider(ctx: ProviderCtx, body: unknown): Promise<Hand
   if (!models.ok) return bad(400, models.message, { field: models.field });
   const cap = validateCap(b.dailyTokenCap, hard);
   if (!cap.ok) return bad(400, cap.message, { field: cap.field });
-  const baseUrl = validateBaseUrl(b.baseUrl, customBaseUrlAllowed(ctx.env));
+  const clearBaseUrl = b.baseUrl === "" && customBaseUrlAllowed(ctx.env, ctx.principal); // an empty field removes a saved URL
+  const baseUrl = validateBaseUrl(b.baseUrl, customBaseUrlAllowed(ctx.env, ctx.principal));
   if (!baseUrl.ok) return bad(400, baseUrl.message, { field: baseUrl.field });
   let key: string | undefined;
   if (b.apiKey !== undefined) {
-    const k = validateApiKey(b.apiKey);
+    const k = validateApiKey(b.apiKey, true); // format only; the sk-ant- prefix is enforced below unless a gateway URL is in play
     if (!k.ok) return bad(400, k.message, { field: k.field });
     key = k.value;
   }
@@ -126,11 +133,14 @@ export async function putProvider(ctx: ProviderCtx, body: unknown): Promise<Hand
 
   try {
     const existing = await ctx.store.get(id);
-    if (!key && !existing) return bad(400, "Paste your Anthropic API key first.", { field: "apiKey" });
+    if (!key && !existing) return bad(400, "Paste your API key first.", { field: "apiKey" });
+    const effectiveBase = clearBaseUrl ? undefined : (baseUrl.value ?? existing?.baseUrl);
+    if (key && !effectiveBase && !key.startsWith("sk-ant-")) return bad(400, "Anthropic keys start with “sk-ant-”. For a custom gateway, enter its base URL too.", { field: "apiKey" });
     const now = ctx.now();
     const common = { savedBy: who(ctx.principal), ...(Object.keys(models.value).length ? { models: models.value } : {}), ...(cap.value !== undefined ? { dailyTokenCap: cap.value } : {}), ...(baseUrl.value ? { baseUrl: baseUrl.value } : {}) };
     // A new key overwrites the old sealed value and resets verification; settings-only changes keep the stored key.
     const rec: AiProviderRecord = key ? sealRecord(key, enc, scope, common, now) : { ...existing!, ...common, savedAt: now.toISOString() };
+    if (clearBaseUrl) delete rec.baseUrl;
     await ctx.store.put(id, rec);
     await audit(ctx, "save", key ? "key saved" : "settings saved", id);
     return { status: 200, body: { ok: true, last4: rec.last4, fingerprint: rec.fingerprint, savedAt: rec.savedAt, scope: scope.kind } };
@@ -172,19 +182,21 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
   try {
     available = await ctx.sdk.listModels(creds.apiKey, creds.baseUrl);
   } catch (err) {
-    const m = mapProviderError(err);
+    const m = describeProviderError(err, Boolean(creds.baseUrl));
     listError = { kind: m.kind, message: m.message };
   }
+  // A gateway may not implement models.list() or may use its own ids: never let that block the real one-call check.
+  const gateway = Boolean(creds.baseUrl);
   for (const tier of ["fast", "default", "deep"] as const) {
     const model = tierModel[tier];
-    if (listError) { tiers[tier] = { ok: false, model, kind: listError.kind, message: listError.message }; continue; }
-    if (available && !available.includes(model)) { tiers[tier] = { ok: false, model, kind: "model-not-found", message: providerErrorText("model-not-found") }; continue; }
+    if (listError && !gateway) { tiers[tier] = { ok: false, model, kind: listError.kind, message: listError.message }; continue; }
+    if (available && !gateway && !available.includes(model)) { tiers[tier] = { ok: false, model, kind: "model-not-found", message: providerErrorText("model-not-found") }; continue; }
     const t0 = ctx.now().getTime();
     try {
       await ctx.sdk.ping(creds.apiKey, model, creds.baseUrl);
       tiers[tier] = { ok: true, model, ms: Math.max(0, ctx.now().getTime() - t0) };
     } catch (err) {
-      const m = mapProviderError(err);
+      const m = describeProviderError(err, gateway);
       tiers[tier] = { ok: false, model, kind: m.kind, message: m.message };
     }
   }
@@ -204,7 +216,7 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
     } catch { /* best effort */ }
   }
   await audit(ctx, "test", allOk ? "all tiers ok" : `failed: ${Object.values(tiers).filter((t) => !t.ok).map((t) => t.kind).join(",")}`, creds.source);
-  return { status: 200, body: { ok: allOk, source: creds.source, tiers, models: (available ?? []).slice(0, 200), ...(listError ? { listError } : {}) } };
+  return { status: 200, body: { ok: allOk, source: creds.source, tiers, models: (available ?? []).slice(0, 200), ...(listError ? { listError } : {}), ...(creds.baseUrl ? { gateway: creds.baseUrl } : {}) } };
 }
 
 export async function listProviderAudit(ctx: ProviderCtx): Promise<AuditEntry[]> {

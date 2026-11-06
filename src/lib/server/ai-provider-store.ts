@@ -33,6 +33,7 @@ export function providerStore(): ProviderStore | null {
 
 export const providerEnv = (): ProviderEnv => ({
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL,
   ANTHROPIC_MODEL_FAST: process.env.ANTHROPIC_MODEL_FAST,
   ANTHROPIC_MODEL_DEEP: process.env.ANTHROPIC_MODEL_DEEP,
@@ -47,11 +48,14 @@ export const sharedLimiter = new RateLimiter();
 
 /** Anthropic clients are cached per key fingerprint for <= 60 s (a rotated key is picked up within a minute). */
 const clients = new Map<string, { client: Anthropic; at: number }>();
+/** Auth for a custom gateway: send the key both as x-api-key and as a Bearer token (gateways accept one or the other; Anthropic itself only gets x-api-key). */
+export const clientOptions = (apiKey: string, timeout: number, baseUrl?: string) => ({ apiKey, timeout, ...(baseUrl ? { baseURL: baseUrl, authToken: apiKey } : {}) });
+
 export function anthropicClient(creds: Pick<ResolvedCredentials, "apiKey" | "fingerprint" | "baseUrl">, timeout = 55_000): Anthropic {
   const id = `${creds.fingerprint}|${creds.baseUrl ?? ""}|${timeout}`;
   const hit = clients.get(id);
   if (hit && Date.now() - hit.at < 60_000) return hit.client;
-  const client = new Anthropic({ apiKey: creds.apiKey, timeout, ...(creds.baseUrl ? { baseURL: creds.baseUrl } : {}) });
+  const client = new Anthropic(clientOptions(creds.apiKey, timeout, creds.baseUrl));
   clients.set(id, { client, at: Date.now() });
   if (clients.size > 20) clients.delete(clients.keys().next().value as string);
   return client;
@@ -60,7 +64,7 @@ export function anthropicClient(creds: Pick<ResolvedCredentials, "apiKey" | "fin
 /** The real SDK behind the test route. Errors keep their HTTP status so mapProviderError can name the cause. */
 export const anthropicProviderSdk: ProviderSdk = {
   async listModels(apiKey, baseUrl) {
-    const client = new Anthropic({ apiKey, timeout: 15_000, ...(baseUrl ? { baseURL: baseUrl } : {}) });
+    const client = new Anthropic(clientOptions(apiKey, 15_000, baseUrl));
     const ids: string[] = [];
     for await (const m of client.models.list({ limit: 100 })) {
       ids.push(m.id);
@@ -69,7 +73,7 @@ export const anthropicProviderSdk: ProviderSdk = {
     return ids;
   },
   async ping(apiKey, model, baseUrl) {
-    const client = new Anthropic({ apiKey, timeout: 30_000, ...(baseUrl ? { baseURL: baseUrl } : {}) });
+    const client = new Anthropic(clientOptions(apiKey, 30_000, baseUrl));
     await client.messages.create({ model, max_tokens: 64, messages: [{ role: "user", content: "Reply with the single word: ok" }] });
   },
 };

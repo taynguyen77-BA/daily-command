@@ -163,7 +163,7 @@ const rec = (r: { status: number; body: Record<string, unknown> }) => { everythi
   for (let i = 0; i < 21; i++) ts = (await testProvider(t)).status;
   ok(group, ts === 429, "the 21st test within an hour -> 429");
   const c = ctxOf();
-  ok(group, (await putProvider(c, { apiKey: "nope" })).status === 400 && (await putProvider(c, { apiKey: KEY, dailyTokenCap: -5 })).status === 400 && (await putProvider(c, { apiKey: KEY, baseUrl: "https://x.example.com" })).status === 400, "validation errors -> 400 with a field message, nothing stored");
+  ok(group, (await putProvider(c, { apiKey: "nope" })).status === 400 && (await putProvider(c, { apiKey: KEY, dailyTokenCap: -5 })).status === 400 && (await putProvider(c, { apiKey: KEY, baseUrl: "http://x.example.com" })).status === 400, "validation errors -> 400 with a field message, nothing stored");
   ok(group, (c.store as ReturnType<typeof memStore>).recs.size === 0, "nothing is stored after validation failures");
   ok(group, effectiveCap({ ...ENV, AI_DAILY_TOKEN_CAP: "1000" }, { apiKey: "k", source: "global", fingerprint: "f", models: {}, cap: 5000 }) === 1000 && effectiveCap({ ...ENV, AI_DAILY_TOKEN_CAP: "1000" }, { apiKey: "k", source: "global", fingerprint: "f", models: {}, cap: 300 }) === 300, "effective cap = min(record cap, hard cap)");
 }
