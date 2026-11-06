@@ -5,7 +5,7 @@
 import { resolveTierModels } from "./model-resolution";
 import { aiModelStatus, type AiModelTier } from "./model-config";
 import {
-  aiEncryptionKey, effectiveCap, mapProviderError, describeProviderError, modelEnvFor, providerErrorText, redactSecrets, resolveCredentials, scopeId, scopesFor, sealRecord,
+  aiEncryptionKey, effectiveCap, mapProviderError, describeProviderError, AUTH_MODES, type AuthMode, modelEnvFor, providerErrorText, redactSecrets, resolveCredentials, scopeId, scopesFor, sealRecord,
   validateApiKey, validateBaseUrl, validateCap, validateModels,
   type AiProviderErrorKind, type AiProviderRecord, type AuditEntry, type ProviderEnv, type ProviderScope, type ProviderStore,
 } from "./provider-config";
@@ -13,9 +13,9 @@ import { resolveDailyTokenCap } from "./usage-ledger";
 
 export interface ProviderSdk {
   /** Every model id the key can use. Costs no tokens. */
-  listModels(apiKey: string, baseUrl?: string): Promise<string[]>;
+  listModels(apiKey: string, baseUrl?: string, mode?: AuthMode): Promise<string[]>;
   /** One tiny messages call (max_tokens 64): HTTP success is the verdict (stop_reason max_tokens is fine). */
-  ping(apiKey: string, model: string, baseUrl?: string): Promise<void>;
+  ping(apiKey: string, model: string, baseUrl?: string, mode?: AuthMode): Promise<void>;
 }
 
 export type ProviderPrincipal = { kind: "legacy" } | { kind: "user"; uid: string; role: "admin" | "member" };
@@ -174,6 +174,22 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
   const scopes = scopesFor(ctx.principal);
   const { creds } = await resolveCredentials({ store: ctx.store, env: ctx.env, scopes });
   if (!creds) return bad(409, "Configure a key first.", { errorKind: "no-key" });
+  // Gateway auth: a 401 retries the other header styles; the first one that works is remembered (and persisted) for real AI calls.
+  const gw = Boolean(creds.baseUrl);
+  let mode: AuthMode = creds.authMode ?? "both";
+  const triedModes = new Set<AuthMode>();
+  const withAuth = async <T,>(run: (m: AuthMode) => Promise<T>): Promise<T> => {
+    const order = [mode, ...AUTH_MODES.filter((m) => m !== mode)];
+    let last: unknown;
+    for (const m of gw ? order : [mode]) {
+      triedModes.add(m);
+      try { const r = await run(m); mode = m; return r; } catch (err) {
+        last = err;
+        if ((err as { status?: unknown } | null)?.status !== 401) throw err;
+      }
+    }
+    throw last;
+  };
   const modelEnv = modelEnvFor(ctx.env, creds);
   const status = aiModelStatus(modelEnv);
   const tierModel: Record<AiModelTier, string> = { fast: status.fastModel, default: status.model, deep: status.deepModel };
@@ -181,7 +197,7 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
   let available: string[] | null = null;
   let listError: { kind: AiProviderErrorKind; message: string } | null = null;
   try {
-    available = await ctx.sdk.listModels(creds.apiKey, creds.baseUrl);
+    available = await withAuth((m) => ctx.sdk.listModels(creds.apiKey, creds.baseUrl, m));
   } catch (err) {
     const m = describeProviderError(err, Boolean(creds.baseUrl));
     listError = { kind: m.kind, message: m.message };
@@ -201,12 +217,14 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
     if (available && !gateway && !available.includes(model)) { tiers[tier] = { ok: false, model, kind: "model-not-found", message: providerErrorText("model-not-found") }; continue; }
     const t0 = ctx.now().getTime();
     try {
-      await ctx.sdk.ping(creds.apiKey, model, creds.baseUrl);
+      await withAuth((m) => ctx.sdk.ping(creds.apiKey, model, creds.baseUrl, m));
       tiers[tier] = { ok: true, model, ms: Math.max(0, ctx.now().getTime() - t0) };
     } catch (err) {
       const m = describeProviderError(err, gateway);
       const notListed = gateway && available && available.length > 0 && !available.includes(model);
-      tiers[tier] = { ok: false, model, kind: m.kind, message: notListed ? `${m.message}${listedHint}` : m.message };
+      const allRejected = gw && m.kind === "invalid-key" && triedModes.size === AUTH_MODES.length;
+      const extra = allRejected ? " The gateway rejected the key as x-api-key, as a Bearer token and as both — so the key itself is not accepted (typo, revoked, expired, or issued for another gateway)." : "";
+      tiers[tier] = { ok: false, model, kind: m.kind, message: `${m.message}${extra}${notListed ? listedHint : ""}` };
     }
   }
   const allOk = Object.values(tiers).every((t) => t.ok);
@@ -218,6 +236,7 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
       if (rec) {
         const firstErr = Object.values(tiers).find((t) => !t.ok);
         const next: AiProviderRecord = { ...rec };
+        if (gw && allOk && mode !== (rec.authMode ?? "both")) next.authMode = mode;
         if (Object.keys(auto).length) next.models = { ...(rec.models ?? {}), ...auto }; // remember what followed the gateway's list
         if (allOk) { next.verifiedAt = ctx.now().toISOString(); delete next.lastError; }
         else { delete next.verifiedAt; next.lastError = { kind: firstErr!.kind ?? "unknown", message: firstErr!.message ?? "", at: ctx.now().toISOString() }; }
@@ -226,7 +245,7 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
     } catch { /* best effort */ }
   }
   await audit(ctx, "test", allOk ? "all tiers ok" : `failed: ${Object.values(tiers).filter((t) => !t.ok).map((t) => t.kind).join(",")}`, creds.source);
-  return { status: 200, body: { ok: allOk, source: creds.source, tiers, models: (available ?? []).slice(0, 200), ...(listError ? { listError } : {}), ...(creds.baseUrl ? { gateway: creds.baseUrl } : {}), ...(Object.keys(auto).length ? { autoSelected: auto } : {}) } };
+  return { status: 200, body: { ok: allOk, source: creds.source, tiers, models: (available ?? []).slice(0, 200), ...(listError ? { listError } : {}), ...(creds.baseUrl ? { gateway: creds.baseUrl } : {}), ...(Object.keys(auto).length ? { autoSelected: auto } : {}), ...(gw ? { authMode: mode } : {}) } };
 }
 
 export async function listProviderAudit(ctx: ProviderCtx): Promise<AuditEntry[]> {

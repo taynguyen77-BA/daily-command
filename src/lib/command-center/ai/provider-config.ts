@@ -26,7 +26,13 @@ export interface AiProviderRecord {
   models?: Partial<Record<AiModelTier, string>>;
   dailyTokenCap?: number;
   baseUrl?: string;
+  /** How a custom gateway wants the key (found by the connection test). Absent = send both. */
+  authMode?: AuthMode;
 }
+
+/** x-api-key header only, `Authorization: Bearer` only, or both (default). */
+export type AuthMode = "both" | "api-key" | "bearer";
+export const AUTH_MODES: AuthMode[] = ["both", "api-key", "bearer"];
 
 export type AiProviderErrorKind = "invalid-key" | "permission" | "model-not-found" | "rate-limited" | "provider-down" | "timeout" | "network" | "unreadable-stored-key" | "kv-unavailable" | "no-key-material" | "refused" | "unknown";
 
@@ -86,7 +92,8 @@ export type Validation<T> = { ok: true; value: T } | { ok: false; field: string;
 /** `custom`: a custom gateway (base URL) issues its own key format, so the Anthropic "sk-ant-" prefix is not required. */
 export function validateApiKey(raw: unknown, custom = false): Validation<string> {
   if (typeof raw !== "string") return { ok: false, field: "apiKey", message: "The API key must be text." };
-  const key = raw.trim();
+  // Tolerate what people copy from docs: surrounding quotes and a leading "Bearer ".
+  const key = raw.trim().replace(/^["'`]+|["'`]+$/g, "").replace(/^bearer\s+/i, "").trim();
   if (key === "") return { ok: false, field: "apiKey", message: "Paste your Anthropic API key." };
   if (key.length > 300) return { ok: false, field: "apiKey", message: "That is too long to be an API key (max 300 characters)." };
   if (/[\s\u0000-\u001f\u007f]/.test(key)) return { ok: false, field: "apiKey", message: "The key must not contain spaces, line breaks or control characters." };
@@ -165,6 +172,7 @@ export interface ResolvedCredentials {
   models: Partial<Record<AiModelTier, string>>;
   cap?: number;
   baseUrl?: string;
+  authMode?: AuthMode;
 }
 export interface ProviderEnv extends KeyEnv, AiModelEnv { ANTHROPIC_API_KEY?: string; ANTHROPIC_BASE_URL?: string; AI_DAILY_TOKEN_CAP?: string; AI_ALLOW_CUSTOM_BASE_URL?: string }
 
@@ -187,7 +195,7 @@ export async function resolveCredentials(args: { store: ProviderStore | null; en
     if (!rec) continue;
     const key = openRecord(rec, enc, scope);
     if (!key) { skipped.push({ source: scope.kind, kind: "unreadable-stored-key" }); continue; }
-    return { creds: { apiKey: key, source: scope.kind, fingerprint: rec.fingerprint, models: rec.models ?? {}, ...(rec.dailyTokenCap !== undefined ? { cap: rec.dailyTokenCap } : {}), ...(rec.baseUrl ? { baseUrl: rec.baseUrl } : {}) }, skipped };
+    return { creds: { apiKey: key, source: scope.kind, fingerprint: rec.fingerprint, models: rec.models ?? {}, ...(rec.dailyTokenCap !== undefined ? { cap: rec.dailyTokenCap } : {}), ...(rec.baseUrl ? { baseUrl: rec.baseUrl } : {}), ...(rec.authMode ? { authMode: rec.authMode } : {}) }, skipped };
   }
   const envKey = args.env.ANTHROPIC_API_KEY?.trim();
   if (envKey) {

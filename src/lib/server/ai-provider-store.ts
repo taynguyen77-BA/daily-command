@@ -5,7 +5,7 @@ import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { directoryKv } from "./kv-client";
 import type { KvLike } from "../command-center/kv/kv";
-import { mapProviderError, redactSecrets, resolveCredentials, scopesFor, type AiProviderRecord, type AuditEntry, type ProviderEnv, type ProviderStore, type ResolvedCredentials } from "../command-center/ai/provider-config";
+import { mapProviderError, redactSecrets, resolveCredentials, scopesFor, type AiProviderRecord, type AuthMode, type AuditEntry, type ProviderEnv, type ProviderStore, type ResolvedCredentials } from "../command-center/ai/provider-config";
 import { RateLimiter, type ProviderPrincipal, type ProviderSdk } from "../command-center/ai/provider-handlers";
 
 export const AI_PROVIDER_KEY = (id: string) => `daily-command:ai-provider:v1:${id}`;
@@ -48,14 +48,18 @@ export const sharedLimiter = new RateLimiter();
 
 /** Anthropic clients are cached per key fingerprint for <= 60 s (a rotated key is picked up within a minute). */
 const clients = new Map<string, { client: Anthropic; at: number }>();
-/** Auth for a custom gateway: send the key both as x-api-key and as a Bearer token (gateways accept one or the other; Anthropic itself only gets x-api-key). */
-export const clientOptions = (apiKey: string, timeout: number, baseUrl?: string) => ({ apiKey, timeout, ...(baseUrl ? { baseURL: baseUrl, authToken: apiKey } : {}) });
+/** Auth for a custom gateway: by default the key goes out both as x-api-key and as a Bearer token; the connection test can narrow it to one.
+ *  Explicit nulls stop the SDK from silently picking up ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the server env. */
+export const clientOptions = (apiKey: string, timeout: number, baseUrl?: string, mode: AuthMode = "both") => {
+  if (!baseUrl) return { apiKey, timeout };
+  return { baseURL: baseUrl, timeout, apiKey: mode === "bearer" ? null : apiKey, authToken: mode === "api-key" ? null : apiKey };
+};
 
-export function anthropicClient(creds: Pick<ResolvedCredentials, "apiKey" | "fingerprint" | "baseUrl">, timeout = 55_000): Anthropic {
-  const id = `${creds.fingerprint}|${creds.baseUrl ?? ""}|${timeout}`;
+export function anthropicClient(creds: Pick<ResolvedCredentials, "apiKey" | "fingerprint" | "baseUrl" | "authMode">, timeout = 55_000): Anthropic {
+  const id = `${creds.fingerprint}|${creds.baseUrl ?? ""}|${creds.authMode ?? ""}|${timeout}`;
   const hit = clients.get(id);
   if (hit && Date.now() - hit.at < 60_000) return hit.client;
-  const client = new Anthropic(clientOptions(creds.apiKey, timeout, creds.baseUrl));
+  const client = new Anthropic(clientOptions(creds.apiKey, timeout, creds.baseUrl, creds.authMode));
   clients.set(id, { client, at: Date.now() });
   if (clients.size > 20) clients.delete(clients.keys().next().value as string);
   return client;
@@ -63,8 +67,8 @@ export function anthropicClient(creds: Pick<ResolvedCredentials, "apiKey" | "fin
 
 /** The real SDK behind the test route. Errors keep their HTTP status so mapProviderError can name the cause. */
 export const anthropicProviderSdk: ProviderSdk = {
-  async listModels(apiKey, baseUrl) {
-    const client = new Anthropic(clientOptions(apiKey, 15_000, baseUrl));
+  async listModels(apiKey, baseUrl, mode) {
+    const client = new Anthropic(clientOptions(apiKey, 15_000, baseUrl, mode));
     const ids: string[] = [];
     for await (const m of client.models.list({ limit: 100 })) {
       ids.push(m.id);
@@ -72,8 +76,8 @@ export const anthropicProviderSdk: ProviderSdk = {
     }
     return ids;
   },
-  async ping(apiKey, model, baseUrl) {
-    const client = new Anthropic(clientOptions(apiKey, 30_000, baseUrl));
+  async ping(apiKey, model, baseUrl, mode) {
+    const client = new Anthropic(clientOptions(apiKey, 30_000, baseUrl, mode));
     await client.messages.create({ model, max_tokens: 64, messages: [{ role: "user", content: "Reply with the single word: ok" }] });
   },
 };

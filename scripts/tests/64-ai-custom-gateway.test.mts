@@ -90,3 +90,43 @@ import { RateLimiter, getProviderStatus, putProvider, testProvider, type Provide
   const t2 = await testProvider({ ...c, limiter: new RateLimiter(), sdk: { ...sdk, listModels: async () => list.slice(0, 4) } });
   ok(group, t2.body.ok === true && t2.body.autoSelected === undefined, "second test: nothing left to auto-select");
 }
+
+{
+  const group = "V2.48.3 gateway auth style";
+  const mk = (accepts: (m: string) => boolean) => {
+    const recs = new Map<string, AiProviderRecord>();
+    const store: ProviderStore = { get: async (id) => (recs.has(id) ? JSON.parse(JSON.stringify(recs.get(id))) : null), put: async (id, x) => void recs.set(id, JSON.parse(JSON.stringify(x))), del: async (id) => void recs.delete(id), appendAudit: async () => {}, listAudit: async () => [] };
+    const seen: string[] = [];
+    const rej = () => Object.assign(new Error('401 {"error":"API key required for remote API access"}'), { status: 401, error: { error: "API key required for remote API access" } });
+    const sdk: ProviderSdk = {
+      listModels: async (_k, _b, m) => { seen.push(`list:${m}`); if (!accepts(m ?? "both")) throw rej(); return ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1"]; },
+      ping: async (_k, _m, _b, m) => { seen.push(`ping:${m}`); if (!accepts(m ?? "both")) throw rej(); },
+    };
+    const c: ProviderCtx = { store, env: { APP_STATE_SECRET: "paired-secret-for-tests-0123456789" }, sdk, now: () => new Date("2026-11-06T09:00:00Z"), principal: { kind: "legacy" }, limiter: new RateLimiter() };
+    return { c, seen };
+  };
+  const GW = "https://aiproviders.s3corp.com.vn/v1";
+
+  const a = mk((m) => m === "bearer");
+  await putProvider(a.c, { apiKey: "gw-key-0123456789", baseUrl: GW });
+  const ta = await testProvider(a.c);
+  ok(group, ta.body.ok === true && ta.body.authMode === "bearer", "a gateway that only takes Bearer: the 401 on 'both' is retried and Bearer found");
+  const sa = await getProviderStatus(a.c);
+  const credsA = await resolveCredentials({ store: a.c.store, env: a.c.env, scopes: [{ kind: "global" }] });
+  ok(group, sa.body.verifiedAt !== null && credsA.creds?.authMode === "bearer", "the working style is saved and used for real AI calls");
+
+  const b = mk(() => false);
+  await putProvider(b.c, { apiKey: "gw-key-0123456789", baseUrl: GW });
+  const tb = await testProvider(b.c);
+  const msgB = String((tb.body.tiers as Record<string, { message?: string }>).default.message);
+  ok(group, tb.body.ok === false && msgB.includes("x-api-key, as a Bearer token and as both") && msgB.includes("Gateway said"), "every style rejected -> an honest message saying the key itself is not accepted");
+
+  const c2 = mk((m) => m === "both");
+  await putProvider(c2.c, { apiKey: "gw-key-0123456789", baseUrl: GW });
+  const tc = await testProvider(c2.c);
+  ok(group, tc.body.ok === true && tc.body.authMode === "both" && !c2.seen.some((x) => x.endsWith("api-key") || x.endsWith("bearer")), "the default style that works is not probed against");
+
+  ok(group, validateApiKey('  "Bearer gw-key-0123456789"  ', true).ok && (validateApiKey('Bearer gw-key-0123456789', true) as { value: string }).value === "gw-key-0123456789", "a pasted key with quotes / a Bearer prefix is cleaned");
+  const plain = await resolveCredentials({ store: null, env: { ANTHROPIC_API_KEY: "sk-ant-x" }, scopes: [{ kind: "global" }] });
+  ok(group, plain.creds?.authMode === undefined, "no gateway -> no auth mode, previous behaviour");
+}
