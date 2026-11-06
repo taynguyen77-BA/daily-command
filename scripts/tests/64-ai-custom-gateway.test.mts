@@ -58,3 +58,35 @@ import { RateLimiter, getProviderStatus, putProvider, testProvider, type Provide
 
   ok(group, (await putProvider(ctx({ kind: "legacy" }), { baseUrl: "" })).status === 200 && (await getProviderStatus(ctx({ kind: "legacy" }))).body.baseUrl === null, "an empty URL field removes the saved base URL");
 }
+
+{
+  const group = "V2.48.2 models follow the gateway";
+  const { pickModelForTier, resolveTierModels } = await import("../../src/lib/command-center/ai/model-resolution");
+  const { validateModels } = await import("../../src/lib/command-center/ai/provider-config");
+  const list = ["claude-sonnet-4-5", "claude-sonnet-4-20250514", "claude-haiku-4-5", "claude-opus-4-1", "gpt-x"];
+  ok(group, pickModelForTier("fast", list) === "claude-haiku-4-5" && pickModelForTier("default", list) === "claude-sonnet-4-5" && pickModelForTier("deep", list) === "claude-opus-4-1", "tiers map to haiku / sonnet / opus, highest version wins (date stamps ignored)");
+  ok(group, pickModelForTier("deep", ["gpt-4o", "gpt-5"]) === "gpt-5" && pickModelForTier("fast", []) === null, "no matching family -> best listed model; empty list -> null");
+  const cfg = { fast: "claude-haiku-5-5", default: "claude-sonnet-5-5", deep: "claude-opus-5-5" };
+  const r = resolveTierModels({ configured: cfg, userChosen: {}, available: list });
+  ok(group, r.fast.model === "claude-haiku-4-5" && r.default.autoSelected && r.deep.model === "claude-opus-4-1", "unlisted default models are replaced from the list");
+  const r2 = resolveTierModels({ configured: { ...cfg, default: "my-model" }, userChosen: { default: "my-model" }, available: list });
+  ok(group, r2.default.model === "my-model" && !r2.default.autoSelected, "a model the user chose is never silently replaced");
+  const r3 = resolveTierModels({ configured: cfg, userChosen: {}, available: ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"] });
+  ok(group, Object.values(r3).every((x) => !x.autoSelected), "listed models are kept as they are");
+  ok(group, validateModels({ default: "anthropic/claude-sonnet-4.5" }).ok && validateModels({ fast: "model:v1@x" }).ok && !validateModels({ fast: "has space" }).ok, "gateway-style ids (slash, colon, @) accepted; spaces rejected");
+
+  // end to end: gateway lists only older ids, a forbidden id is auto-replaced, saved and used by the next resolution
+  const recs = new Map<string, AiProviderRecord>();
+  const store: ProviderStore = { get: async (id) => (recs.has(id) ? JSON.parse(JSON.stringify(recs.get(id))) : null), put: async (id, x) => void recs.set(id, JSON.parse(JSON.stringify(x))), del: async (id) => void recs.delete(id), appendAudit: async () => {}, listAudit: async () => [] };
+  const pinged: string[] = [];
+  const sdk: ProviderSdk = { listModels: async () => list.slice(0, 4), ping: async (_k, m) => { pinged.push(m); if (!list.includes(m)) throw Object.assign(new Error("403"), { status: 403 }); } };
+  const env: ProviderEnv = { APP_STATE_SECRET: "paired-secret-for-tests-0123456789" };
+  const c: ProviderCtx = { store, env, sdk, now: () => new Date("2026-11-06T09:00:00Z"), principal: { kind: "legacy" }, limiter: new RateLimiter() };
+  await putProvider(c, { apiKey: "gw-key-0123456789", baseUrl: "https://aiproviders.s3corp.com.vn/v1" });
+  const t = await testProvider(c);
+  ok(group, t.body.ok === true && JSON.stringify(t.body.autoSelected) === JSON.stringify({ fast: "claude-haiku-4-5", default: "claude-sonnet-4-5", deep: "claude-opus-4-1" }) && pinged.every((m) => list.includes(m)), "test auto-selects supported models and they all pass");
+  const st = (await getProviderStatus(c)).body as { savedModels: Record<string, string>; verifiedAt: string | null };
+  ok(group, st.savedModels.default === "claude-sonnet-4-5" && st.verifiedAt !== null, "the chosen models are saved and the connection is marked verified");
+  const t2 = await testProvider({ ...c, limiter: new RateLimiter(), sdk: { ...sdk, listModels: async () => list.slice(0, 4) } });
+  ok(group, t2.body.ok === true && t2.body.autoSelected === undefined, "second test: nothing left to auto-select");
+}

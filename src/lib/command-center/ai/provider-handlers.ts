@@ -2,6 +2,7 @@
 // (store, SDK, clock, env) so it is tested offline with fakes. Routes only do auth + wiring. The key is write-only: no response,
 // audit entry, error string or log line produced here ever contains it (errors pass through redactSecrets).
 
+import { resolveTierModels } from "./model-resolution";
 import { aiModelStatus, type AiModelTier } from "./model-config";
 import {
   aiEncryptionKey, effectiveCap, mapProviderError, describeProviderError, modelEnvFor, providerErrorText, redactSecrets, resolveCredentials, scopeId, scopesFor, sealRecord,
@@ -187,6 +188,13 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
   }
   // A gateway may not implement models.list() or may use its own ids: never let that block the real one-call check.
   const gateway = Boolean(creds.baseUrl);
+  // Gateway: it only serves the models it lists, so tiers the user never chose follow that list (and are remembered below).
+  const auto: Partial<Record<AiModelTier, string>> = {};
+  if (gateway && available && available.length > 0) {
+    const rs = resolveTierModels({ configured: tierModel, userChosen: creds.models, available });
+    for (const tier of ["fast", "default", "deep"] as const) if (rs[tier].autoSelected) { tierModel[tier] = rs[tier].model; auto[tier] = rs[tier].model; }
+  }
+  const listedHint = gateway && available && available.length > 0 ? ` Models this gateway lists: ${available.slice(0, 8).join(", ")}${available.length > 8 ? ", …" : ""}.` : "";
   for (const tier of ["fast", "default", "deep"] as const) {
     const model = tierModel[tier];
     if (listError && !gateway) { tiers[tier] = { ok: false, model, kind: listError.kind, message: listError.message }; continue; }
@@ -197,7 +205,8 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
       tiers[tier] = { ok: true, model, ms: Math.max(0, ctx.now().getTime() - t0) };
     } catch (err) {
       const m = describeProviderError(err, gateway);
-      tiers[tier] = { ok: false, model, kind: m.kind, message: m.message };
+      const notListed = gateway && available && available.length > 0 && !available.includes(model);
+      tiers[tier] = { ok: false, model, kind: m.kind, message: notListed ? `${m.message}${listedHint}` : m.message };
     }
   }
   const allOk = Object.values(tiers).every((t) => t.ok);
@@ -209,6 +218,7 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
       if (rec) {
         const firstErr = Object.values(tiers).find((t) => !t.ok);
         const next: AiProviderRecord = { ...rec };
+        if (Object.keys(auto).length) next.models = { ...(rec.models ?? {}), ...auto }; // remember what followed the gateway's list
         if (allOk) { next.verifiedAt = ctx.now().toISOString(); delete next.lastError; }
         else { delete next.verifiedAt; next.lastError = { kind: firstErr!.kind ?? "unknown", message: firstErr!.message ?? "", at: ctx.now().toISOString() }; }
         await ctx.store.put(scopeId(scope), next);
@@ -216,7 +226,7 @@ export async function testProvider(ctx: ProviderCtx): Promise<HandlerResult> {
     } catch { /* best effort */ }
   }
   await audit(ctx, "test", allOk ? "all tiers ok" : `failed: ${Object.values(tiers).filter((t) => !t.ok).map((t) => t.kind).join(",")}`, creds.source);
-  return { status: 200, body: { ok: allOk, source: creds.source, tiers, models: (available ?? []).slice(0, 200), ...(listError ? { listError } : {}), ...(creds.baseUrl ? { gateway: creds.baseUrl } : {}) } };
+  return { status: 200, body: { ok: allOk, source: creds.source, tiers, models: (available ?? []).slice(0, 200), ...(listError ? { listError } : {}), ...(creds.baseUrl ? { gateway: creds.baseUrl } : {}), ...(Object.keys(auto).length ? { autoSelected: auto } : {}) } };
 }
 
 export async function listProviderAudit(ctx: ProviderCtx): Promise<AuditEntry[]> {

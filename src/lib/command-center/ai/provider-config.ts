@@ -94,7 +94,7 @@ export function validateApiKey(raw: unknown, custom = false): Validation<string>
   return { ok: true, value: key };
 }
 
-const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,99}$/;
+const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{2,99}$/; // gateways often use ids like "anthropic/claude-sonnet-4" or "model:v1"
 export function validateModels(raw: unknown): Validation<Partial<Record<AiModelTier, string>>> {
   if (raw === undefined || raw === null) return { ok: true, value: {} };
   if (typeof raw !== "object" || Array.isArray(raw)) return { ok: false, field: "models", message: "models must be an object with fast / default / deep." };
@@ -102,7 +102,7 @@ export function validateModels(raw: unknown): Validation<Partial<Record<AiModelT
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     if (k !== "fast" && k !== "default" && k !== "deep") return { ok: false, field: "models", message: `Unknown tier “${k}”.` };
     if (v === undefined || v === null || v === "") continue;
-    if (typeof v !== "string" || !MODEL_ID.test(v.trim())) return { ok: false, field: `models.${k}`, message: "A model id is letters, digits, dots, dashes (3-100 characters)." };
+    if (typeof v !== "string" || !MODEL_ID.test(v.trim())) return { ok: false, field: `models.${k}`, message: "A model id is letters, digits and . _ : / @ + - (3-100 characters, no spaces). Pick one from the list the gateway returns." };
     out[k] = v.trim();
   }
   return { ok: true, value: out };

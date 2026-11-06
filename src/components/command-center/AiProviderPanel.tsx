@@ -36,7 +36,7 @@ interface ProviderStatus {
   canManageOrgKey?: boolean;
 }
 interface TierTest { ok: boolean; model: string; ms?: number; kind?: string; message?: string }
-interface TestResult { ok: boolean; tiers: Record<string, TierTest>; models: string[]; listError?: { message: string } }
+interface TestResult { ok: boolean; tiers: Record<string, TierTest>; models: string[]; listError?: { message: string }; autoSelected?: Record<string, string> }
 
 const SOURCE_TEXT: Record<string, string> = { member: "your saved key", org: "the organization key", global: "the saved key", env: "the server environment (ANTHROPIC_API_KEY)" };
 
@@ -215,6 +215,7 @@ export function AiProviderPanel() {
                   {t.ok ? "✓" : "✗"} {tier} · <span className="font-mono">{t.model}</span> · {t.ok ? `${t.ms} ms` : t.message}
                 </li>
               ))}
+              {test.autoSelected && <li className="text-text3">Models chosen from the gateway&apos;s own list: {Object.entries(test.autoSelected).map(([k, v]) => `${k} → ${v}`).join(" · ")} (saved; you can change them above).</li>}
             </ul>
           )}
           <details>
