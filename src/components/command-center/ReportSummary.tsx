@@ -8,6 +8,7 @@
 import React, { useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { checkPolishPreservesFacts } from "@/lib/command-center/report-summary";
+import { explainAiFailure } from "@/lib/command-center/ai/outcome";
 import type { ReportTicket } from "@/lib/command-center/reports";
 
 export type PolishFn = (summary: string) => Promise<string>;
@@ -26,7 +27,7 @@ export function ReportSummaryParagraph({
   summary,
   polished,
   onPolished,
-  polish = (s) => getAIProvider().polishReportSummary(s),
+  polish,
 }: {
   summary?: string;
   polished?: string;
@@ -50,8 +51,21 @@ export function ReportSummaryParagraph({
             onClick={async () => {
               setStatus("Polishing…");
               try {
-                const text = (await polish(summary)).trim();
-                const refused = text === summary ? "The AI kept the summary as it is (Mock AI never rewrites)." : checkPolishPreservesFacts(summary, text);
+                // V2.50 R2 — the real reason from the call's own outcome (not a guess from the shared mock flag).
+                let text: string;
+                if (polish) text = (await polish(summary)).trim();
+                else {
+                  const provider = getAIProvider();
+                  if (!provider.runTask) throw new Error("unavailable");
+                  const o = await provider.runTask("polishReportSummary", { summary });
+                  if (!o.ok) {
+                    const e = explainAiFailure(o.reason, o.httpStatus);
+                    setStatus(`${e.title}. ${e.nextStep}`);
+                    return;
+                  }
+                  text = o.data.text.trim();
+                }
+                const refused = text === summary ? "The AI found nothing to improve." : checkPolishPreservesFacts(summary, text);
                 if (refused) setStatus(refused);
                 else {
                   onPolished(text);

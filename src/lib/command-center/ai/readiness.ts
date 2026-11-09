@@ -4,11 +4,11 @@
 
 import type { FeatureToggles } from "../types";
 
-export type AiFeatureId = "ticketAi" | "ticketBrief" | "smartTriage" | "mentionReplyDrafter" | "audienceReports" | "baRequirementCheck" | "aiBlockerFollowUp" | "releaseGoNoGo" | "meetingNotesActions" | "nlCommands" | "weeklyInsights" | "nextBestActionAi";
+export type AiFeatureId = "ticketAi" | "ticketBrief" | "smartTriage" | "mentionReplyDrafter" | "audienceReports" | "baRequirementCheck" | "aiBlockerFollowUp" | "releaseGoNoGo" | "meetingNotesActions" | "nlCommands" | "weeklyInsights" | "nextBestActionAi" | "reportNarrativeAi";
 
 export type AiReadinessState = "READY" | "OFF" | "NEEDS_KEY" | "KEY_REJECTED" | "MODEL_UNAVAILABLE" | "NEEDS_ALLOWLIST" | "SERVER_POLICY_BLOCKED" | "CAP_REACHED";
 
-/** The 12 AI features. `ticketContent` = it sends ticket content to the model, so the project allow-list (and the
+/** The 13 AI features. `ticketContent` = it sends ticket content to the model, so the project allow-list (and the
  *  server's AI_ALLOWED_PROJECT_KEYS) apply — the same set of features that call isProjectAiAllowed / gateTicketAi. */
 export const AI_FEATURES: { id: AiFeatureId; label: string; ticketContent: boolean }[] = [
   { id: "ticketAi", label: "Ticket AI (requirement gaps)", ticketContent: true },
@@ -23,6 +23,8 @@ export const AI_FEATURES: { id: AiFeatureId; label: string; ticketContent: boole
   { id: "nlCommands", label: "Command Bar commands", ticketContent: false },
   { id: "weeklyInsights", label: "Weekly insights", ticketContent: false },
   { id: "nextBestActionAi", label: "Next Best Action wording", ticketContent: false },
+  // V2.50 R1 — sends titles of tickets in allow-listed projects only (the facts builder drops the rest).
+  { id: "reportNarrativeAi", label: "Report narrative by AI", ticketContent: true },
 ];
 
 export interface AiReadinessContext {
@@ -91,7 +93,7 @@ export function aiReadinessMatrix(ctx: Omit<AiReadinessContext, "projectKey">): 
 
 export type AiPreset = "recommended" | "all-off";
 export const AI_PRESETS: Record<AiPreset, { label: string; on: readonly AiFeatureId[] }> = {
-  recommended: { label: "Recommended", on: ["smartTriage", "ticketBrief", "weeklyInsights"] },
+  recommended: { label: "Recommended", on: ["smartTriage", "ticketBrief", "weeklyInsights", "reportNarrativeAi"] },
   "all-off": { label: "All off", on: [] },
 };
 
@@ -106,7 +108,7 @@ export function presetDiff(features: Pick<FeatureToggles, AiFeatureId>, preset: 
   const on = new Set(AI_PRESETS[preset].on);
   const out: PresetChange[] = [];
   for (const f of AI_FEATURES) {
-    // "Recommended" only switches its three features ON and leaves every other toggle as the user set it; "All off" switches every AI toggle off.
+    // "Recommended" only switches its listed features ON and leaves every other toggle as the user set it; "All off" switches every AI toggle off.
     const to = preset === "recommended" ? (on.has(f.id) ? true : features[f.id]) : false;
     if (features[f.id] !== to) out.push({ feature: f.id, from: features[f.id], to });
   }

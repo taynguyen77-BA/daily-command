@@ -67,6 +67,8 @@ const POLICY: Record<AITask, AIUsagePolicyEntry> = {
   extractMeetingActions: entry("extractMeetingActions"),
   parseCommand: entry("parseCommand", { cacheDurationMs: TEN_MINUTES_MS }),
   weeklyInsights: entry("weeklyInsights"),
+  // V2.50 R1 — the narrative of one report; the browser also stores it per facts hash.
+  summarizeReport: entry("summarizeReport", { cacheDurationMs: TEN_MINUTES_MS }),
 };
 
 export function getUsagePolicy(task: AITask): AIUsagePolicyEntry {

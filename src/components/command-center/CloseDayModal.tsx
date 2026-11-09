@@ -19,6 +19,7 @@ import { buildWaitingFor } from "@/lib/command-center/waiting-for";
 import { buildPilotFeedbackContext } from "@/lib/command-center/pilot-feedback";
 import type { DailyReportSnapshot } from "@/lib/command-center/types";
 import { AiProviderIndicator, LoopHealthBadge, TrustLabel } from "./ui";
+import { TodayReportNarrative } from "./ReportNarrative";
 
 const PILOT_SCORE_LABELS: Record<0 | 1 | 2, string> = { 0: "No", 1: "Partially", 2: "Yes" };
 
@@ -311,6 +312,8 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
               <p className="mt-1 text-xs text-text3">{scorecard.controlEffectiveness}</p>
             </section>
           )}
+
+          <TodayReportNarrative />
 
           <section className="rounded-md border border-border bg-surface2 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">

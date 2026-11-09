@@ -165,6 +165,8 @@ export const aiTaskSchema = z.enum([
   "extractMeetingActions",
   "parseCommand",
   "weeklyInsights",
+  // V2.50 R1 — 3-5 sentence report narrative
+  "summarizeReport",
 ]);
 export type AITask = z.infer<typeof aiTaskSchema>;
 
@@ -296,3 +298,7 @@ export const weeklyInsightsResponseSchema = z.object({
   suggestions: z.array(z.string().min(1).max(400)).min(1).max(3),
 });
 export type WeeklyInsightsResponse = z.infer<typeof weeklyInsightsResponseSchema>;
+
+// V2.50 R1 — the Report Narrative: one paragraph (3-5 sentences, checked by TASK_EXTRA_CHECKS.summarizeReport).
+export const reportNarrativeResponseSchema = z.object({ text: z.string().min(40).max(1000) });
+export type ReportNarrativeResponse = z.infer<typeof reportNarrativeResponseSchema>;

@@ -1843,6 +1843,8 @@ export interface FeatureToggles {
   weeklyInsights: boolean;
   /** P3.6 — let the daily-guidance AI task phrase the Next Best Action text (at most one call a day; off by default). */
   nextBestActionAi: boolean;
+  /** V2.50 R1 — "Improve with AI" on the Report narrative (the calculated narrative is always shown). OFF by default. */
+  reportNarrativeAi: boolean;
 }
 
 export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
@@ -1870,6 +1872,7 @@ export const DEFAULT_FEATURE_TOGGLES: FeatureToggles = {
   nlCommands: false,
   weeklyInsights: false,
   nextBestActionAi: false,
+  reportNarrativeAi: false,
 };
 
 /** F1 — one finished Morning Mode triage, per local day. */

@@ -15,7 +15,7 @@ const other = AI_FEATURES.filter((f) => !f.ticketContent).map((f) => f.id);
 
 {
   const group = "P3.7 Readiness states";
-  ok(group, AI_FEATURES.length === 12 && Object.keys(DEFAULT_FEATURE_TOGGLES).filter((k) => AI_FEATURES.some((f) => f.id === k)).length === 12 && AI_FEATURES.every((f) => DEFAULT_FEATURE_TOGGLES[f.id] === false), "12 AI features, all of them real toggles that default OFF");
+  ok(group, AI_FEATURES.length === 13 && Object.keys(DEFAULT_FEATURE_TOGGLES).filter((k) => AI_FEATURES.some((f) => f.id === k)).length === 13 && AI_FEATURES.every((f) => DEFAULT_FEATURE_TOGGLES[f.id] === false), "13 AI features, all of them real toggles that default OFF");
   for (const f of AI_FEATURES) {
     const r = aiReadiness(f.id, ctx());
     ok(group, r.state === "READY" && r.nextStep === READY_TEXT && r.feature === f.id, `${f.id}: everything in place -> READY`);
@@ -49,7 +49,7 @@ const other = AI_FEATURES.filter((f) => !f.ticketContent).map((f) => f.id);
   const scoped = (key: string) => aiReadiness("ticketBrief", ctx({ projectKey: key }));
   ok(group, scoped("ABC").state === "READY" && scoped("ZZZ").state === "NEEDS_ALLOWLIST" && scoped("ZZZ").nextStep.includes("ZZZ") && aiReadiness("ticketBrief", ctx({ projectKey: "abc", ai: { available: true, aiAllowedProjectKeys: ["XYZ"] } })).state === "SERVER_POLICY_BLOCKED", "a ticket button checks that ticket's project: allowed, not on my list, or blocked by the server");
   const m = aiReadinessMatrix(ctx({ allowedProjectKeys: [] }));
-  ok(group, m.length === 12 && m.filter((r) => r.state === "NEEDS_ALLOWLIST").length === content.length && m.filter((r) => r.state === "READY").length === other.length, "the matrix covers all 12; only the six ticket-content features wait on the allow-list");
+  ok(group, m.length === 13 && m.filter((r) => r.state === "NEEDS_ALLOWLIST").length === content.length && m.filter((r) => r.state === "READY").length === other.length, "the matrix covers all 13; only the seven ticket-content features wait on the allow-list");
 }
 
 {
@@ -58,7 +58,7 @@ const other = AI_FEATURES.filter((f) => !f.ticketContent).map((f) => f.id);
   ok(group, /title: r\.state === "READY" \? undefined : r\.nextStep/.test(hook), "the hook's tooltip IS the readiness nextStep (undefined when ready)");
   const where: Record<AiFeatureId, string> = {
     ticketAi: "TicketAiPanel", ticketBrief: "TicketBrief", smartTriage: "SmartTriagePanel", mentionReplyDrafter: "MentionReplyDrafter", audienceReports: "ReportRewrite", baRequirementCheck: "BaRequirementCheck",
-    aiBlockerFollowUp: "AiFollowUpDrafter", releaseGoNoGo: "ReleaseGoNoGo", meetingNotesActions: "MeetingNotesActions", nlCommands: "CommandBar", weeklyInsights: "WeeklyInsights", nextBestActionAi: "NextBestActions",
+    aiBlockerFollowUp: "AiFollowUpDrafter", releaseGoNoGo: "ReleaseGoNoGo", meetingNotesActions: "MeetingNotesActions", nlCommands: "CommandBar", weeklyInsights: "WeeklyInsights", nextBestActionAi: "NextBestActions", reportNarrativeAi: "ReportNarrative",
   };
   for (const f of AI_FEATURES) {
     const src = read(`src/components/command-center/${where[f.id]}.tsx`);
@@ -72,13 +72,13 @@ const other = AI_FEATURES.filter((f) => !f.ticketContent).map((f) => f.id);
   const group = "P3.7 Presets";
   const base = { ...DEFAULT_FEATURE_TOGGLES };
   const rec = presetDiff(base, "recommended");
-  ok(group, rec.map((c) => c.feature).sort().join() === "smartTriage,ticketBrief,weeklyInsights" && rec.every((c) => c.from === false && c.to === true) && AI_PRESETS.recommended.on.length === 3, "Recommended turns on smartTriage, ticketBrief, weeklyInsights (the diff lists exactly those)");
+  ok(group, rec.map((c) => c.feature).sort().join() === "reportNarrativeAi,smartTriage,ticketBrief,weeklyInsights" && rec.every((c) => c.from === false && c.to === true) && AI_PRESETS.recommended.on.length === 4, "Recommended turns on smartTriage, ticketBrief, weeklyInsights, reportNarrativeAi (the diff lists exactly those)");
   const withOthers = { ...base, ticketAi: true, nlCommands: true };
   const recOthers = applyPreset(withOthers, "recommended");
   ok(group, recOthers.ticketAi === true && recOthers.nlCommands === true && recOthers.smartTriage === true, "Recommended leaves other switches as the user set them");
   ok(group, presetDiff(recOthers, "recommended").length === 0, "applying it twice changes nothing the second time (empty diff)");
   const off = applyPreset(recOthers, "all-off");
-  ok(group, AI_FEATURES.every((f) => off[f.id] === false) && presetDiff(recOthers, "all-off").map((c) => c.feature).sort().join() === "nlCommands,smartTriage,ticketAi,ticketBrief,weeklyInsights", "All off switches every AI feature off");
+  ok(group, AI_FEATURES.every((f) => off[f.id] === false) && presetDiff(recOthers, "all-off").map((c) => c.feature).sort().join() === "nlCommands,reportNarrativeAi,smartTriage,ticketAi,ticketBrief,weeklyInsights", "All off switches every AI feature off");
   ok(group, off.morningMode === recOthers.morningMode && off.jiraWriteBack === recOthers.jiraWriteBack, "non-AI toggles are never touched");
   const diff = presetDiff(recOthers, "all-off");
   ok(group, JSON.stringify(undoPreset(off, diff)) === JSON.stringify(recOthers), "undo restores the exact previous toggles (apply/undo round-trips)");

@@ -497,12 +497,15 @@ function section(lines: string[], title: string, tickets: ReportTicket[], format
 export interface RenderOptions {
   /** Team work section on/off (default on). */
   includeTeam?: boolean;
+  /** V2.50 R2 — the visible Report narrative: printed as the first paragraph under the title (escaped per format). Unset = output identical to before. */
+  narrative?: string;
 }
 
 export function renderDailyReport(report: DailyReportView, format: ReportFormat, options: RenderOptions = {}): string {
   const lines: string[] = [heading(`Daily Report — ${report.date}`, 1, format), ""];
   // E4 — nothing recorded at all: say so instead of a page of empty sections.
   if (report.noData) return [...lines, format === "text" ? `(${NO_DATA_RECORDED})` : `_${NO_DATA_RECORDED}_`].join("\n");
+  if (options.narrative?.trim()) lines.push(plainText(options.narrative.trim(), format), "");
   renderReportHeader(lines, report, format);
   section(lines, "Done", report.doneMine, format);
   section(lines, "In progress / planned today", report.inProgress, format);
@@ -711,6 +714,7 @@ export function buildWeeklyReportView(input: WeeklyReportInput): WeeklyReportVie
 
 export function renderWeeklyReport(report: WeeklyReportView, format: ReportFormat, options: RenderOptions = {}): string {
   const lines: string[] = [heading(`Weekly Report — ${report.weekStart} to ${report.weekEnd}`, 1, format), ""];
+  if (options.narrative?.trim()) lines.push(plainText(options.narrative.trim(), format), "");
   renderReportHeader(lines, report, format);
   const b = bullet(format);
   const t = report.totals;

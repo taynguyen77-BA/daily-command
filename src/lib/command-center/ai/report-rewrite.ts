@@ -11,8 +11,9 @@
 import { SKIP_REASONS } from "../types";
 import { renderDailyReport, renderWeeklyReport, type DailyReportView, type ReportTicket, type WeeklyReportView } from "../reports";
 import { RedactionSession, type CustomTerm } from "./redaction";
-import { lockedFactViolations } from "./task-registry";
+import { lockedFactViolations } from "./locked-facts";
 import type { AIProvider } from "./provider";
+import { explainAiFailure } from "./outcome";
 
 export type ReportAudience = "standup" | "pm" | "client" | "vi";
 export const REPORT_AUDIENCES: { id: ReportAudience; label: string }[] = [
@@ -107,11 +108,22 @@ export interface RewriteResult {
   notice?: string;
 }
 
-export async function rewriteReportFlow(args: { source: string; audience: ReportAudience; customTerms: CustomTerm[]; provider: Pick<AIProvider, "rewriteReport" | "mode"> }): Promise<RewriteResult> {
+export async function rewriteReportFlow(args: { source: string; audience: ReportAudience; customTerms: CustomTerm[]; provider: Pick<AIProvider, "rewriteReport" | "mode" | "runTask"> }): Promise<RewriteResult> {
   const session = new RedactionSession(args.customTerms);
   const redacted = session.redact(args.source);
-  const out = await args.provider.rewriteReport(args.audience, redacted);
-  if (args.provider.mode !== "claude" || out === redacted) {
+  let out: string;
+  if (args.provider.runTask) {
+    // V2.50 R2 — decided by this call's own outcome (not the shared provider.mode), with the real reason.
+    const o = await args.provider.runTask("rewriteReport", { audience: args.audience, report: redacted });
+    if (!o.ok) {
+      const e = explainAiFailure(o.reason, o.httpStatus);
+      return { text: args.source, usedAi: false, notice: `${e.title}. ${e.nextStep} Showing the deterministic report.` };
+    }
+    out = o.data.text;
+  } else {
+    out = await args.provider.rewriteReport(args.audience, redacted);
+  }
+  if ((!args.provider.runTask && args.provider.mode !== "claude") || out === redacted) {
     return { text: args.source, usedAi: false, notice: "AI rewrite unavailable — showing the deterministic report." };
   }
   const restored = session.restore(out);

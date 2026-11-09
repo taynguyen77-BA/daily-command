@@ -25,6 +25,7 @@ import { sendReportToSlack } from "@/lib/command-center/notify-client";
 import { OverdueBlockersCallout, ReportSummaryParagraph } from "@/components/command-center/ReportSummary";
 import type { NeedsDecisionGroup } from "@/lib/command-center/report-summary";
 import { ReportRewrite } from "@/components/command-center/ReportRewrite";
+import { ReportNarrative } from "@/components/command-center/ReportNarrative";
 import { WeeklyInsightsView } from "@/components/command-center/WeeklyInsights";
 import { weeklyInsightsText } from "@/lib/command-center/ai/weekly-insights";
 
@@ -117,10 +118,22 @@ function ShareButtons({ subject, render }: { subject: string; render: (format: R
   );
 }
 
-function CopyButtons({ render }: { render: (format: ReportFormat) => string }) {
-  const [copied, setCopied] = useState<ReportFormat | null>(null);
+function CopyButtons({ render, summary }: { render: (format: ReportFormat) => string; summary?: string }) {
+  const [copied, setCopied] = useState<ReportFormat | "summary" | null>(null);
   return (
     <div className="flex flex-wrap gap-1.5">
+      {summary && (
+        <button
+          className={BTN}
+          data-copy-summary
+          onClick={async () => {
+            await navigator.clipboard.writeText(summary);
+            setCopied("summary");
+          }}
+        >
+          {copied === "summary" ? "Copied ✓" : "Copy summary only"}
+        </button>
+      )}
       {FORMATS.map(({ format, label }) => (
         <button
           key={format}
@@ -148,6 +161,9 @@ export default function ReportsPage() {
   const [groupBy, setGroupBy] = useState<WeeklyGroupBy>("project");
   // V2.38 J6 — append this week's saved AI insights to the weekly report's copies (optional).
   const [includeInsights, setIncludeInsights] = useState(false);
+  // V2.50 R2 — the visible Report narrative (calculated, AI or edited) goes first in every copy / export.
+  const [dailyNarrative, setDailyNarrative] = useState<string | undefined>();
+  const [weeklyNarrative, setWeeklyNarrative] = useState<string | undefined>();
   const identity = useMemo(() => ({ displayName: state.personalIdentity?.displayName ?? state.ownerName, accountId: state.personalIdentity?.accountId }), [state.personalIdentity, state.ownerName]);
 
   // Today is always built live: today's events so far + the standup state as of now.
@@ -197,7 +213,7 @@ export default function ReportsPage() {
       return next;
     });
   const weekInsights = state.features.weeklyInsights ? state.aiWeeklyInsights[weekly.weekStart] : undefined;
-  const renderWeekly = (format: ReportFormat) => renderWeeklyReport(w, format, { includeTeam }) + (weekInsights && includeInsights ? `\n\n${weeklyInsightsText(weekInsights)}` : "");
+  const renderWeekly = (format: ReportFormat) => renderWeeklyReport(w, format, { includeTeam, narrative: weeklyNarrative }) + (weekInsights && includeInsights ? `\n\n${weeklyInsightsText(weekInsights)}` : "");
   return (
     <div className="space-y-6 pb-16">
       <SectionHeading level="page" title="Reports" subtitle="Standup-ready daily and weekly reports — ticket lists with Jira links, ready to paste into Slack or an update." />
@@ -220,8 +236,8 @@ export default function ReportsPage() {
               Day
               <input type="date" value={date} max={today} onChange={(e) => e.target.value && setDate(e.target.value)} className="rounded border border-border bg-surface px-1.5 py-1 text-xs" />
             </label>
-            <CopyButtons render={(format) => renderDailyReport(v, format, { includeTeam })} />
-            {state.features.reportExport && <ShareButtons subject={`Daily Report — ${v.date}`} render={(format) => renderDailyReport(v, format, { includeTeam })} />}
+            <CopyButtons summary={dailyNarrative} render={(format) => renderDailyReport(v, format, { includeTeam, narrative: dailyNarrative })} />
+            {state.features.reportExport && <ShareButtons subject={`Daily Report — ${v.date}`} render={(format) => renderDailyReport(v, format, { includeTeam, narrative: dailyNarrative })} />}
             {state.features.audienceReports && <ReportRewrite key={`d:${v.date}`} report={{ kind: "daily", view: v }} includeTeam={includeTeam} />}
           </div>
           {v.noData ? (
@@ -231,6 +247,7 @@ export default function ReportsPage() {
           ) : (
             <>
               <OverdueBlockersCallout tickets={v.overdueBlockers} sla={v.slaBusinessDays} />
+              <ReportNarrative key={`dn:${daily.view.date}`} report={{ kind: "daily", view: daily.view }} onText={setDailyNarrative} />
               <ReportSummaryParagraph summary={daily.view.summary} polished={polished[dailyKey]} onPolished={setPolish(dailyKey)} />
               {!v.standupAvailable && <p className="text-xs text-text3">{missingStandupNote(v)}</p>}
               {!v.identityConfigured && <p className="text-xs text-orange">Set your identity in Data &amp; Settings to tell your own Jira completions from the team&apos;s.</p>}
@@ -286,7 +303,7 @@ export default function ReportsPage() {
                 </select>
               </label>
             </div>
-            <CopyButtons render={renderWeekly} />
+            <CopyButtons summary={weeklyNarrative} render={renderWeekly} />
             {state.features.reportExport && <ShareButtons subject={`Weekly Report — ${w.weekStart} to ${w.weekEnd}`} render={renderWeekly} />}
             {state.features.audienceReports && <ReportRewrite key={`w:${w.weekStart}`} report={{ kind: "weekly", view: w }} includeTeam={includeTeam} />}
             {weekInsights && (
@@ -301,6 +318,7 @@ export default function ReportsPage() {
               </details>
             )}
           </div>
+          <ReportNarrative key={`wn:${weekly.weekStart}`} report={{ kind: "weekly", view: weekly }} onText={setWeeklyNarrative} />
           <ReportSummaryParagraph summary={weekly.summary} polished={polished[weeklyKey]} onPolished={setPolish(weeklyKey)} />
           <p className="text-xs text-text3">
             Done {w.totals.doneMine} · New {w.totals.newReceived} · Blocked {w.totals.blocked} · Skipped {w.totals.skipped} · Decisions {w.totals.decisions}

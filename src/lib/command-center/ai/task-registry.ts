@@ -10,6 +10,7 @@
 import { z } from "zod";
 import type { GroundingPolicy } from "./evaluation";
 import { schemaLimitsText, schemaMaxChars } from "./schema-limits";
+import { lockedFactViolations } from "./locked-facts";
 import type { ArtifactType, ChangeEvent, DecisionConflictCandidate, Evidence, FollowUpContext, HealthTrend, PriorityScoreResult, Risk, WorkItem, Action } from "../types";
 import type { WeeklyReviewFacts } from "../weekly-review";
 import { actionOutcomePrompt } from "./prompts/action-outcome";
@@ -41,6 +42,8 @@ import { weeklyInsightsPrompt } from "./prompts/weekly-insights";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
+import { reportNarrativePrompt } from "./prompts/report-narrative";
+import { narrativeViolations, type NarrativeFacts } from "../report-narrative";
 import {
   assessmentResponseSchema,
   communicationArtifactResponseSchema,
@@ -62,6 +65,7 @@ import {
   meetingActionsResponseSchema,
   commandResponseSchema,
   weeklyInsightsResponseSchema,
+  reportNarrativeResponseSchema,
   RELEASE_RECOMMENDATIONS,
   textResponseSchema,
   trendResponseSchema,
@@ -91,6 +95,7 @@ const trendSchema = z.object({
   overall: str(40),
   deltas: z.array(z.object({ label: str(200), before: num, after: num, delta: num, direction: str(40) })).max(50),
 });
+const narrativeItemSchema = z.object({ key: str(40), title: str(200).optional(), project: str(100).optional() });
 const decisionSchema = z.object({ title: str(1000), decision: str().optional(), status: str(60), date: str(40).optional(), dueDate: str(40).optional() });
 const artifactTypeSchema = z.enum(["STATUS_UPDATE", "STAKEHOLDER_UPDATE", "RELEASE_UPDATE", "DECISION_BRIEF"]);
 
@@ -218,6 +223,20 @@ export const TASK_INPUT_SCHEMAS = {
   extractMeetingActions: z.object({ today: str(10), notes: str(20_000) }),
   parseCommand: z.object({ today: str(10), command: str(500), knownProjects: z.array(z.object({ key: str(20), name: str(200).optional() })).max(200) }),
   weeklyInsights: z.object({ weekStart: str(10), weekEnd: str(10), facts: strList(80, 400) }),
+  // V2.50 R1 — facts of one Daily / Weekly report (built by report-narrative.ts; titles only for allow-listed projects).
+  summarizeReport: z.object({
+    kind: z.enum(["daily", "weekly"]),
+    periodPhrase: str(60),
+    style: z.enum(["standup", "worklog"]),
+    language: z.enum(["en", "vi"]),
+    counts: z.object({ done: num, inProgress: num, blocked: num, newReceived: num, mentionsAwaitingReply: num, overdueBlockers: num, decisions: num, projects: num, doneNotListed: num, carriedOver: num.optional(), reportedDays: num.optional(), missingDays: num.optional(), slaBusinessDays: num.optional(), nextWeek: num.optional() }),
+    done: z.array(narrativeItemSchema).max(40),
+    inProgress: z.array(narrativeItemSchema).max(25),
+    blocked: z.array(narrativeItemSchema.extend({ ageBusinessDays: num.optional(), waitingFor: str(200).optional(), reason: str(300).optional() })).max(15),
+    nextWeek: z.array(narrativeItemSchema).max(15).optional(),
+    decisions: z.array(str(300)).max(10),
+    risk: z.object({ title: str(300), level: str(10) }).optional(),
+  }),
 } satisfies Record<AITask, z.ZodType>;
 
 export type TaskInput<T extends AITask> = z.infer<(typeof TASK_INPUT_SCHEMAS)[T]>;
@@ -259,6 +278,7 @@ const BUILDERS: Builders = {
   extractMeetingActions: (i) => meetingActionsPrompt(i),
   parseCommand: (i) => commandPrompt(i),
   weeklyInsights: (i) => weeklyInsightsPrompt(i),
+  summarizeReport: (i) => reportNarrativePrompt(i),
 };
 
 export const TASK_OUTPUT_SCHEMAS = {
@@ -291,6 +311,7 @@ export const TASK_OUTPUT_SCHEMAS = {
   extractMeetingActions: meetingActionsResponseSchema,
   parseCommand: commandResponseSchema,
   weeklyInsights: weeklyInsightsResponseSchema,
+  summarizeReport: reportNarrativeResponseSchema,
 } satisfies Record<AITask, z.ZodType>;
 
 /** Previous explicit per-task values — kept as the floor (V2.49 A1 only ever raises a budget). */
@@ -315,26 +336,15 @@ export function visibleTokenBudget(task: AITask, opts?: { language?: "en" | "vi"
 // Run server-side on every answer; a violation is treated exactly like a grounding violation
 // (one retry with the violations listed, then 422 → the browser shows deterministic output).
 
-const KEY_RE = /\b[A-Z][A-Z0-9_]{1,19}-\d{1,9}\b/g;
-const uniqStrings = (a: string[]) => Array.from(new Set(a));
-
-/** Every ticket key and every number in `output` must also be in `source` (list numbering at
- *  the start of a line is formatting). I4's locked-facts rule — also used by the browser. */
-export function lockedFactViolations(output: string, source: string): string[] {
-  const v: string[] = [];
-  const srcKeys = new Set(source.match(KEY_RE) ?? []);
-  for (const k of uniqStrings(output.match(KEY_RE) ?? [])) if (!srcKeys.has(k)) v.push(`ticket key ${k} is not in the report`);
-  const nums = (t: string) => (t.replace(KEY_RE, " ").match(/(?<![\w.])\d[\d,]*(?:\.\d+)?/g) ?? []).map((n) => String(Number(n.replace(/,/g, ""))));
-  const srcNums = new Set(nums(source));
-  for (const n of uniqStrings(nums(output.replace(/^\s*\d+[.)]\s/gm, " ")))) if (!srcNums.has(n)) v.push(`number ${n} is not in the report`);
-  return v;
-}
+export { lockedFactViolations };
 
 type ExtraCheck = (output: unknown, input: unknown, prompt: string) => string[];
 
 const NOBODY = /^(unknown|nobody|no one|none|n\/a|-)$/i;
 
 export const TASK_EXTRA_CHECKS: Partial<Record<AITask, ExtraCheck>> = {
+  // V2.50 R1 — 3-5 sentences, keys/numbers from the facts, the oldest blocker named, no blocked ticket described as done.
+  summarizeReport: (out, input) => narrativeViolations((out as { text: string }).text, input as NarrativeFacts),
   generateTicketBrief: (out, _input, prompt) => {
     const o = out as z.infer<typeof ticketBriefResponseSchema>;
     const lower = prompt.toLowerCase();
@@ -454,6 +464,7 @@ export const GROUNDING_POLICY: Record<AITask, GroundingPolicy> = {
   extractMeetingActions: "counts",
   parseCommand: "strict",
   weeklyInsights: "counts",
+  summarizeReport: "strict",
 };
 
 /** Builds the prompt from an input that has ALREADY been through parseTaskInput. The output limits come from the output schema (D2). */

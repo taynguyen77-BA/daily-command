@@ -140,6 +140,7 @@ import { asReminderPrefs, type ReminderPrefs } from "./reminder-schedule";
 import { asBriefingPrefs, type BriefingPrefs } from "./briefing";
 import { patchReminder, type ReminderPatch } from "./reminder-model";
 import { asWeeklyInsights, type StoredWeeklyInsights } from "./ai/weekly-insights";
+import { asNarrativePrefs, asReportNarratives, DEFAULT_NARRATIVE_PREFS, putNarrative, type NarrativePrefs, type StoredNarrative } from "./report-narrative";
 export type { MyActionItemsOnlyByPage };
 
 const STORAGE_KEY = "command-center:v1";
@@ -391,6 +392,10 @@ export interface StoreState {
   aiTriageStats: TriageStatsByDay;
   /** V2.38 J6 — AI weekly insights, keyed by week start (last 12 kept). */
   aiWeeklyInsights: Record<string, StoredWeeklyInsights>;
+  /** V2.50 R1 — AI / edited report narratives per `${kind}:${period}:${style}:${language}` (newest 90). Optional: an old blob loads without it. */
+  reportNarratives: Record<string, StoredNarrative>;
+  /** V2.50 R1 — last Standup/Work log and EN/VI choice. */
+  reportNarrativePrefs: NarrativePrefs;
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -455,6 +460,8 @@ function initialState(): StoreState {
     aiBriefs: {},
     aiTriageStats: {},
     aiWeeklyInsights: {},
+    reportNarratives: {},
+    reportNarrativePrefs: { ...DEFAULT_NARRATIVE_PREFS },
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -1066,6 +1073,8 @@ function parseStoredStateRaw(raw: string): StoreState {
       aiBriefs: asAiBriefCache(parsed.aiBriefs),
       aiTriageStats: asTriageStats(parsed.aiTriageStats),
       aiWeeklyInsights: asWeeklyInsights(parsed.aiWeeklyInsights),
+      reportNarratives: asReportNarratives(parsed.reportNarratives),
+      reportNarrativePrefs: asNarrativePrefs(parsed.reportNarrativePrefs),
       jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
@@ -2065,6 +2074,21 @@ export class CommandCenterStore {
     const next = { ...this.state.aiWeeklyInsights, [w.weekStart]: w };
     for (const k of Object.keys(next).sort().slice(0, Math.max(0, Object.keys(next).length - 12))) delete next[k];
     this.set({ ...this.state, aiWeeklyInsights: next });
+  }
+
+  /** V2.50 R1 — keep an AI / edited report narrative (newest 90). */
+  saveReportNarrative(n: StoredNarrative) {
+    this.set({ ...this.state, reportNarratives: putNarrative(this.state.reportNarratives, n) });
+  }
+  /** V2.50 R1 — drop a stored narrative ("Reset to calculated"). */
+  clearReportNarrative(key: string) {
+    if (!this.state.reportNarratives[key]) return;
+    const next = { ...this.state.reportNarratives };
+    delete next[key];
+    this.set({ ...this.state, reportNarratives: next });
+  }
+  setReportNarrativePrefs(prefs: NarrativePrefs) {
+    this.set({ ...this.state, reportNarrativePrefs: prefs });
   }
 
   /** V2.37 I2 — how many triage suggestions per category were shown vs. applied. */

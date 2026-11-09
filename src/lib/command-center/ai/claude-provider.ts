@@ -37,7 +37,7 @@ import { recordAiCall } from "./trace";
 import { pairedAuthHeader } from "../device-pairing";
 import type { AiStatusResponse } from "./status-response";
 import { parseTaskInput, TASK_OUTPUT_SCHEMAS, type TaskInput, type TicketContextInput } from "./task-registry";
-import type { AITask, BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
+import type { AITask, BaRequirementCheckResponse, ReportNarrativeResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
 import { failureReasonFromResponse, type AiFailureReason, type AiOutcome } from "./outcome";
 import type { z } from "zod";
 
@@ -397,6 +397,11 @@ export class ClaudeProvider implements AIProvider {
   async weeklyInsights(input: TaskInput<"weeklyInsights">): Promise<WeeklyInsightsResponse> {
     const r = await this.runTask("weeklyInsights", input);
     return r.ok ? r.data : this.mock.weeklyInsights(input);
+  }
+
+  async summarizeReport(input: TaskInput<"summarizeReport">): Promise<ReportNarrativeResponse> {
+    const r = await this.runTask("summarizeReport", input);
+    return r.ok ? r.data : this.mock.summarizeReport(input);
   }
 }
 

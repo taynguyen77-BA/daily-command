@@ -54,7 +54,8 @@ import { weeklyReviewPrompt } from "./prompts/weekly-review";
 import type { TASK_OUTPUT_SCHEMAS, TaskInput, TicketContextInput } from "./task-registry";
 import type { AiOutcome } from "./outcome";
 import type { z } from "zod";
-import type { AITask, BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
+import { deterministicNarrative } from "../report-narrative";
+import type { AITask, BaRequirementCheckResponse, ReportNarrativeResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
 import { deGherkin } from "./ba-requirements";
 import { deterministicReleaseBrief } from "./release-brief";
 import { parseCommandDeterministic } from "./nl-commands";
@@ -112,6 +113,8 @@ export interface AIProvider {
   extractMeetingActions(input: TaskInput<"extractMeetingActions">): Promise<MeetingActionsResponse>;
   parseCommand(input: TaskInput<"parseCommand">): Promise<CommandResponse>;
   weeklyInsights(input: TaskInput<"weeklyInsights">): Promise<WeeklyInsightsResponse>;
+  /** V2.50 R1 — the 3-5 sentence narrative of a report (the mock returns the deterministic narrative). */
+  summarizeReport(input: TaskInput<"summarizeReport">): Promise<ReportNarrativeResponse>;
 }
 
 export interface RequirementCheckResult {
@@ -520,5 +523,9 @@ export class MockAIProvider implements AIProvider {
       observations,
       suggestions: ["Review blocked tickets with the people they wait on early in the week.", "Give every skip a reason so patterns become visible.", "Run Morning Mode triage daily so New stays small."],
     };
+  }
+
+  async summarizeReport(input: TaskInput<"summarizeReport">): Promise<ReportNarrativeResponse> {
+    return { text: deterministicNarrative(input) };
   }
 }

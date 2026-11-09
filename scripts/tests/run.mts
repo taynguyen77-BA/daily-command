@@ -75,6 +75,8 @@ const FILES = [
   "./63-page-load-perf.test.mts",
   "./64-ai-custom-gateway.test.mts",
   "./65-ai-outcome-and-budgets.test.mts",
+  "./66-report-narrative.test.mts",
+  "./67-report-narrative-exports.test.mts",
 ];
 
 for (const file of FILES) await import(file);
