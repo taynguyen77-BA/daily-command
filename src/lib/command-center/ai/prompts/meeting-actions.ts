@@ -18,6 +18,7 @@ PRODUCE:
 
 CONSTRAINTS:
 - Use only the notes. Never invent people, ticket keys, numbers or dates. Leave a field out rather than guess.
+- LENGTH: every title is one short line (at most about 12 words); at most 10 items per list.
 
 REQUIRED OUTPUT SCHEMA (JSON only):
 { "decisions": [{ "title": string, "detail"?: string }], "actions": [{ "title": string, "owner"?: string, "due"?: string, "relatedTicketKey"?: string }], "statusChanges": [{ "ticketKey": string, "status": "TODO" | "IN_PROGRESS" | "BLOCKED" | "SKIPPED" | "DEFERRED" | "DONE", "reason"?: string, "when"?: string }], "openQuestions": string[] }`;

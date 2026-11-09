@@ -5,6 +5,9 @@
 // inline second confirmation as Ask; "Post on <KEY>…" through the write-back dialog; "Email
 // draft" opens the mail app. Nothing is sent on its own.
 
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
+import { runScoped } from "@/lib/command-center/ai/outcome-scope";
 import { useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -19,7 +22,7 @@ import { useAiReadiness } from "./use-ai-readiness";
 export function AiFollowUpDrafter({ ticketKeys }: { ticketKeys: string[] }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [channel, setChannel] = useState<FollowUpChannel>("slack");
-  const [drafts, setDrafts] = useState<{ messages: FollowUpsResponse["messages"]; ticketsByPerson: Record<string, string[]>; mode: "mock" | "claude" } | null>(null);
+  const [drafts, setDrafts] = useState<{ messages: FollowUpsResponse["messages"]; ticketsByPerson: Record<string, string[]>; mode: "mock" | "claude"; failure?: AiFailure } | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [status, setStatus] = useState<Record<string, string>>({});
@@ -35,9 +38,9 @@ export function AiFollowUpDrafter({ ticketKeys }: { ticketKeys: string[] }) {
       setBusy(false);
       return setDrafts({ messages: [], ticketsByPerson: {}, mode: "mock" });
     }
-    const provider = getAIProvider();
-    const out = built.session.restoreDeep(await provider.draftBlockerFollowUps(built.input));
-    setDrafts({ messages: out.messages, ticketsByPerson: { ...built.ticketsByPerson, team: built.ticketsByPerson.Unknown ?? [] }, mode: provider.mode });
+    const run = await runScoped(getAIProvider(), (p) => p.draftBlockerFollowUps(built.input));
+    const out = built.session.restoreDeep(run.value);
+    setDrafts({ messages: out.messages, ticketsByPerson: { ...built.ticketsByPerson, team: built.ticketsByPerson.Unknown ?? [] }, mode: run.mode, failure: run.failure });
     setBusy(false);
   };
 
@@ -59,6 +62,7 @@ export function AiFollowUpDrafter({ ticketKeys }: { ticketKeys: string[] }) {
           {busy ? "Drafting…" : drafts ? "Redraft" : "Draft with AI"}
         </button>
         {drafts && <span className="text-text3">{drafts.mode === "claude" ? "AI drafts — edit before sending." : "Template drafts (AI not used)."}</span>}
+        {drafts?.failure && <AiFailureNote reason={drafts.failure.reason} httpStatus={drafts.failure.httpStatus} />}
       </div>
       {drafts && drafts.messages.length === 0 && <p className="mt-1 text-text3">No blocked tickets to follow up on.</p>}
       {drafts && (

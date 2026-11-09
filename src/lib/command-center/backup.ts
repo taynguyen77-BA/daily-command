@@ -196,6 +196,7 @@ export function mergeImportedState(local: StoreState, imported: StoreState, nowI
     aiWeeklyInsights: fillRecord(local.aiWeeklyInsights, imported.aiWeeklyInsights),
     reportNarratives: fillRecord(local.reportNarratives, imported.reportNarratives),
     reportNarrativePrefs: local.reportNarrativePrefs ?? imported.reportNarrativePrefs,
+    aiOutputLanguage: local.aiOutputLanguage ?? imported.aiOutputLanguage,
     lastBackupAt: local.lastBackupAt ?? imported.lastBackupAt,
   };
   return applySyncedSlice(base, synced);

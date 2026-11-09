@@ -38,6 +38,7 @@ import { pairedAuthHeader } from "../device-pairing";
 import type { AiStatusResponse } from "./status-response";
 import { parseTaskInput, TASK_OUTPUT_SCHEMAS, type TaskInput, type TicketContextInput } from "./task-registry";
 import type { AITask, BaRequirementCheckResponse, ReportNarrativeResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
+import type { AiLanguage } from "./prompts/language";
 import { failureReasonFromResponse, type AiFailureReason, type AiOutcome } from "./outcome";
 import type { z } from "zod";
 
@@ -221,8 +222,8 @@ export class ClaudeProvider implements AIProvider {
     return r.ok ? r.data.text : this.mock.generateCommunication(item, audience, why);
   }
 
-  async generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[]): Promise<string> {
-    const r = await this.runTask("generateEndOfDaySummary", { completed, deferred, blocked, newRisks });
+  async generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[], language?: AiLanguage): Promise<string> {
+    const r = await this.runTask("generateEndOfDaySummary", { completed, deferred, blocked, newRisks, ...(language ? { language } : {}) });
     return r.ok ? r.data.text : this.mock.generateEndOfDaySummary(completed, deferred, blocked, newRisks);
   }
 
@@ -258,8 +259,8 @@ export class ClaudeProvider implements AIProvider {
     return this.mock.analyzeActionOutcomes(ctx);
   }
 
-  async generateWeeklyReview(facts: WeeklyReviewFacts): Promise<string> {
-    const r = await this.runTask("generateWeeklyReview", { facts });
+  async generateWeeklyReview(facts: WeeklyReviewFacts, language?: AiLanguage): Promise<string> {
+    const r = await this.runTask("generateWeeklyReview", { facts, ...(language ? { language } : {}) });
     return r.ok ? r.data.text : this.mock.generateWeeklyReview(facts);
   }
 
@@ -349,8 +350,8 @@ export class ClaudeProvider implements AIProvider {
     return this.mock.checkRequirements(ticket);
   }
 
-  async generateTicketBrief(ticket: TicketContextInput, today: string): Promise<TicketBriefResponse> {
-    const r = await this.runTask("generateTicketBrief", { ticket, today });
+  async generateTicketBrief(ticket: TicketContextInput, today: string, language?: AiLanguage): Promise<TicketBriefResponse> {
+    const r = await this.runTask("generateTicketBrief", { ticket, today, ...(language ? { language } : {}) });
     return r.ok ? r.data : this.mock.generateTicketBrief(ticket, today);
   }
 

@@ -197,7 +197,8 @@ function schemaIssues(err: unknown): string[] {
 }
 
 async function callAndValidate(task: AITask, prompt: string, parsedInput: unknown, model: string, tier: AiModelTier, deps: AiServerDeps, now: Date, cap?: number): Promise<AiServerResult> {
-  const visible = visibleTokenBudget(task);
+  const language = (parsedInput as { language?: "en" | "vi" } | null)?.language;
+  const visible = visibleTokenBudget(task, language ? { language } : undefined);
   const headroom = thinkingHeadroom(model, { customBaseUrl: deps.customBaseUrl });
   let maxTokens = visible + headroom;
   const messages: ModelCallParams["messages"] = [{ role: "user", content: prompt }];

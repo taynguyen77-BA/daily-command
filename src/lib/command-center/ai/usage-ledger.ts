@@ -188,6 +188,14 @@ export function setUsageLedgerForTests(next: UsageLedger | null): void {
 }
 
 // ---- D2: AI health (per task, last 7 days) -------------------------------------------------------------------------
+export interface AiTaskDayHealth {
+  day: string;
+  calls: number;
+  truncated: number;
+  groundingRejected: number;
+  schemaRetry: number;
+  error: number;
+}
 export interface AiTaskHealth {
   task: AITask;
   calls: number;
@@ -195,19 +203,65 @@ export interface AiTaskHealth {
   /** Top grounding violation kinds, most frequent first. */
   topViolations: { kind: string; count: number }[];
   repaired: number;
+  /** V2.52 A4 — share of calls (0-1) that were truncated / rejected by the fact check / needed a schema repair / errored. */
+  rates?: { truncated: number; groundingRejected: number; schemaRetry: number; error: number };
+  /** V2.52 A4 — calls that did not produce a usable answer first time. */
+  failures?: number;
+  /** V2.52 A4 — set when more than 10% of at least 10 calls failed: what to do about it. */
+  alert?: { failRate: number; nextStep: string };
+  /** V2.52 A4 — the same counts per UTC day (oldest first). */
+  byDay?: AiTaskDayHealth[];
 }
+
+export const HEALTH_ALERT_MIN_CALLS = 10;
+export const HEALTH_ALERT_FAIL_RATE = 0.1;
+/** Outcomes that mean "this call did not give a usable answer" (a schema repair that then worked is not one). */
+const FAILED_OUTCOMES = new Set(["truncated", "truncated-retry", "grounding-rejected", "invalid-output", "refused", "error"]);
+
+const ALERT_STEP: Record<string, string> = {
+  truncated: "Raise the output budget, or pick a different model for this tier (Data & Settings → AI provider).",
+  "grounding-rejected": "The model keeps using facts that are not in your data — pick a different model for this tier.",
+  "invalid-output": "The model's JSON often fails the schema — pick a different model for this tier.",
+  refused: "The model declines these requests — pick a different model for this tier.",
+  error: "The provider keeps failing — run Test in Data & Settings → AI provider.",
+};
 
 /** Counts by outcome and top violation kinds per task. Cached answers are not model calls and are left out. */
 export function healthByTask(records: readonly AiUsageRecord[]): AiTaskHealth[] {
-  const byTask = new Map<AITask, { calls: number; byOutcome: Record<string, number>; v: Map<string, number>; repaired: number }>();
+  type Acc = { calls: number; byOutcome: Record<string, number>; v: Map<string, number>; repaired: number; days: Map<string, AiTaskDayHealth> };
+  const byTask = new Map<AITask, Acc>();
   for (const r of records) {
     if (r.cached || r.selftest) continue;
-    const e = byTask.get(r.task) ?? { calls: 0, byOutcome: {}, v: new Map<string, number>(), repaired: 0 };
+    const e = byTask.get(r.task) ?? { calls: 0, byOutcome: {}, v: new Map<string, number>(), repaired: 0, days: new Map<string, AiTaskDayHealth>() };
     e.calls += 1;
     e.byOutcome[r.outcome] = (e.byOutcome[r.outcome] ?? 0) + 1;
     for (const k of r.violationKinds ?? []) e.v.set(k, (e.v.get(k) ?? 0) + 1);
     if (r.repaired && r.outcome === "ok") e.repaired += 1;
+    const d = e.days.get(r.day) ?? { day: r.day, calls: 0, truncated: 0, groundingRejected: 0, schemaRetry: 0, error: 0 };
+    d.calls += 1;
+    if (r.outcome === "truncated" || r.outcome === "truncated-retry") d.truncated += 1;
+    if (r.outcome === "grounding-rejected") d.groundingRejected += 1;
+    if (r.outcome === "schema-retry") d.schemaRetry += 1;
+    if (r.outcome === "error") d.error += 1;
+    e.days.set(r.day, d);
     byTask.set(r.task, e);
   }
-  return Array.from(byTask, ([task, e]) => ({ task, calls: e.calls, byOutcome: e.byOutcome, topViolations: Array.from(e.v, ([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count), repaired: e.repaired })).sort((a, b) => b.calls - a.calls);
+  return Array.from(byTask, ([task, e]): AiTaskHealth => {
+    const o = e.byOutcome;
+    const failures = Object.entries(o).filter(([k]) => FAILED_OUTCOMES.has(k)).reduce((n, [, c]) => n + c, 0);
+    const failRate = e.calls > 0 ? failures / e.calls : 0;
+    const dominant = Object.entries(o).filter(([k]) => FAILED_OUTCOMES.has(k)).map(([k, c]) => [k === "truncated-retry" ? "truncated" : k, c] as const).reduce<Record<string, number>>((m, [k, c]) => ({ ...m, [k]: (m[k] ?? 0) + c }), {});
+    const top = Object.entries(dominant).sort((a, b) => b[1] - a[1])[0]?.[0];
+    return {
+      task,
+      calls: e.calls,
+      byOutcome: o,
+      topViolations: Array.from(e.v, ([kind, count]) => ({ kind, count })).sort((a, b) => b.count - a.count),
+      repaired: e.repaired,
+      rates: { truncated: ((o.truncated ?? 0) + (o["truncated-retry"] ?? 0)) / e.calls, groundingRejected: (o["grounding-rejected"] ?? 0) / e.calls, schemaRetry: (o["schema-retry"] ?? 0) / e.calls, error: (o.error ?? 0) / e.calls },
+      failures,
+      ...(e.calls >= HEALTH_ALERT_MIN_CALLS && failRate > HEALTH_ALERT_FAIL_RATE ? { alert: { failRate, nextStep: ALERT_STEP[top ?? "error"] ?? ALERT_STEP.error } } : {}),
+      byDay: Array.from(e.days.values()).sort((a, b) => a.day.localeCompare(b.day)),
+    };
+  }).sort((a, b) => b.calls - a.calls);
 }

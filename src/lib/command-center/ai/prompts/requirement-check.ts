@@ -21,6 +21,8 @@ CONSTRAINTS:
 - risks: contradictions between description, criteria and comments, or open linked issues.
 - If the ticket has too little text to review, set insufficientEvidence: true and keep the lists short.
 
+LENGTH: summary 2-3 sentences; at most 5 gaps, 5 questions and 3 risks, one sentence each.
+
 REQUIRED OUTPUT SCHEMA (JSON only):
 { "summary": string, "gaps": string[], "questions": string[], "risks": string[], "confidence": number (0-1), "insufficientEvidence"?: boolean }`;
 }

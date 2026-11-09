@@ -12,6 +12,8 @@ import { mondayOf } from "@/lib/command-center/reports";
 import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
 import { useAiReadiness } from "./use-ai-readiness";
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 
 export function WeeklyInsightsView({ stored }: { stored: StoredWeeklyInsights }) {
   return (
@@ -33,6 +35,7 @@ export function WeeklyInsightsView({ stored }: { stored: StoredWeeklyInsights })
 export function WeeklyInsights() {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
   const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<AiFailure | null>(null);
   const readiness = useAiReadiness("weeklyInsights");
   if (!state.features.weeklyInsights) return null;
   const today = todayLocalIso();
@@ -43,7 +46,9 @@ export function WeeklyInsights() {
     setBusy(true);
     const s = commandCenterStore.getSnapshot();
     const facts = buildWeeklyFacts({ states: s.ticketWorkStates, data: s.data, triageStats: s.aiTriageStats, weekStart, weekEnd: today });
-    commandCenterStore.saveWeeklyInsights(await generateWeeklyInsights({ facts, weekStart, weekEnd: today, customTerms: s.aiDataProtection.customTerms, provider: getAIProvider() }));
+    const { failure: why, ...generated } = await generateWeeklyInsights({ facts, weekStart, weekEnd: today, customTerms: s.aiDataProtection.customTerms, ...(s.aiOutputLanguage === "vi" ? { language: "vi" as const } : {}), provider: getAIProvider() });
+    commandCenterStore.saveWeeklyInsights(generated);
+    setFailure(why ?? null);
     setBusy(false);
   };
 
@@ -58,6 +63,7 @@ export function WeeklyInsights() {
           </button>
         }
       />
+      {failure && <AiFailureNote reason={failure.reason} httpStatus={failure.httpStatus} />}
       {stored ? (
         <>
           <p className="mb-2 flex items-center gap-2 text-xs text-text3">

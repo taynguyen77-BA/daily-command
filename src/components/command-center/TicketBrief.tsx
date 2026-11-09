@@ -5,6 +5,8 @@
 // The first AI use per project shows "What will be sent" first. A suggested status is only a
 // button — clicking it is the ordinary status change (history surface "ai-brief").
 
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -14,7 +16,7 @@ import { todayLocalIso } from "@/lib/command-center/date-utils";
 import { TrustLabel } from "./ui";
 import { useAiReadiness } from "./use-ai-readiness";
 
-type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "shown"; stored: StoredTicketBrief; stale: boolean } | { kind: "message"; text: string };
+type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "shown"; stored: StoredTicketBrief; stale: boolean; failure?: AiFailure } | { kind: "message"; text: string };
 
 export function TicketBrief({ ticketKey, workItemUpdated }: { ticketKey: string; workItemUpdated?: string }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
@@ -37,11 +39,12 @@ export function TicketBrief({ ticketKey, workItemUpdated }: { ticketKey: string;
       today: todayLocalIso(),
       loadContext: (force) => loadIssueContext(commandCenterStore, ticketKey, { workItemUpdated, force }),
       provider: getAIProvider(),
+      ...(snapshot.aiOutputLanguage === "vi" ? { language: "vi" as const } : {}),
     });
     if (r.kind === "cached") setPhase({ kind: "shown", stored: r.stored, stale: r.stale });
     else if (r.kind === "generated") {
       commandCenterStore.saveTicketBrief(r.stored);
-      setPhase({ kind: "shown", stored: r.stored, stale: false });
+      setPhase({ kind: "shown", stored: r.stored, stale: false, failure: r.failure });
     } else if (r.kind === "needs-preview") setPhase({ kind: "preview", preview: r.preview });
     else if (r.kind === "disabled") setPhase({ kind: "message", text: `${r.reason} — allow it in Data & Settings → AI data protection.` });
     else setPhase({ kind: "message", text: r.message });
@@ -63,6 +66,7 @@ export function TicketBrief({ ticketKey, workItemUpdated }: { ticketKey: string;
         {phase.kind === "shown" && (
           <>
             <span className="text-text3">{phase.stored.mode === "claude" ? "AI" : "Deterministic (AI not used)"} · {phase.stored.createdAt.slice(0, 10)}</span>
+            {phase.failure && <AiFailureNote reason={phase.failure.reason} httpStatus={phase.failure.httpStatus} />}
             {phase.stale && <span data-brief-stale className="rounded bg-orange/15 px-1.5 py-0.5 text-[10px] font-medium text-orange">Updated since brief</span>}
             <button onClick={() => void open({ regenerate: true })} className="link text-xs">
               Regenerate

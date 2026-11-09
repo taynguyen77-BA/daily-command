@@ -12,11 +12,11 @@ function finding(dimension: AiEvaluationFinding["dimension"], severity: AiEvalua
 }
 
 // §16, §42 — the exact causality-unsafe patterns the prompts are instructed to avoid.
-const CAUSAL_LANGUAGE_PATTERNS = [/\bcaused\b/i, /\bled to\b/i, /\bresulted in\b/i, /\bbecause of (the|this) decision\b/i, /\bdue to (the|this) decision\b/i, /\btherefore\b.*\bdecision\b/i];
+export const CAUSAL_LANGUAGE_PATTERNS = [/\bcaused\b/i, /\bled to\b/i, /\bresulted in\b/i, /\bbecause of (the|this) decision\b/i, /\bdue to (the|this) decision\b/i, /\btherefore\b.*\bdecision\b/i];
 
 // §13, §28 — role/hierarchy words that would indicate an inferred organizational position
 // rather than an explicit, supplied fact.
-const OWNERSHIP_INFERENCE_PATTERNS = [/\bas the (ba|po|pm|business analyst|product owner|project manager)\b/i, /\bsince you are\b/i, /\byour manager\b/i, /\byou should delegate\b/i, /\byour management style\b/i];
+export const OWNERSHIP_INFERENCE_PATTERNS = [/\bas the (ba|po|pm|business analyst|product owner|project manager)\b/i, /\bsince you are\b/i, /\byour manager\b/i, /\byou should delegate\b/i, /\byour management style\b/i];
 
 function textOf(response: unknown): string {
   return JSON.stringify(response);

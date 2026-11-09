@@ -11,6 +11,9 @@
 //      write or any other action. If AI is unavailable, over budget, or the answer isn't
 //      grounded, the deterministic checklist is shown instead — never an error.
 
+import { runScoped } from "@/lib/command-center/ai/outcome-scope";
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -30,7 +33,7 @@ type Phase =
   | { kind: "loading" }
   | { kind: "preview"; input: TicketContextInput; session: RedactionSession; redactions: number }
   | { kind: "running" }
-  | { kind: "done"; result: RequirementCheckResult; mode: "mock" | "claude"; providerState?: string }
+  | { kind: "done"; result: RequirementCheckResult; mode: "mock" | "claude"; providerState?: string; failure?: AiFailure }
   | { kind: "error"; message: string };
 
 function ResultList({ title, items }: { title: string; items: string[] }) {
@@ -63,16 +66,16 @@ export function TicketAiPanel({ item }: { item: WorkItem }) {
     );
   }
 
-  const finish = (result: RequirementCheckResult, mode: "mock" | "claude") => {
+  const finish = (result: RequirementCheckResult, mode: "mock" | "claude", failure?: AiFailure) => {
     const last = getRecentAiTrace().find((t) => t.task === "checkRequirements");
-    setPhase({ kind: "done", result, mode, providerState: last?.providerState });
+    setPhase({ kind: "done", result, mode, providerState: last?.providerState, failure });
   };
 
   const send = async (input: TicketContextInput, session: RedactionSession) => {
     setPhase({ kind: "running" });
-    const provider = getAIProvider();
+    const run = await runScoped(getAIProvider(), (p) => p.checkRequirements(input));
     // Aliases → real terms again, for display only.
-    finish(session.restoreDeep(await provider.checkRequirements(input)), provider.mode);
+    finish(session.restoreDeep(run.value), run.mode, run.failure);
   };
 
   const start = async (force = false) => {
@@ -87,7 +90,7 @@ export function TicketAiPanel({ item }: { item: WorkItem }) {
     const flow = await runRequirementCheckFlow(loaded.context, commandCenterStore.getSnapshot().aiDataProtection, provider);
     if (flow.kind === "disabled") setPhase({ kind: "error", message: flow.reason });
     else if (flow.kind === "needs-preview") setPhase({ kind: "preview", input: flow.input, session: flow.session, redactions: flow.redactions });
-    else finish(flow.result, provider.mode);
+    else finish(flow.result, flow.mode, flow.failure);
   };
 
   return (
@@ -134,6 +137,7 @@ export function TicketAiPanel({ item }: { item: WorkItem }) {
 
       {phase.kind === "done" && (
         <div className="mt-2">
+          {phase.failure && <AiFailureNote reason={phase.failure.reason} httpStatus={phase.failure.httpStatus} />}
           <p className="flex flex-wrap items-center gap-2">
             {phase.mode === "claude" ? "AI draft — review before acting on it." : "Deterministic checklist (AI not used for this answer)."}
             {phase.providerState && <AiProviderIndicator state={phase.providerState as Parameters<typeof AiProviderIndicator>[0]["state"]} />}

@@ -1,5 +1,6 @@
 "use client";
 
+import { runScoped } from "@/lib/command-center/ai/outcome-scope";
 import { useEffect, useRef, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import type { PriorityScoreResult, WorkItem } from "@/lib/command-center/types";
@@ -51,12 +52,10 @@ export function TakeActionPanel({
   useEffect(() => {
     if (!item) return;
     const why = result?.reasoning ?? "This item needs attention.";
-    const provider = getAIProvider();
-    provider
-      .generateCommunication(item, item.owner ? "the item owner" : "the relevant team", why)
-      .then((m) => {
-        setMessage(m);
-        setMessageMode(provider.mode);
+    runScoped(getAIProvider(), (p) => p.generateCommunication(item, item.owner ? "the item owner" : "the relevant team", why))
+      .then((r) => {
+        setMessage(r.value);
+        setMessageMode(r.mode);
       })
       .finally(() => setLoading(false));
   }, [item, result]);

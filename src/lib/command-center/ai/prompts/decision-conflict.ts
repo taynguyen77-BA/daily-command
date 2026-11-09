@@ -21,5 +21,7 @@ CONSTRAINTS:
 - Use only the reasons/evidence above. If they are too thin to say anything useful, set
   insufficientEvidence: true instead of guessing.
 
+LENGTH: assessment 2-3 sentences.
+
 REQUIRED OUTPUT SCHEMA (JSON only): { "assessment": string, "confidence": number, "insufficientEvidence": boolean }`;
 }

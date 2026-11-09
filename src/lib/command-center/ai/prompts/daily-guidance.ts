@@ -29,5 +29,7 @@ TASK: Write a short, calm summary of today's focus, list the top focus items and
 watch (grounded only in the facts above), give one recommendation, and reference which
 evidence items support it.
 
+LENGTH: summary 2-3 sentences; topFocus and watch at most 3 short items each; recommendation one sentence.
+
 REQUIRED OUTPUT SCHEMA (JSON only): { "summary": string, "topFocus": string[], "watch": string[], "recommendation": string, "evidenceReferences": string[], "confidence": number, "insufficientEvidence": boolean }`;
 }

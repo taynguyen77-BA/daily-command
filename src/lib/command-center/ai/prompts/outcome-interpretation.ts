@@ -23,5 +23,7 @@ List the observed changes plainly. Note any limitations of this read (e.g. short
 window, other concurrent changes). Give a calibrated assessment and, if useful, one
 recommendation for what to do next.
 
+LENGTH: summary 2-3 sentences; observedChanges at most 4 short items; limitations, assessment and recommendation one sentence each.
+
 REQUIRED OUTPUT SCHEMA (JSON only): { "summary": string, "observedChanges": string[], "limitations": string, "assessment": string, "recommendation": string, "confidence": number }`;
 }

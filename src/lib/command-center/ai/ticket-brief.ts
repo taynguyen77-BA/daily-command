@@ -9,6 +9,8 @@
 // suggestedStatus is only ever a button: clicking it goes through the normal setTicketStatus
 // (surface "ai-brief", reason "AI-suggested: …"). Nothing changes without that click.
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { IssueContext } from "../jira/issue-context";
 import type { TicketStatusSurface, TicketWorkStatus } from "../types";
 import { addDays } from "../date-utils";
@@ -44,7 +46,7 @@ export function putBrief(cache: AiBriefCache, b: StoredTicketBrief): AiBriefCach
 
 export type BriefOpen =
   | { kind: "cached"; stored: StoredTicketBrief; stale: boolean }
-  | { kind: "generated"; stored: StoredTicketBrief }
+  | { kind: "generated"; stored: StoredTicketBrief; failure?: AiFailure }
   | Exclude<TicketAiGate, { kind: "ready" }>
   | { kind: "error"; message: string };
 
@@ -60,7 +62,9 @@ export async function openTicketBrief(args: {
   today: string;
   nowIso?: string;
   loadContext: (force: boolean) => Promise<{ ok: true; context: IssueContext } | { ok: false; error: string }>;
-  provider: Pick<AIProvider, "generateTicketBrief" | "mode">;
+  provider: Pick<AIProvider, "generateTicketBrief" | "mode" | "runTask">;
+  /** V2.51 A3 — answer language (omitted = English; the prompt is then unchanged). */
+  language?: "en" | "vi";
 }): Promise<BriefOpen> {
   const stored = args.cache[args.key];
   if (stored && !args.regenerate) return { kind: "cached", stored, stale: isBriefStale(stored, args.workItemUpdated) };
@@ -70,9 +74,9 @@ export async function openTicketBrief(args: {
   if (!loaded.ok) return { kind: "error", message: loaded.error };
   const gate = gateTicketAi(loaded.context, args.settings, { previewConfirmed: args.previewConfirmed });
   if (gate.kind !== "ready") return gate;
-  const raw = await args.provider.generateTicketBrief(gate.input, args.today);
-  const brief = gate.session.restoreDeep(raw);
-  return { kind: "generated", stored: { key: args.key, updated: loaded.context.updated, createdAt: args.nowIso ?? new Date().toISOString(), mode: args.provider.mode, brief } };
+  const r = await runScoped(args.provider, (p) => p.generateTicketBrief(gate.input, args.today, args.language === "vi" ? "vi" : undefined));
+  const brief = gate.session.restoreDeep(r.value);
+  return { kind: "generated", stored: { key: args.key, updated: loaded.context.updated, createdAt: args.nowIso ?? new Date().toISOString(), mode: r.mode, brief }, ...(r.failure ? { failure: r.failure } : {}) };
 }
 
 const STATUS_LABEL: Record<NonNullable<TicketBriefResponse["suggestedStatus"]>["status"], string> = {

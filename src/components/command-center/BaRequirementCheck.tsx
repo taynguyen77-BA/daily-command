@@ -5,6 +5,8 @@
 // stakeholder, missing information, risks. Copy as Markdown, download a CSV for Excel, or post
 // as a Jira comment through the write-back dialog (preview + confirm + server gate).
 
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -15,7 +17,7 @@ import type { BaRequirementCheckResponse } from "@/lib/command-center/ai/schemas
 import { TrustLabel } from "./ui";
 import { useAiReadiness } from "./use-ai-readiness";
 
-type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "done"; result: BaRequirementCheckResponse; mode: "mock" | "claude" } | { kind: "message"; text: string };
+type Phase = { kind: "closed" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "done"; result: BaRequirementCheckResponse; mode: "mock" | "claude"; failure?: AiFailure } | { kind: "message"; text: string };
 
 const CATEGORY: Record<BaRequirementCheckResponse["acceptanceCriteria"][number]["category"], string> = { "happy-path": "Happy path", validation: "Validation", error: "Errors", "edge-case": "Edge cases" };
 
@@ -35,7 +37,7 @@ export function BaRequirementCheck({ ticketKey, workItemUpdated }: { ticketKey: 
     const r = await runBaRequirementCheck(loaded.context, commandCenterStore.getSnapshot().aiDataProtection, getAIProvider(), { previewConfirmed });
     if (r.kind === "disabled") setPhase({ kind: "message", text: `${r.reason} — allow it in Data & Settings → AI data protection.` });
     else if (r.kind === "needs-preview") setPhase({ kind: "preview", preview: r.preview });
-    else setPhase({ kind: "done", result: r.result, mode: r.mode });
+    else setPhase({ kind: "done", result: r.result, mode: r.mode, failure: r.failure });
   };
 
   if (phase.kind === "closed") {
@@ -52,6 +54,7 @@ export function BaRequirementCheck({ ticketKey, workItemUpdated }: { ticketKey: 
         <TrustLabel kind="ai-assessment" />
         <span className="font-semibold text-text">Requirement check</span>
         {phase.kind === "done" && <span className="text-text3">{phase.mode === "claude" ? "AI (deep)" : "Deterministic (AI not used)"}</span>}
+        {phase.kind === "done" && phase.failure && <AiFailureNote reason={phase.failure.reason} httpStatus={phase.failure.httpStatus} />}
         <button onClick={() => setPhase({ kind: "closed" })} className="ml-auto text-text3 hover:text-text" aria-label="Close requirement check">
           ✕
         </button>

@@ -25,5 +25,7 @@ upside/downside grounded in the given facts. You may name one option as
 recommendedOptionId, but the UI will always label it "AI RECOMMENDATION" and require the
 human to click [SELECT OPTION] themselves — nothing is chosen automatically.
 
+LENGTH: keep every text field to one or two sentences; at most 3 options.
+
 REQUIRED OUTPUT SCHEMA (JSON only): { "summary": string, "options": [{ "id": string, "label": string, "rationale": string, "upside": string, "downside": string, "dependencies": string[], "risks": string[], "evidence": string[], "confidence": number }] (2-4 items), "recommendedOptionId": string, "tradeoffs": string, "confidence": number, "insufficientEvidence": boolean }`;
 }

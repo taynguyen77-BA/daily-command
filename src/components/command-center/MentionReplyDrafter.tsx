@@ -5,6 +5,8 @@
 // draft is editable and is only ever copied, or handed to the existing Jira write-back dialog
 // ("Post to Jira…": preview + confirm + server gate). Posting marks the mention replied.
 
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -17,7 +19,7 @@ import { useAiReadiness } from "./use-ai-readiness";
 
 const draftCache = memoryDraftCache();
 
-type Phase = { kind: "closed" } | { kind: "options" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "draft"; draft: MentionReplyResponse; mode: "mock" | "claude"; excerptOnly: boolean } | { kind: "message"; text: string };
+type Phase = { kind: "closed" } | { kind: "options" } | { kind: "loading" } | { kind: "preview"; preview: string } | { kind: "draft"; failure?: AiFailure; draft: MentionReplyResponse; mode: "mock" | "claude"; excerptOnly: boolean } | { kind: "message"; text: string };
 
 export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
@@ -51,7 +53,7 @@ export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
     else if (r.kind === "needs-preview") setPhase({ kind: "preview", preview: r.preview });
     else {
       setText(r.draft.reply);
-      setPhase({ kind: "draft", draft: r.draft, mode: r.mode, excerptOnly: r.excerptOnly });
+      setPhase({ kind: "draft", draft: r.draft, mode: r.mode, excerptOnly: r.excerptOnly, failure: r.failure });
     }
   };
 
@@ -116,6 +118,7 @@ export function MentionReplyDrafter({ mention }: { mention: MentionRef }) {
       {phase.kind === "draft" && (
         <div className="mt-1">
           <p className="text-text3">{phase.mode === "claude" ? "AI draft — edit before using it." : "AI unavailable — a template draft to edit."}</p>
+          {phase.failure && <AiFailureNote reason={phase.failure.reason} httpStatus={phase.failure.httpStatus} />}
           {phase.excerptOnly && (
             <p data-reply-excerpt-only className="mt-1 text-orange">
               {MENTION_NOT_FOUND_NOTICE}

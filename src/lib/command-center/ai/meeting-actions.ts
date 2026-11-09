@@ -4,6 +4,8 @@
 // (addDecision / addAction / setTicketStatus with surface "ai-meeting"). Ticket keys that
 // don't exist in the app are dropped (never created); dates are resolved from the notes' words.
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { TicketStatusSurface, TicketWorkStatus } from "../types";
 import type { AIProvider } from "./provider";
 import { RedactionSession, type CustomTerm } from "./redaction";
@@ -74,10 +76,10 @@ export function toMeetingReview(out: MeetingActionsResponse, knownKeys: Set<stri
   };
 }
 
-export async function extractMeetingReview(args: { notes: string; today: string; customTerms: CustomTerm[]; knownKeys: Set<string>; provider: Pick<AIProvider, "extractMeetingActions" | "mode"> }): Promise<{ review: MeetingReview; mode: "mock" | "claude" }> {
+export async function extractMeetingReview(args: { notes: string; today: string; customTerms: CustomTerm[]; knownKeys: Set<string>; provider: Pick<AIProvider, "extractMeetingActions" | "mode" | "runTask"> }): Promise<{ review: MeetingReview; mode: "mock" | "claude"; failure?: AiFailure }> {
   const session = new RedactionSession(args.customTerms);
-  const out = await args.provider.extractMeetingActions({ today: args.today, notes: session.redact(args.notes).slice(0, 20_000) });
-  return { review: toMeetingReview(session.restoreDeep(out), args.knownKeys, args.today), mode: args.provider.mode };
+  const r = await runScoped(args.provider, (p) => p.extractMeetingActions({ today: args.today, notes: session.redact(args.notes).slice(0, 20_000) }));
+  return { review: toMeetingReview(session.restoreDeep(r.value), args.knownKeys, args.today), mode: r.mode, ...(r.failure ? { failure: r.failure } : {}) };
 }
 
 type MeetingStore = {

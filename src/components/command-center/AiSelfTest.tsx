@@ -53,7 +53,7 @@ export function AiSelfTest({ configured, onDone }: { configured: boolean; onDone
       <p className="text-xs text-text3">Runs synthetic examples (no client data) through every AI feature against the real model and checks language, placeholders, length and the fact check.</p>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <select value={mode} onChange={(e) => setMode(e.target.value === "full" ? "full" : "quick")} className="rounded border border-border bg-surface2 px-2 py-1 text-sm" aria-label="Self-test mode">
-          <option value="quick">Quick — 5 core features (~{Math.round(estimateSelfTestTokens("quick") / 1000)}k tokens)</option>
+          <option value="quick">Quick — 6 core features (~{Math.round(estimateSelfTestTokens("quick") / 1000)}k tokens)</option>
           <option value="full">Full — every feature (~{Math.round(estimateSelfTestTokens("full") / 1000)}k tokens)</option>
         </select>
         {!confirming ? (

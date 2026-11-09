@@ -1,6 +1,7 @@
 import type { Action, Risk } from "../../types";
+import { languageLine, type AiLanguage } from "./language";
 
-export function endOfDayPrompt(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[]): string {
+export function endOfDayPrompt(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[], language?: AiLanguage): string {
   return `You are closing out the day for an IT Business Analyst / Product Owner / Project Manager.
 
 AVAILABLE FACTS:
@@ -13,6 +14,8 @@ CONSTRAINTS:
 - Ground every claim in the facts above. Never invent an item, owner, or cause.
 - If there is no carry-over item to recommend starting with, say so plainly.
 
+LENGTH: at most 5 bullets in each list.
+${languageLine(language)}
 REQUIRED OUTPUT SCHEMA (JSON only): { "text": string } formatted as:
 "TOMORROW'S STARTING POINT: <one sentence>\\n\\nCARRY-OVER ACTIONS:\\n<bulleted list>\\n\\nNEW RISKS:\\n<bulleted list>"`;
 }

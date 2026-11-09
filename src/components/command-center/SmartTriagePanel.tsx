@@ -6,6 +6,9 @@
 // Low-confidence suggestions start unticked. Projects outside the AI allow-list are triaged
 // from metadata only (no comment text is sent).
 
+import { runScoped } from "@/lib/command-center/ai/outcome-scope";
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { commandCenterStore } from "@/lib/command-center/store";
@@ -25,6 +28,7 @@ export function SmartTriagePanel({ candidates, today, onApplied }: { candidates:
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [failure, setFailure] = useState<AiFailure | null>(null);
   const [metadataOnly, setMetadataOnly] = useState<string[]>([]);
   const readiness = useAiReadiness("smartTriage");
   if (candidates.length === 0) return null;
@@ -32,13 +36,14 @@ export function SmartTriagePanel({ candidates, today, onApplied }: { candidates:
   const suggest = async () => {
     setBusy(true);
     const { input, session, metadataOnlyKeys } = buildTriageInput(candidates, commandCenterStore.getSnapshot().aiDataProtection, today);
-    const provider = getAIProvider();
-    const raw = await provider.triageNewItems(input);
+    const run = await runScoped(getAIProvider(), (p) => p.triageNewItems(input));
+    const raw = run.value;
     const list = normalizeTriage(input.items.map((i) => i.key), raw, session);
     setSuggestions(list);
     setSelected(new Set(list.filter(defaultChecked).map((s) => s.key)));
     setMetadataOnly(metadataOnlyKeys);
-    setNote(provider.mode === "claude" ? null : "AI unavailable — showing cautious suggestions from metadata (all unticked).");
+    setNote(run.ai ? null : "AI unavailable — showing cautious suggestions from metadata (all unticked).");
+    setFailure(run.failure ?? null);
     setBusy(false);
   };
 
@@ -62,6 +67,7 @@ export function SmartTriagePanel({ candidates, today, onApplied }: { candidates:
           </button>
         )}
         {note && <span className="text-xs text-text3">{note}</span>}
+        {failure && <AiFailureNote reason={failure.reason} httpStatus={failure.httpStatus} />}
       </div>
       {suggestions && suggestions.length > 0 && (
         <>

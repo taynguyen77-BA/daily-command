@@ -2,6 +2,7 @@
 // by person, skip reasons, triage acceptance). Numbers are locked to the facts.
 
 import type { TaskInput } from "../task-registry";
+import { languageLine } from "./language";
 
 export function weeklyInsightsPrompt(i: TaskInput<"weeklyInsights">): string {
   return `You are reviewing the week ${i.weekStart} to ${i.weekEnd} with an IT Business Analyst / Product Owner.
@@ -17,5 +18,8 @@ CONSTRAINTS:
 - Never add or change a number, ticket key, person or date. No causal claims ("caused", "led to"); describe what happened.
 - No judgements about people's performance.
 
+LENGTH: each observation 1-2 sentences; each suggestion one sentence.
+
+${languageLine(i.language)}
 REQUIRED OUTPUT SCHEMA (JSON only): { "observations": [{ "text": string, "evidence": string[] }], "suggestions": string[] }`;
 }

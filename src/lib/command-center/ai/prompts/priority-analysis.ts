@@ -32,6 +32,8 @@ CONSTRAINTS:
 - Never state the classification with more certainty than the given confidence value.
 - confidence in your response must not exceed the deterministic confidence given above.
 
+LENGTH: inference 2-3 sentences; recommendation one sentence.
+
 REQUIRED OUTPUT SCHEMA (JSON only, no prose outside the object):
 {
   "inference": string,   // what this means, grounded only in the facts/evidence above

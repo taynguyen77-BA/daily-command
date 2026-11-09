@@ -9,6 +9,8 @@
 //   READY but open P1/P2 items              → Go with conditions | No-Go
 //   READY, nothing high-priority open       → Go | Go with conditions | No-Go
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { CommandCenterData, ReleaseDrift, ReleaseHealth } from "../types";
 import { isInRelease } from "../release-health";
 import type { AIProvider } from "./provider";
@@ -86,9 +88,10 @@ export function checkReleaseBrief(out: ReleaseBriefResponse, input: TaskInput<"r
   return v;
 }
 
-export async function runReleaseBrief(input: TaskInput<"releaseGoNoGo">, session: RedactionSession, provider: Pick<AIProvider, "releaseGoNoGo" | "mode">): Promise<{ brief: ReleaseBriefResponse; usedAi: boolean; notice?: string }> {
-  const out = await provider.releaseGoNoGo(input);
-  if (provider.mode !== "claude") return { brief: session.restoreDeep(deterministicReleaseBrief(input)), usedAi: false, notice: "AI unavailable — deterministic brief from the readiness rules." };
+export async function runReleaseBrief(input: TaskInput<"releaseGoNoGo">, session: RedactionSession, provider: Pick<AIProvider, "releaseGoNoGo" | "mode" | "runTask">): Promise<{ brief: ReleaseBriefResponse; usedAi: boolean; notice?: string; failure?: AiFailure }> {
+  const run = await runScoped(provider, (p) => p.releaseGoNoGo(input));
+  const out = run.value;
+  if (!run.ai) return { brief: session.restoreDeep(deterministicReleaseBrief(input)), usedAi: false, notice: "AI unavailable — deterministic brief from the readiness rules.", ...(run.failure ? { failure: run.failure } : {}) };
   const problems = checkReleaseBrief(out, input);
   if (problems.length) return { brief: session.restoreDeep(deterministicReleaseBrief(input)), usedAi: false, notice: `The AI brief broke a rule (${problems.slice(0, 2).join("; ")}) — showing the deterministic brief.` };
   return { brief: session.restoreDeep(out), usedAi: true };

@@ -25,5 +25,7 @@ CONSTRAINTS:
   rather than guessing.
 - Confidence must not exceed what the historical coverage above supports.
 
+LENGTH: assessment 1-2 sentences; impact and recommendation one sentence each.
+
 REQUIRED OUTPUT SCHEMA (JSON only): { "assessment": string, "impact": string, "recommendation": string, "confidence": number, "insufficientEvidence": boolean }`;
 }

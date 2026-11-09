@@ -4,6 +4,8 @@
 // stakeholder; missing information; risks. Copy as Markdown, export as Excel-compatible CSV,
 // or post as a Jira comment through the gated write-back flow.
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { IssueContext } from "../jira/issue-context";
 import { gateTicketAi, type AiDataProtectionSettings, type TicketAiGate } from "./data-protection";
 import type { AIProvider } from "./provider";
@@ -44,15 +46,16 @@ export function normalizeBaCheck(r: BaRequirementCheckResponse, source: string):
   };
 }
 
-export type BaCheckFlow = Exclude<TicketAiGate, { kind: "ready" }> | { kind: "done"; result: BaRequirementCheckResponse; mode: "mock" | "claude" };
+export type BaCheckFlow = Exclude<TicketAiGate, { kind: "ready" }> | { kind: "done"; result: BaRequirementCheckResponse; mode: "mock" | "claude"; failure?: AiFailure };
 
-export async function runBaRequirementCheck(context: IssueContext, settings: AiDataProtectionSettings, provider: Pick<AIProvider, "baRequirementCheck" | "mode">, opts: { previewConfirmed?: boolean } = {}): Promise<BaCheckFlow> {
+export async function runBaRequirementCheck(context: IssueContext, settings: AiDataProtectionSettings, provider: Pick<AIProvider, "baRequirementCheck" | "mode" | "runTask">, opts: { previewConfirmed?: boolean } = {}): Promise<BaCheckFlow> {
   const gate = gateTicketAi(context, settings, opts);
   if (gate.kind !== "ready") return gate;
-  const raw = await provider.baRequirementCheck(gate.input);
+  const run = await runScoped(provider, (p) => p.baRequirementCheck(gate.input));
+  const raw = run.value;
   // Traceability is checked against the redacted text the model saw, then aliases restored.
   const normalized = normalizeBaCheck(raw, ticketSourceText(gate.input));
-  return { kind: "done", result: gate.session.restoreDeep(normalized), mode: provider.mode };
+  return { kind: "done", result: gate.session.restoreDeep(normalized), mode: run.mode, ...(run.failure ? { failure: run.failure } : {}) };
 }
 
 const CATEGORY_LABEL: Record<BaRequirementCheckResponse["acceptanceCriteria"][number]["category"], string> = {

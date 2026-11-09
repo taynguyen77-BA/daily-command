@@ -7,6 +7,8 @@
 //      → placeholders; custom terms → aliases, restored in the output.
 //   3. "What will be sent" preview on the first use per project (previewSeenProjects).
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { IssueContext } from "../jira/issue-context";
 import { RedactionSession, type CustomTerm } from "./redaction";
 import { ticketContextInputSchema, type TicketContextInput } from "./task-registry";
@@ -133,17 +135,17 @@ export function gateTicketAi(context: IssueContext, settings: AiDataProtectionSe
   return { kind: "ready", input: built.input, session: built.session };
 }
 
-export type RequirementCheckFlow = Exclude<TicketAiGate, { kind: "ready" }> | { kind: "done"; result: RequirementCheckResult };
+export type RequirementCheckFlow = Exclude<TicketAiGate, { kind: "ready" }> | { kind: "done"; result: RequirementCheckResult; mode: "mock" | "claude"; failure?: AiFailure };
 
 /** Requirement check: gate → model (or deterministic fallback) → aliases restored. */
 export async function runRequirementCheckFlow(
   context: IssueContext,
   settings: AiDataProtectionSettings,
-  provider: Pick<AIProvider, "checkRequirements">,
+  provider: Pick<AIProvider, "checkRequirements" | "mode" | "runTask">,
   opts: { previewConfirmed?: boolean } = {}
 ): Promise<RequirementCheckFlow> {
   const gate = gateTicketAi(context, settings, opts);
   if (gate.kind !== "ready") return gate;
-  const raw = await provider.checkRequirements(gate.input);
-  return { kind: "done", result: gate.session.restoreDeep(raw) };
+  const run = await runScoped(provider, (p) => p.checkRequirements(gate.input));
+  return { kind: "done", result: gate.session.restoreDeep(run.value), mode: run.mode, ...(run.failure ? { failure: run.failure } : {}) };
 }

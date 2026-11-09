@@ -1,6 +1,7 @@
 import type { WeeklyReviewFacts } from "../../weekly-review";
+import { languageLine, type AiLanguage } from "./language";
 
-export function weeklyReviewPrompt(facts: WeeklyReviewFacts): string {
+export function weeklyReviewPrompt(facts: WeeklyReviewFacts, language?: AiLanguage): string {
   if (!facts.hasEnoughHistory) {
     return `You are writing a weekly review for an IT Business Analyst / Product Owner /
 Project Manager, but fewer than 2 daily snapshots exist yet.
@@ -37,7 +38,8 @@ NEXT WEEK'S CANDIDATE PRIORITIES (already ranked deterministically): ${
 
 CONSTRAINTS:
 - Use only the facts given. If a section has no facts, say so plainly rather than inventing content.
-
+- Keep the whole review under about 350 words.
+${languageLine(language)}
 REQUIRED OUTPUT SCHEMA (JSON only): { "text": string } formatted with these exact section
 headers, each followed by 1-3 sentences or a short bullet list grounded only in the facts above:
 ## EXECUTIVE SUMMARY

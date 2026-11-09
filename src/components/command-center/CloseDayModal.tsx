@@ -7,7 +7,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCommandCenter } from "./use-command-center";
-import { getAIProvider } from "@/lib/command-center/ai";
 import type { EodEntry } from "@/lib/command-center/store";
 import { buildSnapshotMetrics, compareSnapshots } from "@/lib/command-center/memory";
 import { dailyReportToMarkdown, summarizeDailyReport } from "@/lib/command-center/daily-report";
@@ -153,7 +152,7 @@ export function CloseDayModal({ onClose }: { onClose: () => void }) {
     setLoading(true);
     const result = await store.closeDay();
     setEntry(result);
-    setEntryMode(getAIProvider().mode);
+    setEntryMode(result.mode ?? "mock");
     setLoading(false);
   }
 

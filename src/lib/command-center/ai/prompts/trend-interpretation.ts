@@ -23,6 +23,8 @@ CONSTRAINTS:
 - Use only the deltas above. Never invent a cause not evidenced by this data.
 - confidence must reflect how clearly the deltas support your interpretation, not the trend's severity.
 
+LENGTH: every field 1-2 sentences.
+
 REQUIRED OUTPUT SCHEMA (JSON only):
 { "whatChanged": string, "whyItMatters": string, "likelyImpact": string, "recommendedResponse": string, "confidence": number }`;
 }

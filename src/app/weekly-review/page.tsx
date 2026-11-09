@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { useCommandCenter } from "@/components/command-center/use-command-center";
 import { getAIProvider } from "@/lib/command-center/ai";
+import { weeklyReviewText } from "@/lib/command-center/ai/weekly-review-text";
 import { buildWeeklyReviewFacts, type WeeklyReviewFacts } from "@/lib/command-center/weekly-review";
 import { buildPersonalDeliveryReviewFacts } from "@/lib/command-center/personal-patterns";
 import { buildActionStrategyFacts, repeatedlyIneffective } from "@/lib/command-center/action-effectiveness";
@@ -110,7 +111,8 @@ export default function WeeklyReviewPage() {
     setLoading(true);
     const today = getTodayIso();
     const builtFacts = buildWeeklyReviewFacts(filteredData, state.snapshotHistory, today, state.isDemo ? "demo" : "manual", scoring);
-    const text = await getAIProvider().generateWeeklyReview(builtFacts);
+    // V2.51 A3 — "not enough history yet" is a deterministic fact: no model call (the model might improvise).
+    const text = await weeklyReviewText(builtFacts, getAIProvider(), state.aiOutputLanguage === "vi" ? "vi" : undefined);
     setReviewText(text);
     setLoading(false);
   }

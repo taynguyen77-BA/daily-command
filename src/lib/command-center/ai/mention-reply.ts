@@ -12,6 +12,8 @@
 // draft is made from the mention's excerpt and says so (MENTION_NOT_FOUND_NOTICE). A cached
 // draft keeps the mode that produced it.
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { IssueContext } from "../jira/issue-context";
 import { compareJiraUpdated } from "../jira/updated-time";
 import { gateTicketAi, type AiDataProtectionSettings, type TicketAiGate } from "./data-protection";
@@ -82,7 +84,7 @@ export function memoryDraftCache(max = 50): DraftCache {
 export type ReplyDraftFlow =
   | Exclude<TicketAiGate, { kind: "ready" }>
   | { kind: "error"; message: string }
-  | { kind: "done"; draft: MentionReplyResponse; fromCache: boolean; mode: "mock" | "claude"; excerptOnly: boolean };
+  | { kind: "done"; draft: MentionReplyResponse; fromCache: boolean; mode: "mock" | "claude"; excerptOnly: boolean; failure?: AiFailure };
 
 export type ReplyContextLoad = { ok: true; context: IssueContext; fromCache: boolean } | { ok: false; error: string };
 
@@ -92,7 +94,7 @@ export async function draftMentionReplyFlow(args: {
   mention: MentionRef;
   options: ReplyOptions;
   settings: AiDataProtectionSettings;
-  provider: Pick<AIProvider, "draftMentionReply" | "mode">;
+  provider: Pick<AIProvider, "draftMentionReply" | "mode" | "runTask">;
   cache: DraftCache;
   previewConfirmed?: boolean;
 }): Promise<ReplyDraftFlow> {
@@ -108,13 +110,15 @@ export async function draftMentionReplyFlow(args: {
   const key = mentionReplyCacheKey(args.mention, context.updated, args.options);
   const hit = args.cache.get(key);
   if (hit) return { kind: "done", draft: hit.draft, fromCache: true, mode: hit.mode, excerptOnly: !body.found };
-  const raw = await args.provider.draftMentionReply({
-    ticket: gate.input,
-    mention: { author: gate.session.redact(body.author).slice(0, 200), created: body.created.slice(0, 40), body: gate.session.redact(body.body).slice(0, 4000) },
-    ...args.options,
-  });
-  const draft = gate.session.restoreDeep(raw);
+  const r = await runScoped(args.provider, (p) =>
+    p.draftMentionReply({
+      ticket: gate.input,
+      mention: { author: gate.session.redact(body.author).slice(0, 200), created: body.created.slice(0, 40), body: gate.session.redact(body.body).slice(0, 4000) },
+      ...args.options,
+    })
+  );
+  const draft = gate.session.restoreDeep(r.value);
   // Only real AI drafts are cached — a template fallback is retried next time.
-  if (args.provider.mode === "claude") args.cache.set(key, { draft, mode: args.provider.mode });
-  return { kind: "done", draft, fromCache: false, mode: args.provider.mode, excerptOnly: !body.found };
+  if (r.ai) args.cache.set(key, { draft, mode: "claude" });
+  return { kind: "done", draft, fromCache: false, mode: r.mode, excerptOnly: !body.found, ...(r.failure ? { failure: r.failure } : {}) };
 }

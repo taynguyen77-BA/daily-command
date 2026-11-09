@@ -48,6 +48,7 @@ export function ReportSummaryParagraph({
         ) : (
           <button
             className="btn btn-sm btn-ghost"
+            title="Secondary: rewords this numbers line only — the Summary above tells the story."
             onClick={async () => {
               setStatus("Polishing…");
               try {

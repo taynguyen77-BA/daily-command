@@ -5,6 +5,7 @@
 // list, with zero user gesture). The conflict assessment is now strictly on-demand,
 // behind an explicit click, routed through the entity cache (ai/ai-cache.ts).
 
+import { createOutcomeScope } from "@/lib/command-center/ai/outcome-scope";
 import React, { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
@@ -33,12 +34,13 @@ function ConflictAssessment({ conflict }: { conflict: DecisionConflictCandidate 
     setLoading(true);
     try {
       const facts = conflict.reasons;
+      const scope = createOutcomeScope();
       const { value, cacheState: cs } = await withAICache("detectDecisionConflicts", `decision-conflict:${conflict.decision.id}`, facts, conflict.evidence, () =>
-        getAIProvider().detectDecisionConflicts(conflict)
+        scope.run(getAIProvider(), (p) => p.detectDecisionConflicts(conflict))
       );
       setAssessment(value);
       setCacheState(cs);
-      setMode(getAIProvider().mode);
+      setMode(scope.mode);
     } finally {
       setLoading(false);
     }

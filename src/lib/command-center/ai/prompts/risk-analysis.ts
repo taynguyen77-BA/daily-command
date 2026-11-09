@@ -22,6 +22,8 @@ CONSTRAINTS:
 - If the facts above are insufficient, set insufficientEvidence: true instead of guessing.
 - confidence in your response must not exceed the deterministic confidence given above.
 
+LENGTH: inference 2-3 sentences; recommendation one sentence.
+
 REQUIRED OUTPUT SCHEMA (JSON only, no prose outside the object):
 {
   "inference": string,   // what this risk means in context, grounded only in facts/evidence above

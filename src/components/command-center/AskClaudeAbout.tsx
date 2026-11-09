@@ -8,6 +8,7 @@
 // of bounded question types, each a single on-demand call routed through the entity cache.
 // Every answer renders Evidence + Unknowns + Recommendation + TrustLabel, per spec.
 
+import { createOutcomeScope } from "@/lib/command-center/ai/outcome-scope";
 import React, { useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
@@ -43,8 +44,9 @@ export function AskClaudeAbout({ subject, entityId, facts, evidence }: { subject
     setLoading(questionId);
     try {
       const query = q.query(subject);
+      const scope = createOutcomeScope();
       const { value, cacheState } = await withAICache("answerQuery", `${entityId}:${questionId}`, facts, evidence, () =>
-        getAIProvider().answerQuery(query, facts, evidence, "")
+        scope.run(getAIProvider(), (p) => p.answerQuery(query, facts, evidence, ""))
       );
       setAnswer({
         text: value.answer,
@@ -53,7 +55,7 @@ export function AskClaudeAbout({ subject, entityId, facts, evidence }: { subject
         confidence: value.confidence,
         insufficientEvidence: value.insufficientEvidence,
         cacheState,
-        mode: getAIProvider().mode,
+        mode: scope.mode,
       });
     } finally {
       setLoading(null);

@@ -76,6 +76,7 @@ import {
 const str = (max = 4000) => z.string().max(max);
 const strList = (max = 200, len = 4000) => z.array(str(len)).max(max);
 const num = z.number().finite();
+const languageSchema = z.enum(["en", "vi"]);
 
 const evidenceSchema = z.object({ content: str() });
 const workItemSchema = z.object({ key: str(40), title: str(1000), status: str(200) });
@@ -123,11 +124,12 @@ export const TASK_INPUT_SCHEMAS = {
     candidates: z.array(z.object({ item: workItemSchema.optional(), action: actionSchema.optional(), result: z.object({ reasoning: str() }).optional(), estimateMinutes: num })).max(50),
   }),
   generateCommunication: z.object({ item: workItemSchema, audience: str(500), why: str() }),
-  generateEndOfDaySummary: z.object({ completed: z.array(titled).max(200), deferred: z.array(titled).max(200), blocked: z.array(titled).max(200), newRisks: z.array(titled).max(200) }),
+  generateEndOfDaySummary: z.object({ completed: z.array(titled).max(200), deferred: z.array(titled).max(200), blocked: z.array(titled).max(200), newRisks: z.array(titled).max(200), language: languageSchema.optional() }),
   interpretTrend: z.object({ trend: trendSchema, currentConfidence: num }),
   detectDecisionConflicts: z.object({ candidate: z.object({ decision: decisionSchema, reasons: strList(), evidence: z.array(evidenceSchema).max(200) }) }),
   analyzeActionOutcomes: z.object({ ctx: z.object({ yesterdayRecommendation: str(), actionTaken: str(), outcome: str(), currentStateFacts: strList() }) }),
   generateWeeklyReview: z.object({
+    language: languageSchema.optional(),
     facts: z.object({
       hasEnoughHistory: z.boolean(),
       windowDays: num,
@@ -154,7 +156,7 @@ export const TASK_INPUT_SCHEMAS = {
   polishReportSummary: z.object({ summary: str(4000) }),
   checkRequirements: z.object({ ticket: ticketContextInputSchema }),
   // V2.37 I1–I4
-  generateTicketBrief: z.object({ ticket: ticketContextInputSchema, today: str(10) }),
+  generateTicketBrief: z.object({ ticket: ticketContextInputSchema, today: str(10), language: languageSchema.optional() }),
   triageNewItems: z.object({
     today: str(10),
     deferDates: z.array(str(10)).min(1).max(5),
@@ -222,7 +224,7 @@ export const TASK_INPUT_SCHEMAS = {
   }),
   extractMeetingActions: z.object({ today: str(10), notes: str(20_000) }),
   parseCommand: z.object({ today: str(10), command: str(500), knownProjects: z.array(z.object({ key: str(20), name: str(200).optional() })).max(200) }),
-  weeklyInsights: z.object({ weekStart: str(10), weekEnd: str(10), facts: strList(80, 400) }),
+  weeklyInsights: z.object({ weekStart: str(10), weekEnd: str(10), facts: strList(80, 400), language: languageSchema.optional() }),
   // V2.50 R1 — facts of one Daily / Weekly report (built by report-narrative.ts; titles only for allow-listed projects).
   summarizeReport: z.object({
     kind: z.enum(["daily", "weekly"]),
@@ -254,11 +256,11 @@ const BUILDERS: Builders = {
       i.candidates as { item?: WorkItem; action?: Action; result?: PriorityScoreResult; estimateMinutes: number }[]
     ),
   generateCommunication: (i) => communicationPrompt(i.item as WorkItem, i.audience, i.why),
-  generateEndOfDaySummary: (i) => endOfDayPrompt(i.completed as Action[], i.deferred as Action[], i.blocked as Action[], i.newRisks as Risk[]),
+  generateEndOfDaySummary: (i) => endOfDayPrompt(i.completed as Action[], i.deferred as Action[], i.blocked as Action[], i.newRisks as Risk[], i.language),
   interpretTrend: (i) => trendInterpretationPrompt(i.trend as unknown as HealthTrend, i.currentConfidence),
   detectDecisionConflicts: (i) => decisionConflictPrompt(i.candidate as unknown as DecisionConflictCandidate),
   analyzeActionOutcomes: (i) => actionOutcomePrompt(i.ctx as FollowUpContext),
-  generateWeeklyReview: (i) => weeklyReviewPrompt(i.facts as unknown as WeeklyReviewFacts),
+  generateWeeklyReview: (i) => weeklyReviewPrompt(i.facts as unknown as WeeklyReviewFacts, i.language),
   answerQuery: (i) => queryAnswerPrompt(i.query, i.facts, i.recommendedActionSeed),
   assessProactive: (i) => proactiveAssessmentPrompt(i.category, i.facts, i.evidenceStrings, i.trendQualityNote),
   generateProjectStory: (i) => projectStoryPrompt(i.timelineFacts, i.evidenceStrings, i.hasEnoughHistory),
@@ -268,7 +270,7 @@ const BUILDERS: Builders = {
   generateCommunicationArtifact: (i) => communicationArtifactPrompt(i.type as ArtifactType, i.facts, i.evidenceStrings),
   polishReportSummary: (i) => reportSummaryPolishPrompt(i.summary),
   checkRequirements: (i) => requirementCheckPrompt(i.ticket),
-  generateTicketBrief: (i) => ticketBriefPrompt(i.ticket, i.today),
+  generateTicketBrief: (i) => ticketBriefPrompt(i.ticket, i.today, i.language),
   triageNewItems: (i) => triagePrompt(i),
   draftMentionReply: (i) => mentionReplyPrompt(i),
   rewriteReport: (i) => reportRewritePrompt(i),

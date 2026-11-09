@@ -19,6 +19,7 @@ import { useAuthSession } from "@/components/command-center/AuthGate";
 import { MyAccountPanel } from "@/components/command-center/MyAccountPanel";
 import { TeamAdminPanel } from "@/components/command-center/TeamAdminPanel";
 import { AiDataProtectionPanel } from "@/components/command-center/AiDataProtectionPanel";
+import { AiOutputLanguage } from "@/components/command-center/AiOutputLanguage";
 import { ExportBackupDialog } from "@/components/command-center/ExportBackupDialog";
 import { AiProviderIndicator, Panel, SectionHeading, TrustLabel } from "@/components/command-center/ui";
 import { checkClaudeAvailability } from "@/lib/command-center/ai";
@@ -1065,6 +1066,7 @@ export default function DataSettingsPage() {
 
       <AiReadinessPanel />
 
+      <AiOutputLanguage />
       <AiDataProtectionPanel />
 
       <Panel className="p-5">

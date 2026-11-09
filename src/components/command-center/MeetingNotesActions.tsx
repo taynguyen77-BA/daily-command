@@ -5,6 +5,8 @@
 // thing that creates records or changes a status. Ticket keys that don't exist here are listed
 // as dropped, never created.
 
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useState, useSyncExternalStore } from "react";
 import { commandCenterStore } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -20,6 +22,7 @@ export function MeetingNotesActions() {
   const [notes, setNotes] = useState("");
   const [review, setReview] = useState<MeetingReview | null>(null);
   const [mode, setMode] = useState<"mock" | "claude">("mock");
+  const [failure, setFailure] = useState<AiFailure | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const readiness = useAiReadiness("meetingNotesActions");
@@ -32,6 +35,7 @@ export function MeetingNotesActions() {
     const r = await extractMeetingReview({ notes, today: todayLocalIso(), customTerms: s.aiDataProtection.customTerms, knownKeys: new Set(s.data.workItems.map((w) => w.key)), provider: getAIProvider() });
     setReview(r.review);
     setMode(r.mode);
+    setFailure(r.failure ?? null);
     setBusy(false);
   };
 
@@ -74,6 +78,7 @@ export function MeetingNotesActions() {
           <p className="flex items-center gap-2 text-xs text-text3">
             <TrustLabel kind="ai-draft" /> {mode === "claude" ? "AI extraction — review before creating." : "AI unavailable — only explicit Decision:/Action: lines were picked up."}
           </p>
+          {failure && <AiFailureNote reason={failure.reason} httpStatus={failure.httpStatus} />}
           {review.droppedKeys.length > 0 && <p className="text-xs text-orange">Unknown ticket keys dropped (not created): {review.droppedKeys.join(", ")}</p>}
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-text3">Decisions ({review.decisions.length})</p>

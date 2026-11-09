@@ -54,7 +54,13 @@ const N = "Today I completed 1 ticket, including ABC-1. Nothing is recorded as i
   const group = "V2.50 R2 honest AI messages";
   const sum = read("src/components/command-center/ReportSummary.tsx");
   ok(group, !/Mock AI never rewrites/.test(sum) && /explainAiFailure/.test(sum) && /found nothing to improve/.test(sum), "Polish no longer says 'Mock AI never rewrites'; it shows the real reason");
-  const fake = (o: Awaited<ReturnType<NonNullable<AIProvider["runTask"]>>>): Pick<AIProvider, "rewriteReport" | "mode" | "runTask"> => ({ mode: "mock", rewriteReport: async (_a, r) => r, runTask: (async () => o) as AIProvider["runTask"] });
+  const fake = (o: Awaited<ReturnType<NonNullable<AIProvider["runTask"]>>>): Pick<AIProvider, "rewriteReport" | "mode" | "runTask"> => ({ mode: "mock", runTask: (async () => o) as AIProvider["runTask"],
+    // like ClaudeProvider: the method goes through this.runTask and falls back to its input
+    rewriteReport: async function (this: { runTask: NonNullable<AIProvider["runTask"]> }, a, r) {
+      const x = await this.runTask("rewriteReport", { audience: a, report: r });
+      return x.ok ? x.data.text : r;
+    },
+  });
   const base = { source: "Daily Report — 2026-11-09\n- ABC-1 Fix login", audience: "standup" as const, customTerms: [] };
   const budget = await rewriteReportFlow({ ...base, provider: fake({ ok: false, reason: "budget" }) });
   ok(group, !budget.usedAi && budget.text === base.source && budget.notice!.includes(explainAiFailure("budget").title), "Rewrite: a budget stop shows the budget reason and the deterministic report");

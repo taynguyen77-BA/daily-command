@@ -2,6 +2,8 @@
 // person, skip reasons, AI-triage acceptance) → 3-5 observations with evidence and 3
 // suggestions. Shown in Weekly Review and (optionally) appended to the weekly report.
 
+import { runScoped } from "./outcome-scope";
+import type { AiFailure } from "./outcome";
 import type { TicketWorkState } from "../types";
 import { groupAskByPerson, blockedFollowUpRows } from "../blocker-followup";
 import type { CommandCenterData } from "../types";
@@ -47,10 +49,10 @@ export function buildWeeklyFacts(args: { states: Record<string, TicketWorkState>
   return facts;
 }
 
-export async function generateWeeklyInsights(args: { facts: string[]; weekStart: string; weekEnd: string; customTerms: CustomTerm[]; provider: Pick<AIProvider, "weeklyInsights" | "mode">; nowIso?: string }): Promise<StoredWeeklyInsights> {
+export async function generateWeeklyInsights(args: { facts: string[]; weekStart: string; weekEnd: string; customTerms: CustomTerm[]; language?: "en" | "vi"; provider: Pick<AIProvider, "weeklyInsights" | "mode" | "runTask">; nowIso?: string }): Promise<StoredWeeklyInsights & { failure?: AiFailure }> {
   const session = new RedactionSession(args.customTerms);
-  const out = await args.provider.weeklyInsights({ weekStart: args.weekStart, weekEnd: args.weekEnd, facts: args.facts.map((f) => session.redact(f).slice(0, 400)).slice(0, 80) });
-  return { weekStart: args.weekStart, createdAt: args.nowIso ?? new Date().toISOString(), mode: args.provider.mode, insights: session.restoreDeep(out) };
+  const r = await runScoped(args.provider, (p) => p.weeklyInsights({ weekStart: args.weekStart, weekEnd: args.weekEnd, facts: args.facts.map((f) => session.redact(f).slice(0, 400)).slice(0, 80), ...(args.language ? { language: args.language } : {}) } as Parameters<AIProvider["weeklyInsights"]>[0]));
+  return { weekStart: args.weekStart, createdAt: args.nowIso ?? new Date().toISOString(), mode: r.mode, insights: session.restoreDeep(r.value), ...(r.failure ? { failure: r.failure } : {}) };
 }
 
 export function weeklyInsightsText(s: StoredWeeklyInsights): string {

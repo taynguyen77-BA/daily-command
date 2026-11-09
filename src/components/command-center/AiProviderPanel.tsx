@@ -233,11 +233,13 @@ export function AiProviderPanel() {
                 {health.map((h) => {
                   const bad = Object.entries(h.byOutcome).filter(([k]) => k !== "ok");
                   return (
-                    <li key={h.task}>
-                      <span className="text-text2">{h.task}</span>: ok {Math.round(((h.byOutcome.ok ?? 0) * 100) / h.calls)}% of {h.calls}
+                    <li key={h.task} data-ai-health-task={h.task} data-ai-health-alert={h.alert ? "red" : undefined} className={h.alert ? "text-red" : undefined}>
+                      <span className={h.alert ? "font-semibold text-red" : "text-text2"}>{h.task}</span>: ok {Math.round(((h.byOutcome.ok ?? 0) * 100) / h.calls)}% of {h.calls}
                       {bad.length > 0 && ` · ${bad.map(([k, n]) => `${OUTCOME_LABEL[k] ?? k} ${n}`).join(", ")}`}
                       {h.topViolations.length > 0 && ` · reasons: ${h.topViolations.map((v) => `${KIND_LABEL[v.kind] ?? v.kind}: ${v.count}`).join(", ")}`}
                       {h.repaired > 0 && ` · repaired ${h.repaired}`}
+                      {h.rates && (h.rates.truncated > 0 || h.rates.groundingRejected > 0 || h.rates.schemaRetry > 0 || h.rates.error > 0) && ` · truncated ${Math.round(h.rates.truncated * 100)}% · fact-check rejected ${Math.round(h.rates.groundingRejected * 100)}% · schema retry ${Math.round(h.rates.schemaRetry * 100)}% · error ${Math.round(h.rates.error * 100)}%`}
+                      {h.alert && <span data-ai-health-next> — {Math.round(h.alert.failRate * 100)}% of {h.calls} calls failed. {h.alert.nextStep}</span>}
                     </li>
                   );
                 })}

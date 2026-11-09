@@ -4,8 +4,9 @@
 
 import type { TicketContextInput } from "../task-registry";
 import { ticketContextSection } from "./ticket-context";
+import { languageLine, type AiLanguage } from "./language";
 
-export function ticketBriefPrompt(t: TicketContextInput, today: string): string {
+export function ticketBriefPrompt(t: TicketContextInput, today: string, language?: AiLanguage): string {
   return `You are briefing an IT Business Analyst / Product Owner on ONE Jira ticket so they can act
 on it in under a minute. Today is ${today}.
 
@@ -19,6 +20,8 @@ CONSTRAINTS:
 - suggestedStatus is optional — only when the thread clearly supports it (e.g. the work is waiting on someone → BLOCKED with that reason). The user decides; you are only suggesting.
 - Placeholders such as [EMAIL_1] or CLIENT_1 stand for redacted values — keep them as written.
 
+LENGTH: whatIsAsked and currentState 1-2 sentences each; at most 4 openQuestions; suggestedNextStep one sentence.
+${languageLine(language)}
 REQUIRED OUTPUT SCHEMA (JSON only):
 { "whatIsAsked": string, "currentState": string, "waitingOn": [{ "who": string, "what": string }], "openQuestions": string[], "suggestedNextStep": string, "suggestedStatus"?: { "status": "IN_PROGRESS" | "BLOCKED" | "DONE" | "DEFERRED" | "SKIPPED", "reason": string } }`;
 }

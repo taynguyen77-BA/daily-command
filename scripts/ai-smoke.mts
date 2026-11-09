@@ -1,10 +1,11 @@
 // D3 — `npm run smoke:ai`: runs the AI self-test fixtures against the REAL Anthropic API with ANTHROPIC_API_KEY, prints the table,
 // writes ./ai-smoke-report.json (gitignored) and exits 1 on any FAIL. NOT part of `npm test` / CI (it spends tokens).
-//   ANTHROPIC_API_KEY=sk-ant-… npm run smoke:ai            (quick: 5 core tasks)
+//   ANTHROPIC_API_KEY=sk-ant-… npm run smoke:ai            (quick: 6 core tasks)
 //   ANTHROPIC_API_KEY=sk-ant-… npm run smoke:ai -- --full
 import fs from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import { runSelfTest, formatSelfTestTable } from "../src/lib/command-center/ai/selftest";
+import { SELFTEST_FIXTURES } from "../src/lib/command-center/ai/selftest-fixtures";
 import { type ModelCallParams, type ModelCallResult } from "../src/lib/command-center/ai/server-runner";
 import { MemoryUsageLedger } from "../src/lib/command-center/ai/usage-ledger";
 import { redactSecrets } from "../src/lib/command-center/ai/provider-config";
@@ -29,4 +30,8 @@ const report = await runSelfTest({
 });
 console.log("\n" + redactSecrets(formatSelfTestTable(report)));
 fs.writeFileSync("ai-smoke-report.json", redactSecrets(JSON.stringify(report, null, 2)));
-process.exit(report.rows.some((r) => r.outcome === "FAIL") ? 1 : 0);
+// Exit 1 when a CORE task fails (a non-core FAIL in --full is printed, not fatal). Not part of CI.
+const coreIds = new Set(SELFTEST_FIXTURES.filter((f) => f.core).map((f) => f.id));
+const coreFailed = report.rows.filter((r) => r.outcome === "FAIL" && coreIds.has(r.id));
+if (coreFailed.length > 0) console.error(`\nCore task(s) failed: ${coreFailed.map((r) => `${r.label} (${r.reason ?? r.errorKind ?? "failed"})`).join(", ")}`);
+process.exit(coreFailed.length > 0 ? 1 : 0);

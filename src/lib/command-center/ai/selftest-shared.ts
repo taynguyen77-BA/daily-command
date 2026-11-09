@@ -2,6 +2,7 @@
 // Data & Settings component can use it; selftest.ts (the orchestrator) re-exports everything here.
 
 import type { AiModelTier } from "./model-config";
+import type { AiFailureReason } from "./outcome";
 import { SELFTEST_FIXTURES, quickFixtures, type SelfTestFixture } from "./selftest-fixtures";
 
 export type SelfTestOutcome = "PASS" | "WARN" | "FAIL" | "SKIPPED";
@@ -22,6 +23,10 @@ export interface SelfTestRow {
   groundingOk: boolean;
   repaired: boolean;
   retried: boolean;
+  /** V2.52 A4 — a call of this row stopped at max_tokens (even if the retry then succeeded). */
+  truncated?: boolean;
+  /** V2.52 A4 — the plain failure reason (explainAiFailure) when the row failed. */
+  reason?: AiFailureReason;
   rubric: RubricItem[];
   estCostUsd: number | null;
   note?: string;

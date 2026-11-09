@@ -14,6 +14,7 @@ import { RedactionSession, type CustomTerm } from "./redaction";
 import { lockedFactViolations } from "./locked-facts";
 import type { AIProvider } from "./provider";
 import { explainAiFailure } from "./outcome";
+import { runScoped } from "./outcome-scope";
 
 export type ReportAudience = "standup" | "pm" | "client" | "vi";
 export const REPORT_AUDIENCES: { id: ReportAudience; label: string }[] = [
@@ -111,20 +112,12 @@ export interface RewriteResult {
 export async function rewriteReportFlow(args: { source: string; audience: ReportAudience; customTerms: CustomTerm[]; provider: Pick<AIProvider, "rewriteReport" | "mode" | "runTask"> }): Promise<RewriteResult> {
   const session = new RedactionSession(args.customTerms);
   const redacted = session.redact(args.source);
-  let out: string;
-  if (args.provider.runTask) {
-    // V2.50 R2 — decided by this call's own outcome (not the shared provider.mode), with the real reason.
-    const o = await args.provider.runTask("rewriteReport", { audience: args.audience, report: redacted });
-    if (!o.ok) {
-      const e = explainAiFailure(o.reason, o.httpStatus);
-      return { text: args.source, usedAi: false, notice: `${e.title}. ${e.nextStep} Showing the deterministic report.` };
-    }
-    out = o.data.text;
-  } else {
-    out = await args.provider.rewriteReport(args.audience, redacted);
-  }
-  if ((!args.provider.runTask && args.provider.mode !== "claude") || out === redacted) {
-    return { text: args.source, usedAi: false, notice: "AI rewrite unavailable — showing the deterministic report." };
+  // V2.50 R2 / V2.51 A2 — decided by this call's own outcome (never the shared provider.mode), with the real reason.
+  const run = await runScoped(args.provider, (p) => p.rewriteReport(args.audience, redacted));
+  const out = run.value;
+  if (!run.ai || out === redacted) {
+    const e = run.failure ? explainAiFailure(run.failure.reason, run.failure.httpStatus) : undefined;
+    return { text: args.source, usedAi: false, notice: e ? `${e.title}. ${e.nextStep} Showing the deterministic report.` : "AI rewrite unavailable — showing the deterministic report." };
   }
   const restored = session.restore(out);
   const violations = lockedFactViolations(restored, args.source);

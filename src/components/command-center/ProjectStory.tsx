@@ -8,6 +8,7 @@
 // useEffect on every mount. Now strictly on-demand behind a button, routed through the
 // entity cache so re-visiting the page with unchanged history never re-hits the model.
 
+import { createOutcomeScope } from "@/lib/command-center/ai/outcome-scope";
 import { useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
@@ -28,16 +29,17 @@ export function ProjectStory({ events }: { events: MemoryEvent[] }) {
     try {
       const timelineFacts = events.slice(-20).map((e) => `${e.date}: ${e.title} — ${e.impact}`);
       const evidenceStrings = events.slice(-20).flatMap((e) => e.evidence);
+      const scope = createOutcomeScope();
       const { value, cacheState: cs } = await withAICache(
         "generateProjectStory",
         `project-story:${events.length}`,
         timelineFacts,
         timelineFacts.map((f) => ({ content: f })),
-        () => getAIProvider().generateProjectStory(timelineFacts, evidenceStrings, hasEnoughHistory)
+        () => scope.run(getAIProvider(), (p) => p.generateProjectStory(timelineFacts, evidenceStrings, hasEnoughHistory))
       );
       setResult(value);
       setCacheState(cs);
-      setMode(getAIProvider().mode);
+      setMode(scope.mode);
     } finally {
       setLoading(false);
     }

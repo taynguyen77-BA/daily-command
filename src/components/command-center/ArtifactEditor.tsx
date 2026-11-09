@@ -7,6 +7,7 @@
 // through the entity cache and is never merged into the CALCULATED/EVIDENCE sections
 // automatically — the user explicitly inserts it (§5 "never merge these silently").
 
+import { createOutcomeScope } from "@/lib/command-center/ai/outcome-scope";
 import React, { useEffect, useRef, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
@@ -84,8 +85,9 @@ export function ArtifactEditor({
     try {
       const facts = draft.sections.flatMap((s) => s.segments.map((sg) => sg.text));
       const evidenceStrings = draft.evidence.map((e) => e.content);
+      const scope = createOutcomeScope();
       const { value, cacheState } = await withAICache("generateCommunicationArtifact", entityId, facts, draft.evidence, () =>
-        getAIProvider().generateCommunicationArtifact(draft.type, facts, evidenceStrings)
+        scope.run(getAIProvider(), (p) => p.generateCommunicationArtifact(draft.type, facts, evidenceStrings))
       );
       const evaluation = evaluateAiResponse({
         task: "generateCommunicationArtifact",
@@ -97,7 +99,7 @@ export function ArtifactEditor({
         confidence: value.confidence,
         insufficientEvidenceFlag: value.insufficientEvidence,
       });
-      setAiDraft({ text: value.text, confidence: value.confidence, insufficientEvidence: value.insufficientEvidence, mode: getAIProvider().mode, cacheState, evaluation });
+      setAiDraft({ text: value.text, confidence: value.confidence, insufficientEvidence: value.insufficientEvidence, mode: scope.mode, cacheState, evaluation });
     } finally {
       setAiLoading(false);
     }

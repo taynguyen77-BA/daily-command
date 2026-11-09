@@ -4,6 +4,8 @@
 // recommendations are allowed (release-brief.ts); the AI picks within them, numbers locked.
 // A rule-breaking answer falls back to the deterministic brief with a notice. Display + copy only.
 
+import type { AiFailure } from "@/lib/command-center/ai/outcome";
+import { AiFailureNote } from "./AiFailureNote";
 import { useState, useSyncExternalStore } from "react";
 import { commandCenterStore, previousSnapshotOf } from "@/lib/command-center/store";
 import { getAIProvider } from "@/lib/command-center/ai";
@@ -20,7 +22,7 @@ const TONE: Record<ReleaseBriefResponse["recommendation"], string> = { Go: "text
 
 export function ReleaseGoNoGo({ release, data }: { release: ReleaseHealth; data: CommandCenterData }) {
   const state = useSyncExternalStore(commandCenterStore.subscribe, commandCenterStore.getSnapshot, commandCenterStore.getServerSnapshot);
-  const [result, setResult] = useState<{ brief: ReleaseBriefResponse; usedAi: boolean; notice?: string } | null>(null);
+  const [result, setResult] = useState<{ brief: ReleaseBriefResponse; usedAi: boolean; notice?: string; failure?: AiFailure } | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const readiness = useAiReadiness("releaseGoNoGo");
@@ -46,6 +48,7 @@ export function ReleaseGoNoGo({ release, data }: { release: ReleaseHealth; data:
       {result && (
         <div className="mt-2 space-y-1">
           {result.notice && <p className="text-orange">{result.notice}</p>}
+          {result.failure && <AiFailureNote reason={result.failure.reason} httpStatus={result.failure.httpStatus} />}
           <p className={`text-sm font-semibold ${TONE[result.brief.recommendation]}`} data-release-recommendation={result.brief.recommendation}>
             {result.brief.recommendation}
           </p>

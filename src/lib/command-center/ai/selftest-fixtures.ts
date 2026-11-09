@@ -3,6 +3,7 @@
 // "Dev Team"). Each fixture carries its own expectations; ai/selftest.ts turns them into a rubric.
 
 import type { AITask } from "./schemas";
+import { MORE_FIXTURES } from "./selftest-fixtures-more";
 
 export interface SelfTestExpect {
   /** "vi": the answer's prose must be Vietnamese (diacritic ratio); "en": English. */
@@ -13,12 +14,14 @@ export interface SelfTestExpect {
   mustNotContain?: (string | RegExp)[];
   /** Longest single string allowed in the answer. */
   maxChars?: number;
+  /** V2.52 A4 — sentence-count bounds of the answer text (summarizeReport: 3-5). */
+  sentences?: { min: number; max: number };
 }
 export interface SelfTestFixture {
   id: string;
   task: AITask;
   label: string;
-  /** Part of the quick run (the 5 core tasks). */
+  /** Part of the quick run (the 6 core tasks). */
   core: boolean;
   input: unknown;
   expect: SelfTestExpect;
@@ -42,7 +45,7 @@ const ticket = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-export const SELFTEST_FIXTURES: SelfTestFixture[] = [
+const BASE_FIXTURES: SelfTestFixture[] = [
   { id: "ticket-brief", task: "generateTicketBrief", label: "Ticket brief", core: true, estTokens: 1800, input: { ticket: ticket(), today: TODAY }, expect: { language: "en", mustMention: ["SELF-9"], mustNotContain: [/\[[A-Z_]+_\d+\]/], maxChars: 1000 } },
   { id: "triage", task: "triageNewItems", label: "Smart triage", core: true, estTokens: 1600, input: { today: TODAY, deferDates: ["2026-11-06", "2026-11-09"], items: [{ key: "SELF-20", title: "Customer asks for invoice copy", type: "task", status: "To Do", signal: "Mentioned you", role: "Assignee" }, { key: "SELF-21", title: "Release notes review", type: "task", status: "To Do", signal: "Assigned to you", role: "Assignee" }] }, expect: { language: "en", mustMention: ["SELF-20"], mustNotContain: [/\[[A-Z_]+_\d+\]/] } },
   { id: "mention-reply-vi", task: "draftMentionReply", label: "Mention reply (Vietnamese)", core: true, estTokens: 1900, input: { ticket: ticket(), mention: { author: "Linh Tran", created: "2026-11-03T09:00:00.000Z", body: "Anh/chị xác nhận giúp nội dung email trước thứ Sáu nhé?" }, tone: "internal", language: "vi", length: "short" }, expect: { language: "vi", mustNotContain: [/\[[A-Z_]+_\d+\]/], maxChars: 1500 } },
@@ -57,5 +60,8 @@ export const SELFTEST_FIXTURES: SelfTestFixture[] = [
   { id: "meeting-notes", task: "extractMeetingActions", label: "Meeting notes → actions", core: false, estTokens: 1500, input: { today: TODAY, notes: "Sync 2026-11-05. Linh Tran will confirm the email wording for SELF-12 by 2026-11-07. Dev Team to share the API date for SELF-9." }, expect: { language: "en", mustMention: ["SELF-12"], mustNotContain: [/\[[A-Z_]+_\d+\]/] } },
   { id: "daily-guidance", task: "generateDailyGuidance", label: "Next Best Action wording", core: false, estTokens: 900, input: { topFocusFacts: ["SELF-12 is blocked by SELF-9 for 4 days"], watchFacts: ["SELF-30 is overdue by 3 days"], planFacts: [], recentOutcomeFacts: [], evidenceStrings: [] }, expect: { language: "en", mustNotContain: [/\[[A-Z_]+_\d+\]/] } },
 ];
+
+/** Every AI task has at least one fixture (a test enforces it); V2.52 adds the rest in selftest-fixtures-more.ts. */
+export const SELFTEST_FIXTURES: SelfTestFixture[] = [...BASE_FIXTURES, ...MORE_FIXTURES];
 
 export const quickFixtures = (): SelfTestFixture[] => SELFTEST_FIXTURES.filter((f) => f.core);

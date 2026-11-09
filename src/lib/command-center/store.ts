@@ -14,6 +14,7 @@ import { buildDemoData } from "./demo-data";
 import { slug } from "./attention-queue";
 import { detectChanges, toSnapshot } from "./change-detection";
 import { getAIProvider } from "./ai";
+import { runScoped } from "./ai/outcome-scope";
 import { addDays, todayLocalIso, toLocalIso } from "./date-utils";
 import { buildDailySnapshot, dailyCanonicalSnapshots } from "./memory";
 import { JiraDataSource } from "./datasource/jira-source";
@@ -189,6 +190,8 @@ const MAX_PILOT_FEEDBACK = 500;
 export interface EodEntry {
   date: string;
   summary: string;
+  /** V2.51 A2 — how THIS summary was produced (from the call's own outcome). Optional: old entries lack it. */
+  mode?: "mock" | "claude";
 }
 
 export interface StoreState {
@@ -396,6 +399,8 @@ export interface StoreState {
   reportNarratives: Record<string, StoredNarrative>;
   /** V2.50 R1 — last Standup/Work log and EN/VI choice. */
   reportNarrativePrefs: NarrativePrefs;
+  /** V2.51 A3 — language of AI weekly insights / weekly review / end-of-day summary / ticket brief. Optional: absent = "en". */
+  aiOutputLanguage: "en" | "vi";
 }
 
 function initialMyActionItemsOnly(): MyActionItemsOnlyByPage {
@@ -462,6 +467,7 @@ function initialState(): StoreState {
     aiWeeklyInsights: {},
     reportNarratives: {},
     reportNarrativePrefs: { ...DEFAULT_NARRATIVE_PREFS },
+    aiOutputLanguage: "en",
     pilotFeedback: [],
     staleAssignedTicketThresholds: { ...DEFAULT_STALE_ASSIGNED_TICKET_THRESHOLDS },
     syncLog: [],
@@ -1075,6 +1081,7 @@ function parseStoredStateRaw(raw: string): StoreState {
       aiWeeklyInsights: asWeeklyInsights(parsed.aiWeeklyInsights),
       reportNarratives: asReportNarratives(parsed.reportNarratives),
       reportNarrativePrefs: asNarrativePrefs(parsed.reportNarrativePrefs),
+      aiOutputLanguage: parsed.aiOutputLanguage === "vi" ? "vi" : "en",
       jiraWriteLog: Array.isArray(parsed.jiraWriteLog) ? parsed.jiraWriteLog.filter(isJiraWriteLogEntry).slice(-MAX_JIRA_WRITE_LOG) : [],
       defaultLandingPage: typeof parsed.defaultLandingPage === "string" && LANDING_PAGES.includes(parsed.defaultLandingPage) ? parsed.defaultLandingPage : undefined,
       weeklyReportMode: parsed.weeklyReportMode === "calendar" ? "calendar" : parsed.weeklyReportMode === "workweek" ? "workweek" : undefined,
@@ -2086,6 +2093,9 @@ export class CommandCenterStore {
     const next = { ...this.state.reportNarratives };
     delete next[key];
     this.set({ ...this.state, reportNarratives: next });
+  }
+  setAiOutputLanguage(language: "en" | "vi") {
+    this.set({ ...this.state, aiOutputLanguage: language });
   }
   setReportNarrativePrefs(prefs: NarrativePrefs) {
     this.set({ ...this.state, reportNarrativePrefs: prefs });
@@ -3307,8 +3317,9 @@ export class CommandCenterStore {
     // completed/deferred/blocked already are above.
     const scopedOpenRisks = dedupeRisks(scopedForAi.risks, detectRisks(scopedForAi, today));
     const newRisks = scopedOpenRisks.filter((r) => r.status === "open" && r.detectedAt === today);
-    const summary = await getAIProvider().generateEndOfDaySummary(completed, deferred, blocked, newRisks);
-    const entry: EodEntry = { date: today, summary };
+    const ran = await runScoped(getAIProvider(), (p) => p.generateEndOfDaySummary(completed, deferred, blocked, newRisks, this.state.aiOutputLanguage === "vi" ? "vi" : undefined));
+    const summary = ran.value;
+    const entry: EodEntry = { date: today, summary, mode: ran.mode };
 
     // V2.18 §7 — unscoped (matches this snapshot's own "whole operational record, not a
     // scoped view" contract above) deduped manual+auto risk set, persisted into both the

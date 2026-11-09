@@ -4,6 +4,7 @@
 // on every mount. Deterministic trend data (below) still renders immediately; the AI
 // interpretation is now behind an explicit button, routed through the entity cache.
 
+import { createOutcomeScope } from "@/lib/command-center/ai/outcome-scope";
 import { useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
@@ -21,16 +22,17 @@ export function HealthTrend({ trend, currentConfidence }: { trend: HealthTrendTy
     setLoading(true);
     try {
       const facts = trend.deltas.map((d) => `${d.label}: ${d.before} -> ${d.after} (${d.delta})`);
+      const scope = createOutcomeScope();
       const { value, cacheState: cs } = await withAICache(
         "interpretTrend",
         `health-trend:${trend.overall}`,
         facts,
         facts.map((f) => ({ content: f })),
-        () => getAIProvider().interpretTrend(trend, currentConfidence)
+        () => scope.run(getAIProvider(), (p) => p.interpretTrend(trend, currentConfidence))
       );
       setInterp(value);
       setCacheState(cs);
-      setMode(getAIProvider().mode);
+      setMode(scope.mode);
     } finally {
       setLoading(false);
     }

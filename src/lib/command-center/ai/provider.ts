@@ -53,6 +53,7 @@ import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
 import type { TASK_OUTPUT_SCHEMAS, TaskInput, TicketContextInput } from "./task-registry";
 import type { AiOutcome } from "./outcome";
+import type { AiLanguage } from "./prompts/language";
 import type { z } from "zod";
 import { deterministicNarrative } from "../report-narrative";
 import type { AITask, BaRequirementCheckResponse, ReportNarrativeResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
@@ -73,12 +74,12 @@ export interface AIProvider {
     candidates: { item?: WorkItem; action?: Action; result?: PriorityScoreResult; estimateMinutes: number }[]
   ): Promise<string>;
   generateCommunication(item: WorkItem, audience: string, why: string): Promise<string>;
-  generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[]): Promise<string>;
+  generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[], language?: AiLanguage): Promise<string>;
   // V1.2 — Project Memory & Decision Intelligence (BUILD REQUEST V1.2 §20)
   interpretTrend(trend: HealthTrend, currentConfidence: number): Promise<TrendInterpretation>;
   detectDecisionConflicts(candidate: DecisionConflictCandidate): Promise<DecisionConflictAssessment>;
   analyzeActionOutcomes(ctx: FollowUpContext): Promise<DecisionConflictAssessment>;
-  generateWeeklyReview(facts: WeeklyReviewFacts): Promise<string>;
+  generateWeeklyReview(facts: WeeklyReviewFacts, language?: AiLanguage): Promise<string>;
   // V1.3 §26 — Natural Language Command Bar. `facts`/`evidence` are already retrieved
   // deterministically by query-router.ts; this only narrates them into one grounded answer.
   answerQuery(query: string, facts: string[], evidence: Evidence[], recommendedActionSeed: string): Promise<QueryAnswer>;
@@ -102,7 +103,7 @@ export interface AIProvider {
    *  data-protection.ts buildTicketAiInput (allow-listed + redacted); never built by hand. */
   checkRequirements(ticket: TicketContextInput): Promise<RequirementCheckResult>;
   // V2.37 I1–I4 — every input comes through data-protection.ts (allow-list + redaction).
-  generateTicketBrief(ticket: TicketContextInput, today: string): Promise<TicketBriefResponse>;
+  generateTicketBrief(ticket: TicketContextInput, today: string, language?: AiLanguage): Promise<TicketBriefResponse>;
   triageNewItems(input: TaskInput<"triageNewItems">): Promise<TriageResponse["items"]>;
   draftMentionReply(input: TaskInput<"draftMentionReply">): Promise<MentionReplyResponse>;
   rewriteReport(audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string>;

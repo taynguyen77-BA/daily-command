@@ -7,6 +7,7 @@
 // button — both routed through the entity cache (ai/ai-cache.ts) so a re-open with
 // unchanged evidence never re-hits the model.
 
+import { createOutcomeScope, runScoped } from "@/lib/command-center/ai/outcome-scope";
 import React, { useMemo, useState } from "react";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { withAICache } from "@/lib/command-center/ai/ai-cache";
@@ -36,16 +37,17 @@ function RiskAgingAssessment({ risk, escalation }: { risk: Risk; escalation: Ris
       ];
       const trendQualityNote =
         escalation.daysOpen >= 3 ? `Observed across ${escalation.daysOpen} daily snapshots.` : `Only ${escalation.daysOpen} day(s) of history — early signal.`;
+      const scope = createOutcomeScope();
       const { value, cacheState: cs } = await withAICache(
         "assessProactive",
         `risk-aging:${risk.id}`,
         facts,
         risk.evidence.map((e) => ({ content: e })),
-        () => getAIProvider().assessProactive("risk aging", facts, risk.evidence, trendQualityNote)
+        () => scope.run(getAIProvider(), (p) => p.assessProactive("risk aging", facts, risk.evidence, trendQualityNote))
       );
       setAging(value);
       setCacheState(cs);
-      setMode(getAIProvider().mode);
+      setMode(scope.mode);
     } finally {
       setLoading(false);
     }
@@ -130,12 +132,13 @@ export function RiskCard({
           task: "detectRisks",
           entityId: risk.id,
           run: async () => {
-            const trace = await getAIProvider().detectRisks(risk, facts, evidence);
+            const ran = await runScoped(getAIProvider(), (p) => p.detectRisks(risk, facts, evidence));
+            const trace = ran.value;
             return {
               text: `${trace.inference} ${trace.recommendation}`.trim(),
               confidence: trace.confidence,
               insufficientEvidence: trace.insufficientEvidence,
-              mode: getAIProvider().mode,
+              mode: ran.mode,
             };
           },
         }}

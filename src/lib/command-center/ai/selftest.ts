@@ -3,7 +3,9 @@
 // model/ledger, so it is tested offline with a fake model and used unchanged by the route and by scripts/ai-smoke.mts.
 
 import { handleAiRequest, ResponseCache, type AiServerDeps, type ModelCallParams, type ModelCallResult } from "./server-runner";
-import { collectStrings } from "./evaluation";
+import { collectStrings, CAUSAL_LANGUAGE_PATTERNS, OWNERSHIP_INFERENCE_PATTERNS } from "./evaluation";
+import { splitSentences } from "../report-narrative";
+import { explainAiFailure, failureReasonFromResponse } from "./outcome";
 import { resolveAiModel } from "./model-config";
 import { SELFTEST_FIXTURES, quickFixtures, type SelfTestFixture } from "./selftest-fixtures";
 import { estimateSelfTestTokens, formatSelfTestTable, type RubricItem, type SelfTestOutcome, type SelfTestReport, type SelfTestRow } from "./selftest-shared";
@@ -39,7 +41,7 @@ export function vietnameseRatio(text: string): number {
 
 const PLACEHOLDER_LEAK = /\[[A-Z_]+_\d+\]|\b(?:CLIENT|PERSON|EMAIL)_\d+\b/g;
 
-export function gradeAnswer(f: SelfTestFixture, data: unknown, model: string, expectedModel: string): RubricItem[] {
+export function gradeAnswer(f: SelfTestFixture, data: unknown, model: string, expectedModel: string, flags: { truncated?: boolean } = {}): RubricItem[] {
   const strings = collectStrings(data);
   const text = strings.join("\n");
   const rubric: RubricItem[] = [];
@@ -58,6 +60,16 @@ export function gradeAnswer(f: SelfTestFixture, data: unknown, model: string, ex
     const longest = Math.max(0, ...strings.map((s) => s.length));
     rubric.push({ name: "length limit", pass: longest <= f.expect.maxChars, detail: `longest field ${longest} / ${f.expect.maxChars}` });
   }
+  if (f.expect.sentences) {
+    const { min, max } = f.expect.sentences;
+    const n = splitSentences(strings.join(" ")).length;
+    rubric.push({ name: "sentence count", pass: n >= min && n <= max, detail: n >= min && n <= max ? `${n} sentences` : `expected ${min}-${max} sentences, found ${n}` });
+  }
+  const causal = CAUSAL_LANGUAGE_PATTERNS.find((p) => p.test(text));
+  rubric.push({ name: "no causal claims", pass: !causal, detail: causal ? `matched ${String(causal)}` : "none" });
+  const hierarchy = OWNERSHIP_INFERENCE_PATTERNS.find((p) => p.test(text));
+  rubric.push({ name: "no inferred hierarchy", pass: !hierarchy, detail: hierarchy ? `matched ${String(hierarchy)}` : "none" });
+  if (flags.truncated) rubric.push({ name: "no truncation", pass: false, detail: "the first answer was cut off at max_tokens (the retry with more room worked) — raise the output budget for this tier" });
   rubric.push({ name: "tier model", pass: model === expectedModel, detail: model === expectedModel ? model : `used ${model}, expected ${expectedModel}` });
   return rubric;
 }
@@ -82,7 +94,7 @@ export async function runSelfTest(args: RunSelfTestArgs): Promise<SelfTestReport
     const base = { id: f.id, task: f.task, label: f.label, model: resolved.model, tier: resolved.tier };
     if (total >= ceiling) {
       ceilingReached = true;
-      const row: SelfTestRow = { ...base, ms: 0, inputTokens: 0, outputTokens: 0, outcome: "SKIPPED", schemaOk: false, groundingOk: false, repaired: false, retried: false, rubric: [], estCostUsd: null, note: `Skipped: the run's token ceiling (${ceiling.toLocaleString("en-US")}) was reached` };
+      const row: SelfTestRow = { ...base, ms: 0, inputTokens: 0, outputTokens: 0, outcome: "SKIPPED", schemaOk: false, groundingOk: false, repaired: false, retried: false, rubric: [], estCostUsd: null, note: `Skipped (budget): the run's token ceiling (${ceiling.toLocaleString("en-US")}) was reached` };
       rows.push(row);
       args.onRow?.(row);
       continue;
@@ -91,10 +103,12 @@ export async function runSelfTest(args: RunSelfTestArgs): Promise<SelfTestReport
     let inTok = 0;
     let outTok = 0;
     let usedModel = resolved.model;
+    let truncated = false;
     const callModel = async (p: ModelCallParams): Promise<ModelCallResult> => {
       calls += 1;
       usedModel = p.model;
       const r = await args.deps.callModel(p);
+      if (r.stopReason === "max_tokens") truncated = true;
       inTok += r.usage.inputTokens + r.usage.cacheReadTokens + r.usage.cacheWriteTokens;
       outTok += r.usage.outputTokens;
       return r;
@@ -106,7 +120,9 @@ export async function runSelfTest(args: RunSelfTestArgs): Promise<SelfTestReport
     total += inTok + outTok;
     const errorKind = typeof res.body.errorKind === "string" ? res.body.errorKind : undefined;
     const ok = res.status === 200;
-    const rubric = ok ? gradeAnswer(f, res.body.data, usedModel, resolved.model) : [];
+    const rubric = ok ? gradeAnswer(f, res.body.data, usedModel, resolved.model, { truncated }) : [];
+    const reason = !ok ? failureReasonFromResponse(res.status, errorKind) : undefined;
+    const why = reason ? explainAiFailure(reason, res.status) : undefined;
     const failedRubric = rubric.filter((r) => !r.pass);
     const row: SelfTestRow = {
       ...base,
@@ -121,9 +137,11 @@ export async function runSelfTest(args: RunSelfTestArgs): Promise<SelfTestReport
       groundingOk: ok || errorKind !== "grounding-rejected",
       repaired: calls > 1 && ok,
       retried: calls > 1,
+      ...(truncated ? { truncated: true } : {}),
+      ...(reason ? { reason } : {}),
       rubric,
       estCostUsd: estimateCostUsd(usedModel, inTok, outTok),
-      ...(!ok ? { note: String(res.body.error ?? "") } : failedRubric.length ? { note: `${failedRubric[0].name}: ${failedRubric[0].detail}` } : {}),
+      ...(!ok ? { note: `${why!.title}. ${why!.nextStep}` } : failedRubric.length ? { note: `${failedRubric[0].name}: ${failedRubric[0].detail}` } : {}),
     };
     rows.push(row);
     args.onRow?.(row);

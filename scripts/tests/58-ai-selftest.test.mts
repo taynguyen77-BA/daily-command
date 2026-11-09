@@ -88,7 +88,7 @@ const run = (fixtures: SelfTestFixture[], answers: Parameters<typeof model>[0], 
 
 {
   const group = "D3 fixtures and helpers";
-  ok(group, quickFixtures().length === 5 && SELFTEST_FIXTURES.length >= 12, `quick = 5 core tasks, full = ${SELFTEST_FIXTURES.length} fixtures`);
+  ok(group, quickFixtures().length === 6 && SELFTEST_FIXTURES.length >= 12, `quick = 6 core tasks, full = ${SELFTEST_FIXTURES.length} fixtures`);
   const tasks = new Set(SELFTEST_FIXTURES.map((f) => f.task));
   ok(group, ["generateTicketBrief", "triageNewItems", "draftMentionReply", "rewriteReport", "draftBlockerFollowUps", "releaseGoNoGo", "baRequirementCheck", "weeklyInsights", "parseCommand", "extractMeetingActions", "generateDailyGuidance", "checkRequirements"].every((t) => tasks.has(t as never)), "every AI feature has a fixture");
   ok(group, SELFTEST_FIXTURES.some((f) => f.task === "draftMentionReply" && f.expect.language === "vi") && SELFTEST_FIXTURES.some((f) => f.task === "rewriteReport" && f.expect.language === "vi") && SELFTEST_FIXTURES.some((f) => f.task === "draftMentionReply" && f.expect.language === "en"), "Vietnamese and English variants exist for the language-bearing tasks");

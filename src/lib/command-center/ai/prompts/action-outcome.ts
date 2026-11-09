@@ -16,5 +16,7 @@ CONSTRAINTS:
 - Use only the facts above. Never invent what "probably" happened.
 - If current-state facts are too thin, set insufficientEvidence: true.
 
+LENGTH: assessment 2-3 sentences.
+
 REQUIRED OUTPUT SCHEMA (JSON only): { "assessment": string, "confidence": number, "insufficientEvidence": boolean }`;
 }
