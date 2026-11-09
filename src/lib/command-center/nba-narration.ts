@@ -4,6 +4,7 @@
 // deterministic text. Nothing here changes the cards.
 
 import type { NbaCard } from "./next-best-action";
+import { isTransientAiFailure, type AiFailureReason } from "./ai/outcome";
 
 export interface NarrationStorage {
   get(key: string): string | null;
@@ -31,6 +32,9 @@ export function deterministicNarration(cards: readonly Pick<NbaCard, "headline" 
 export interface NarrationResult {
   text: string;
   source: "ai" | "deterministic";
+  /** V2.49 A1 — why the AI wording was not used (so the UI can say so quietly). */
+  failure?: AiFailureReason;
+  httpStatus?: number;
 }
 
 interface Cached {
@@ -38,7 +42,16 @@ interface Cached {
   hash: string;
   text: string;
   source: "ai" | "deterministic";
+  /** V2.49 A1 (optional — an old {day, hash, text, source} blob still loads; it counts as one finished attempt). */
+  attempts?: number;
+  failure?: AiFailureReason;
 }
+
+/** What the one AI call reports: the summary text (or null), plus the typed reason when the call failed. */
+export type NarrationCallResult = string | null | { text: string | null; reason?: AiFailureReason; httpStatus?: number };
+
+/** At most this many AI attempts per day (a transient failure may be retried once). */
+export const NARRATION_MAX_ATTEMPTS_PER_DAY = 2;
 
 export async function narrateNextBestActions(input: {
   cards: readonly NbaCard[];
@@ -46,7 +59,7 @@ export async function narrateNextBestActions(input: {
   flagOn: boolean;
   aiAvailable: boolean;
   /** The one AI call (generateDailyGuidance): returns the summary text, or null when there is nothing usable. */
-  callAi: (facts: { headlines: string[]; evidence: string[] }) => Promise<string | null>;
+  callAi: (facts: { headlines: string[]; evidence: string[] }) => Promise<NarrationCallResult>;
   storage: NarrationStorage;
 }): Promise<NarrationResult> {
   const base = deterministicNarration(input.cards);
@@ -59,17 +72,25 @@ export async function narrateNextBestActions(input: {
   } catch {
     cached = null;
   }
-  if (cached?.day === input.today && cached.hash === hash) return { text: cached.text, source: cached.source }; // same facts today: no call
-  if (cached?.day === input.today) return { text: base, source: "deterministic" }; // today's one call is used and the facts moved on: deterministic text, still no call
+  const today = cached?.day === input.today ? cached : null;
+  const attemptsSoFar = today ? (today.attempts ?? 1) : 0;
+  // A transient failure (network / provider error / truncation) earlier today may be retried once; anything else is final for the day.
+  const retryable = !!today && today.source === "deterministic" && isTransientAiFailure(today.failure) && attemptsSoFar < NARRATION_MAX_ATTEMPTS_PER_DAY;
+  if (today && !retryable) {
+    if (today.hash === hash) return { text: today.text, source: today.source, ...(today.failure ? { failure: today.failure } : {}) }; // same facts today: no call
+    return { text: base, source: "deterministic", ...(today.failure ? { failure: today.failure } : {}) }; // today's budget of calls is used and the facts moved on: deterministic text, still no call
+  }
   let result: NarrationResult = { text: base, source: "deterministic" };
   try {
-    const text = await input.callAi({ headlines: input.cards.map((c) => c.headline), evidence: input.cards.flatMap((c) => c.why.map((w) => w.content)) });
+    const out = await input.callAi({ headlines: input.cards.map((c) => c.headline), evidence: input.cards.flatMap((c) => c.why.map((w) => w.content)) });
+    const text = typeof out === "string" || out === null ? out : out.text;
     if (text && text.trim()) result = { text: text.trim(), source: "ai" };
+    else if (out && typeof out === "object" && out.reason) result = { text: base, source: "deterministic", failure: out.reason, ...(out.httpStatus !== undefined ? { httpStatus: out.httpStatus } : {}) };
   } catch {
-    // capped, failed or malformed -> deterministic
+    result = { text: base, source: "deterministic", failure: "network" }; // capped, failed or malformed -> deterministic
   }
   try {
-    input.storage.set(NARRATION_STORAGE_KEY, JSON.stringify({ day: input.today, hash, text: result.text, source: result.source } satisfies Cached));
+    input.storage.set(NARRATION_STORAGE_KEY, JSON.stringify({ day: input.today, hash, text: result.text, source: result.source, attempts: attemptsSoFar + 1, ...(result.failure ? { failure: result.failure } : {}) } satisfies Cached));
   } catch {
     // storage unavailable: still at most one call per page session by the caller
   }

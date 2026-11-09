@@ -7,11 +7,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { nextBestActions, nbaDeferUntil, type NbaCard } from "@/lib/command-center/next-best-action";
 import { nbaInputFrom } from "@/lib/command-center/nba-inputs";
-import { deterministicNarration, narrateNextBestActions, type NarrationStorage } from "@/lib/command-center/nba-narration";
+import { deterministicNarration, narrateNextBestActions, type NarrationResult, type NarrationStorage } from "@/lib/command-center/nba-narration";
 import { getAIProvider } from "@/lib/command-center/ai";
 import { checkAiModelStatus } from "@/lib/command-center/ai/claude-provider";
 import type { WhyShouldICareContent } from "@/lib/command-center/why-should-i-care";
 import { Panel, SectionHeading, TrustLabel } from "./ui";
+import { AiFailureNote } from "./AiFailureNote";
 import { WhyShouldICareDrawer } from "./WhyShouldICareDrawer";
 import { MentionReplyDrafter } from "./MentionReplyDrafter";
 import { AskFollowUp } from "./AskFollowUp";
@@ -55,7 +56,7 @@ export function NextBestActions({ compact = false }: { compact?: boolean }) {
   );
   const cards = useMemo(() => nextBestActions(input), [input]);
   const [answered, setAnswered] = useState<Record<string, "useful" | "not-now">>({});
-  const [narration, setNarration] = useState<{ text: string; source: "ai" | "deterministic" } | null>(null);
+  const [narration, setNarration] = useState<NarrationResult | null>(null);
   const flagOn = state.features.nextBestActionAi;
   const readiness = useAiReadiness("nextBestActionAi");
 
@@ -71,10 +72,12 @@ export function NextBestActions({ compact = false }: { compact?: boolean }) {
         aiAvailable,
         storage: browserStorage,
         callAi: async (facts) => {
+          // V2.49 A1 — no read of the shared mode flag (it starts as "mock" and only changes AFTER a call, so the call never happened).
           const provider = getAIProvider();
-          if (provider.mode !== "claude") return null;
-          const g = await provider.generateDailyGuidance(facts.headlines, [], [], [], facts.evidence);
-          return g.insufficientEvidence ? null : g.summary;
+          if (!provider.runTask) return { text: null, reason: "unavailable" as const };
+          const o = await provider.runTask("generateDailyGuidance", { topFocusFacts: facts.headlines, watchFacts: [], planFacts: [], recentOutcomeFacts: [], evidenceStrings: facts.evidence });
+          if (!o.ok) return { text: null, reason: o.reason, httpStatus: o.httpStatus };
+          return o.data.insufficientEvidence ? null : o.data.summary;
         },
       });
       if (!cancelled) setNarration(r);
@@ -107,6 +110,7 @@ export function NextBestActions({ compact = false }: { compact?: boolean }) {
               {narration?.source === "ai" && <span className="ml-2"><TrustLabel kind="ai-draft" /></span>}
             </p>
           )}
+          {flagOn && !compact && narration?.failure && <AiFailureNote reason={narration.failure} httpStatus={narration.httpStatus} />}
           <ul className="space-y-3">
             {cards.map((card) => {
               const rows = card.primary.intent === "nudge" ? followUpRowsFor(card.ticketKey) : [];

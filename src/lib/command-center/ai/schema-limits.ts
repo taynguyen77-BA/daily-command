@@ -41,3 +41,30 @@ export function schemaLimitsText(schema: z.ZodType): string {
   if (lines.length === 0) return "";
   return `\n\nOUTPUT LIMITS (enforced — an answer over a limit is rejected; keep every field within it):\n${lines.map((l) => `- ${l}`).join("\n")}`;
 }
+
+function maxChars(node: JsonSchemaNode | undefined): number {
+  if (!node || typeof node !== "object") return 0;
+  if (node.type === "string") return typeof node.maxLength === "number" ? node.maxLength : 0;
+  if (node.type === "array") {
+    const items = Array.isArray(node.items) ? node.items[0] : node.items;
+    return (typeof node.maxItems === "number" ? node.maxItems : 0) * maxChars(items);
+  }
+  if (node.properties) return Object.values(node.properties).reduce((s, p) => s + maxChars(p), 0);
+  const alts = [...(node.anyOf ?? []), ...(node.oneOf ?? [])];
+  return alts.length ? Math.max(...alts.map(maxChars)) : 0;
+}
+
+const maxCharsCache = new WeakMap<object, number>();
+/** V2.49 A1 — worst-case number of characters the schema allows (bounded strings x bounded arrays; unbounded fields count 0). Cached per schema. */
+export function schemaMaxChars(schema: z.ZodType): number {
+  const hit = maxCharsCache.get(schema);
+  if (hit !== undefined) return hit;
+  let n = 0;
+  try {
+    n = maxChars(z.toJSONSchema(schema, { unrepresentable: "any", io: "output" }) as JsonSchemaNode);
+  } catch {
+    n = 0;
+  }
+  maxCharsCache.set(schema, n);
+  return n;
+}

@@ -51,14 +51,19 @@ import { queryAnswerPrompt } from "./prompts/query-answer";
 import { riskAnalysisPrompt } from "./prompts/risk-analysis";
 import { trendInterpretationPrompt } from "./prompts/trend-interpretation";
 import { weeklyReviewPrompt } from "./prompts/weekly-review";
-import type { TaskInput, TicketContextInput } from "./task-registry";
-import type { BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
+import type { TASK_OUTPUT_SCHEMAS, TaskInput, TicketContextInput } from "./task-registry";
+import type { AiOutcome } from "./outcome";
+import type { z } from "zod";
+import type { AITask, BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
 import { deGherkin } from "./ba-requirements";
 import { deterministicReleaseBrief } from "./release-brief";
 import { parseCommandDeterministic } from "./nl-commands";
 
 export interface AIProvider {
+  /** For UI labelling only — DEPRECATED (V2.49): derive a label from the call's own `AiOutcome` (runTask) instead. */
   readonly mode: "mock" | "claude";
+  /** V2.49 A1 — run one task and get the data or the typed failure reason. Not implemented by the mock (callers treat a missing runTask as "unavailable"). */
+  runTask?<T extends AITask>(task: T, input: TaskInput<T>): Promise<AiOutcome<z.infer<(typeof TASK_OUTPUT_SCHEMAS)[T]>>>;
   analyzePriorities(item: WorkItem, result: PriorityScoreResult, facts: string[], evidence: Evidence[]): Promise<ReasoningTrace>;
   detectRisks(risk: Risk, facts: string[], evidence: Evidence[]): Promise<ReasoningTrace>;
   explainChanges(change: ChangeEvent): Promise<string>;

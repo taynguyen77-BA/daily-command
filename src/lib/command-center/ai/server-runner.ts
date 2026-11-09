@@ -18,7 +18,7 @@
 import { createHash } from "node:crypto";
 import { aiStructuredRequestSchema, type AITask } from "./schemas";
 import { buildTaskPrompt, GROUNDING_POLICY, parseTaskInput, TASK_EXTRA_CHECKS, TASK_OUTPUT_SCHEMAS, visibleTokenBudget } from "./task-registry";
-import { isAlwaysThinkingModel, resolveAiModel, supportsDefaultFallbacks, type AiModelEnv, type AiModelTier } from "./model-config";
+import { resolveAiModel, supportsDefaultFallbacks, thinkingHeadroom, type AiModelEnv, type AiModelTier } from "./model-config";
 import { checkGrounding } from "./evaluation";
 import { redactPatternsDeep } from "./redaction";
 import { UNTRUSTED_DATA_RULE } from "./untrusted";
@@ -63,6 +63,8 @@ export interface AiServerDeps {
   user?: { uid: string; cap: number | null };
   /** D3 — mark every ledger entry of this request as a self-test call. */
   selftest?: boolean;
+  /** V2.49 A1 — calls go to a custom gateway (ANTHROPIC_BASE_URL / saved base URL): unknown model ids get thinking headroom. */
+  customBaseUrl?: boolean;
 }
 
 export type AiServerResult = { status: number; body: Record<string, unknown> };
@@ -196,13 +198,14 @@ function schemaIssues(err: unknown): string[] {
 
 async function callAndValidate(task: AITask, prompt: string, parsedInput: unknown, model: string, tier: AiModelTier, deps: AiServerDeps, now: Date, cap?: number): Promise<AiServerResult> {
   const visible = visibleTokenBudget(task);
-  const maxTokens = isAlwaysThinkingModel(model) ? visible + 6000 : visible;
+  const headroom = thinkingHeadroom(model, { customBaseUrl: deps.customBaseUrl });
+  let maxTokens = visible + headroom;
   const messages: ModelCallParams["messages"] = [{ role: "user", content: prompt }];
   const schema = TASK_OUTPUT_SCHEMAS[task] as { safeParse: (v: unknown) => { success: boolean; data?: unknown; error?: unknown } };
   const policy = GROUNDING_POLICY[task];
   const selftest = deps.selftest ? { selftest: true } : {};
 
-  // At most TWO model calls per request: the first answer, plus ONE repair (grounding OR schema).
+  // At most TWO model calls per request: the first answer, plus ONE follow-up (a grounding/schema repair OR a larger-budget retry after truncation).
   for (let attempt = 0; attempt < 2; attempt++) {
     // The cap is re-checked before the repair call (a request at the boundary overshoots by at most one call).
     if (attempt > 0 && cap !== undefined) {
@@ -219,12 +222,18 @@ async function callAndValidate(task: AITask, prompt: string, parsedInput: unknow
       return fail(502, err instanceof Error ? err.message : "Unknown AI provider error.", errorKind);
     }
     const usage = res.usage;
-    const base = { task, model, tier, cached: false, ...usage, ...(attempt > 0 ? { repaired: true } : {}), ...selftest };
+    const base = { task, model, tier, cached: false, ...usage, ...(messages.length > 1 ? { repaired: true } : {}), ...selftest };
     if (res.stopReason === "refusal") {
       await log(deps, { ...base, outcome: "refused", errorKind: "refused" }, now);
       return fail(502, "The model declined this request.", "refused");
     }
     if (res.stopReason === "max_tokens") {
+      // V2.49 A1 — one retry with double the output room (the cap is re-checked at the top of the next iteration).
+      if (attempt === 0) {
+        await log(deps, { ...base, outcome: "truncated-retry", errorKind: "truncated" }, now);
+        maxTokens = Math.min(maxTokens * 2, 8192 + headroom);
+        continue;
+      }
       await log(deps, { ...base, outcome: "truncated", errorKind: "truncated" }, now);
       return fail(502, "Model response was cut off before it finished.", "truncated");
     }

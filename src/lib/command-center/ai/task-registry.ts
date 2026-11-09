@@ -9,7 +9,7 @@
 
 import { z } from "zod";
 import type { GroundingPolicy } from "./evaluation";
-import { schemaLimitsText } from "./schema-limits";
+import { schemaLimitsText, schemaMaxChars } from "./schema-limits";
 import type { ArtifactType, ChangeEvent, DecisionConflictCandidate, Evidence, FollowUpContext, HealthTrend, PriorityScoreResult, Risk, WorkItem, Action } from "../types";
 import type { WeeklyReviewFacts } from "../weekly-review";
 import { actionOutcomePrompt } from "./prompts/action-outcome";
@@ -293,13 +293,22 @@ export const TASK_OUTPUT_SCHEMAS = {
   weeklyInsights: weeklyInsightsResponseSchema,
 } satisfies Record<AITask, z.ZodType>;
 
-/** Visible-output budget per task (thinking models get extra room on top, server-side). */
-export function visibleTokenBudget(task: AITask): number {
+/** Previous explicit per-task values — kept as the floor (V2.49 A1 only ever raises a budget). */
+function baseVisibleBudget(task: AITask): number {
   if (task === "rewriteReport" || task === "baRequirementCheck") return 4096;
   if (task === "draftBlockerFollowUps" || task === "extractMeetingActions" || task === "releaseGoNoGo") return 2048;
   if (task === "triageNewItems") return 3072;
   if (task === "generateDecisionOptions" || task === "checkRequirements" || task === "generateTicketBrief" || task === "draftMentionReply") return 1536;
   return 512;
+}
+
+/** Visible-output budget per task (thinking models get extra room on top, server-side).
+ *  V2.49 A1: max(previous value, min(3072, ceil(schemaMaxChars / 4 x 0.5))); Vietnamese x1.6 (cap 6144). */
+export function visibleTokenBudget(task: AITask, opts?: { language?: "en" | "vi" }): number {
+  const base = baseVisibleBudget(task);
+  const fromSchema = Math.min(3072, Math.ceil((schemaMaxChars(TASK_OUTPUT_SCHEMAS[task] as z.ZodType) / 4) * 0.5));
+  const en = Math.max(base, fromSchema);
+  return opts?.language === "vi" ? Math.min(6144, Math.max(en, Math.ceil(en * 1.6))) : en;
 }
 
 // ===== Task-specific fact checks (on top of the generic grounding guard) =====

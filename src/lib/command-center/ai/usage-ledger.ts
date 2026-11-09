@@ -25,7 +25,7 @@ export interface AiUsageRecord {
   cacheWriteTokens: number;
   /** Served from the server's dedupe cache — no model call, zero tokens. */
   cached: boolean;
-  outcome: "ok" | "grounding-retry" | "grounding-rejected" | "invalid-output" | "schema-retry" | "refused" | "truncated" | "error";
+  outcome: "ok" | "grounding-retry" | "grounding-rejected" | "invalid-output" | "schema-retry" | "refused" | "truncated" | "truncated-retry" | "error";
   /** L4 — the signed-in member who made the call (team sign-in on); absent otherwise. */
   uid?: string;
   /** D2 telemetry (all optional — old records load unchanged). Never contains model text. */

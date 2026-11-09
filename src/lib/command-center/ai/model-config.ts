@@ -85,3 +85,16 @@ export function isAlwaysThinkingModel(model: string): boolean {
 export function supportsDefaultFallbacks(model: string): boolean {
   return /^claude-(opus-5-5|opus-5|sonnet-5-5|fable-5-1)$/.test(model);
 }
+
+/** Claude ids known NOT to think by default (no extra output room needed). */
+function isKnownNonThinkingClaude(model: string): boolean {
+  return /^claude-(3|3-5|3-7|haiku-4|sonnet-4|opus-4)(-|$)/.test(model);
+}
+
+/** V2.49 A1 — extra max_tokens on top of the visible budget. Known always-thinking Claude ids: 6000 (unchanged);
+ *  a custom gateway or an unrecognised id (e.g. "anthropic/claude-sonnet-4.5"): 2048; known non-thinking Claude ids: 0. */
+export function thinkingHeadroom(model: string, opts?: { customBaseUrl?: boolean }): number {
+  if (isAlwaysThinkingModel(model)) return 6000;
+  if (opts?.customBaseUrl) return 2048;
+  return isKnownNonThinkingClaude(model) ? 0 : 2048;
+}

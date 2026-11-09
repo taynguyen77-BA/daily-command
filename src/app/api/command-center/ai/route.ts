@@ -102,6 +102,6 @@ export async function POST(req: Request) {
   const user = p.kind === "user" ? { uid: p.user.uid, cap: resolveUserDailyTokenCap(process.env.AI_USER_DAILY_TOKEN_CAP) } : undefined;
   // D1 — the saved record's models and daily budget apply (budget = min(record, server hard cap)).
   const env = { ...serverEnv(), ...modelEnvFor(providerEnv(), creds), AI_DAILY_TOKEN_CAP: String(effectiveCap(providerEnv(), creds)) };
-  const result = await handleAiRequest(body, { env, callModel: anthropicCaller(creds), ledger: getUsageLedger(), now: () => new Date(), ...(user ? { user } : {}) });
+  const result = await handleAiRequest(body, { env, callModel: anthropicCaller(creds), ledger: getUsageLedger(), now: () => new Date(), ...(creds.baseUrl ? { customBaseUrl: true } : {}), ...(user ? { user } : {}) });
   return NextResponse.json(result.body, { status: result.status });
 }

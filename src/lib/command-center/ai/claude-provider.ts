@@ -38,11 +38,11 @@ import { pairedAuthHeader } from "../device-pairing";
 import type { AiStatusResponse } from "./status-response";
 import { parseTaskInput, TASK_OUTPUT_SCHEMAS, type TaskInput, type TicketContextInput } from "./task-registry";
 import type { AITask, BaRequirementCheckResponse, CommandResponse, FollowUpsResponse, MeetingActionsResponse, MentionReplyResponse, ReleaseBriefResponse, TicketBriefResponse, TriageResponse, WeeklyInsightsResponse } from "./schemas";
+import { failureReasonFromResponse, type AiFailureReason, type AiOutcome } from "./outcome";
 import type { z } from "zod";
 
 const ENDPOINT = "/api/command-center/ai";
 
-type CallResult<T> = { ok: true; data: T } | { ok: false };
 type Output<T extends AITask> = z.infer<(typeof TASK_OUTPUT_SCHEMAS)[T]>;
 
 /** V2.36 H4 — what the server last said about today's AI budget (for the UI). */
@@ -118,13 +118,14 @@ export class ClaudeProvider implements AIProvider {
     return this._mode;
   }
 
-  private fallback(task: AITask, providerState: "CLAUDE_UNAVAILABLE" | "CALL_FAILED" | "VALIDATION_FAILED" | "BUDGET_EXHAUSTED" | "GROUNDING_REJECTED"): { ok: false } {
+  private fallback(task: AITask, providerState: "CLAUDE_UNAVAILABLE" | "CALL_FAILED" | "VALIDATION_FAILED" | "BUDGET_EXHAUSTED" | "GROUNDING_REJECTED", reason: AiFailureReason, extra: { httpStatus?: number; violationCount?: number } = {}): { ok: false; reason: AiFailureReason; httpStatus?: number; violationCount?: number } {
     this._mode = "mock";
     recordAiCall({ task, mode: "mock", schemaValid: false, fallbackUsed: true, evidenceReferenceCount: 0, providerState });
-    return { ok: false };
+    return { ok: false, reason, ...extra };
   }
 
-  private async call<T extends AITask>(task: T, input: TaskInput<T>): Promise<CallResult<Output<T>>> {
+  /** V2.49 A1 — the one call path: returns the data or the typed reason it failed. Every method below falls back to the mock on `ok: false`. */
+  async runTask<T extends AITask>(task: T, input: TaskInput<T>): Promise<AiOutcome<Output<T>>> {
     // V1.7 §27 — every path records a trace entry (never the input itself, never
     // credentials) so the local "AI Trust" diagnostic can show mode/schema/fallback status.
     if (!this.availability || Date.now() - this.availabilityAt > AI_AVAILABILITY_TTL_MS || this.availabilityEpochSeen !== availabilityEpoch) {
@@ -133,31 +134,33 @@ export class ClaudeProvider implements AIProvider {
       this.availabilityEpochSeen = availabilityEpoch;
     }
     const available = await this.availability;
-    if (!available) return this.fallback(task, "CLAUDE_UNAVAILABLE");
+    if (!available) return this.fallback(task, "CLAUDE_UNAVAILABLE", "unavailable");
     if (lastBudget?.exhausted && lastBudget.at.slice(0, 10) === new Date().toISOString().slice(0, 10)) {
       // Don't keep hitting a server that already said the budget is gone today.
-      return this.fallback(task, "BUDGET_EXHAUSTED");
+      return this.fallback(task, "BUDGET_EXHAUSTED", "budget");
     }
     const parsedInput = parseTaskInput(task, input);
-    if (!parsedInput.ok) return this.fallback(task, "CALL_FAILED");
+    if (!parsedInput.ok) return this.fallback(task, "CALL_FAILED", "bad-input");
     try {
       const res = await fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...pairedAuthHeader() },
         body: JSON.stringify({ task, input: parsedInput.input }),
       });
-      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; data?: unknown; error?: string; errorKind?: string; usage?: { cap?: number; remainingToday?: number } };
+      const json = (await res.json().catch(() => ({}))) as { ok?: boolean; data?: unknown; error?: string; errorKind?: string; violations?: unknown[]; usage?: { cap?: number; remainingToday?: number } };
       if (json.usage && typeof json.usage.cap === "number" && typeof json.usage.remainingToday === "number") {
         setBudget({ cap: json.usage.cap, remainingToday: json.usage.remainingToday, exhausted: res.status === 429 || json.usage.remainingToday <= 0, message: res.status === 429 ? json.error : undefined, at: new Date().toISOString() });
       }
       if (!res.ok || !json.ok) recordAiFailure({ task, errorKind: json.errorKind ?? `http-${res.status}`, httpStatus: res.status });
-      if (res.status === 429) return this.fallback(task, "BUDGET_EXHAUSTED");
-      if (res.status === 422) return this.fallback(task, "GROUNDING_REJECTED");
+      const reason = failureReasonFromResponse(res.status, json.errorKind);
+      const extra = { httpStatus: res.status, ...(Array.isArray(json.violations) ? { violationCount: json.violations.length } : {}) };
+      if (res.status === 429) return this.fallback(task, "BUDGET_EXHAUSTED", reason, extra);
+      if (res.status === 422) return this.fallback(task, "GROUNDING_REJECTED", reason, extra);
       // V2.1 §6/§14 — the request itself failed; Claude was never meaningfully consulted.
-      if (!res.ok || !json.ok) return this.fallback(task, "CALL_FAILED");
+      if (!res.ok || !json.ok) return this.fallback(task, "CALL_FAILED", reason, extra);
       const parsed = (TASK_OUTPUT_SCHEMAS[task] as z.ZodType).safeParse(json.data);
       // A response WAS received but didn't pass schema validation.
-      if (!parsed.success || parsed.data === undefined) return this.fallback(task, "VALIDATION_FAILED");
+      if (!parsed.success || parsed.data === undefined) return this.fallback(task, "VALIDATION_FAILED", "invalid-output");
       this._mode = "claude";
       const data = parsed.data as Record<string, unknown>;
       const evidenceReferenceCount = Array.isArray(data?.evidenceReferences) ? (data.evidenceReferences as unknown[]).length : 0;
@@ -166,12 +169,12 @@ export class ClaudeProvider implements AIProvider {
     } catch {
       // Network error, offline, server down — never let this reach the caller as a throw.
       recordAiFailure({ task, errorKind: "network" });
-      return this.fallback(task, "CALL_FAILED");
+      return this.fallback(task, "CALL_FAILED", "network");
     }
   }
 
   async analyzePriorities(item: WorkItem, result: PriorityScoreResult, facts: string[], evidence: Evidence[]): Promise<ReasoningTrace> {
-    const r = await this.call("analyzePriorities", { item, result, facts, evidence });
+    const r = await this.runTask("analyzePriorities", { item, result, facts, evidence });
     if (r.ok) {
       return {
         facts,
@@ -186,7 +189,7 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async detectRisks(risk: Risk, facts: string[], evidence: Evidence[]): Promise<ReasoningTrace> {
-    const r = await this.call("detectRisks", { risk, facts, evidence });
+    const r = await this.runTask("detectRisks", { risk, facts, evidence });
     if (r.ok) {
       return {
         facts,
@@ -201,7 +204,7 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async explainChanges(change: ChangeEvent): Promise<string> {
-    const r = await this.call("explainChanges", { change });
+    const r = await this.runTask("explainChanges", { change });
     return r.ok ? r.data.text : this.mock.explainChanges(change);
   }
 
@@ -209,27 +212,27 @@ export class ClaudeProvider implements AIProvider {
     budgetMinutes: number,
     candidates: { item?: WorkItem; action?: Action; result?: PriorityScoreResult; estimateMinutes: number }[]
   ): Promise<string> {
-    const r = await this.call("generateActionPlan", { budgetMinutes, candidates });
+    const r = await this.runTask("generateActionPlan", { budgetMinutes, candidates });
     return r.ok ? r.data.text : this.mock.generateActionPlan(budgetMinutes, candidates);
   }
 
   async generateCommunication(item: WorkItem, audience: string, why: string): Promise<string> {
-    const r = await this.call("generateCommunication", { item, audience, why });
+    const r = await this.runTask("generateCommunication", { item, audience, why });
     return r.ok ? r.data.text : this.mock.generateCommunication(item, audience, why);
   }
 
   async generateEndOfDaySummary(completed: Action[], deferred: Action[], blocked: Action[], newRisks: Risk[]): Promise<string> {
-    const r = await this.call("generateEndOfDaySummary", { completed, deferred, blocked, newRisks });
+    const r = await this.runTask("generateEndOfDaySummary", { completed, deferred, blocked, newRisks });
     return r.ok ? r.data.text : this.mock.generateEndOfDaySummary(completed, deferred, blocked, newRisks);
   }
 
   async polishReportSummary(summary: string): Promise<string> {
-    const r = await this.call("polishReportSummary", { summary });
+    const r = await this.runTask("polishReportSummary", { summary });
     return r.ok ? r.data.text : this.mock.polishReportSummary(summary);
   }
 
   async interpretTrend(trend: HealthTrend, currentConfidence: number): Promise<TrendInterpretation> {
-    const r = await this.call("interpretTrend", { trend, currentConfidence });
+    const r = await this.runTask("interpretTrend", { trend, currentConfidence });
     if (r.ok) {
       return {
         whatChanged: r.data.whatChanged,
@@ -244,24 +247,24 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async detectDecisionConflicts(candidate: DecisionConflictCandidate): Promise<DecisionConflictAssessment> {
-    const r = await this.call("detectDecisionConflicts", { candidate });
+    const r = await this.runTask("detectDecisionConflicts", { candidate });
     if (r.ok) return { assessment: r.data.assessment, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
     return this.mock.detectDecisionConflicts(candidate);
   }
 
   async analyzeActionOutcomes(ctx: FollowUpContext): Promise<DecisionConflictAssessment> {
-    const r = await this.call("analyzeActionOutcomes", { ctx });
+    const r = await this.runTask("analyzeActionOutcomes", { ctx });
     if (r.ok) return { assessment: r.data.assessment, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
     return this.mock.analyzeActionOutcomes(ctx);
   }
 
   async generateWeeklyReview(facts: WeeklyReviewFacts): Promise<string> {
-    const r = await this.call("generateWeeklyReview", { facts });
+    const r = await this.runTask("generateWeeklyReview", { facts });
     return r.ok ? r.data.text : this.mock.generateWeeklyReview(facts);
   }
 
   async answerQuery(query: string, facts: string[], evidence: Evidence[], recommendedActionSeed: string): Promise<QueryAnswer> {
-    const r = await this.call("answerQuery", { query, facts, recommendedActionSeed });
+    const r = await this.runTask("answerQuery", { query, facts, recommendedActionSeed });
     if (r.ok) {
       return {
         answer: r.data.answer,
@@ -275,7 +278,7 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async assessProactive(category: string, facts: string[], evidenceStrings: string[], trendQualityNote: string): Promise<ProactiveAssessment> {
-    const r = await this.call("assessProactive", { category, facts, evidenceStrings, trendQualityNote });
+    const r = await this.runTask("assessProactive", { category, facts, evidenceStrings, trendQualityNote });
     if (r.ok) {
       return { assessment: r.data.assessment, impact: r.data.impact, recommendation: r.data.recommendation, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
     }
@@ -283,13 +286,13 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async generateProjectStory(timelineFacts: string[], evidenceStrings: string[], hasEnoughHistory: boolean): Promise<ProjectStoryResult> {
-    const r = await this.call("generateProjectStory", { timelineFacts, evidenceStrings, hasEnoughHistory });
+    const r = await this.runTask("generateProjectStory", { timelineFacts, evidenceStrings, hasEnoughHistory });
     if (r.ok) return { narrative: r.data.narrative, confidence: r.data.confidence, insufficientHistory: r.data.insufficientHistory };
     return this.mock.generateProjectStory(timelineFacts, evidenceStrings, hasEnoughHistory);
   }
 
   async generateDecisionOptions(issueTitle: string, facts: string[], evidenceStrings: string[]): Promise<DecisionOptionsResult> {
-    const r = await this.call("generateDecisionOptions", { issueTitle, facts, evidenceStrings });
+    const r = await this.runTask("generateDecisionOptions", { issueTitle, facts, evidenceStrings });
     if (r.ok) {
       return {
         summary: r.data.summary,
@@ -304,7 +307,7 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async interpretOutcome(subjectTitle: string, observedChangeFacts: string[], evidenceStrings: string[]): Promise<OutcomeInterpretation> {
-    const r = await this.call("interpretOutcome", { subjectTitle, observedChangeFacts, evidenceStrings });
+    const r = await this.runTask("interpretOutcome", { subjectTitle, observedChangeFacts, evidenceStrings });
     if (r.ok) {
       return {
         summary: r.data.summary,
@@ -319,7 +322,7 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async generateDailyGuidance(topFocusFacts: string[], watchFacts: string[], planFacts: string[], recentOutcomeFacts: string[], evidenceStrings: string[]): Promise<DailyGuidanceResult> {
-    const r = await this.call("generateDailyGuidance", { topFocusFacts, watchFacts, planFacts, recentOutcomeFacts, evidenceStrings });
+    const r = await this.runTask("generateDailyGuidance", { topFocusFacts, watchFacts, planFacts, recentOutcomeFacts, evidenceStrings });
     if (r.ok) {
       return {
         summary: r.data.summary,
@@ -335,64 +338,64 @@ export class ClaudeProvider implements AIProvider {
   }
 
   async generateCommunicationArtifact(type: ArtifactType, facts: string[], evidenceStrings: string[]): Promise<CommunicationArtifactResult> {
-    const r = await this.call("generateCommunicationArtifact", { type, facts, evidenceStrings });
+    const r = await this.runTask("generateCommunicationArtifact", { type, facts, evidenceStrings });
     if (r.ok) return { text: r.data.text, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
     return this.mock.generateCommunicationArtifact(type, facts, evidenceStrings);
   }
 
   async checkRequirements(ticket: TicketContextInput): Promise<RequirementCheckResult> {
-    const r = await this.call("checkRequirements", { ticket });
+    const r = await this.runTask("checkRequirements", { ticket });
     if (r.ok) return { summary: r.data.summary, gaps: r.data.gaps, questions: r.data.questions, risks: r.data.risks, confidence: r.data.confidence, insufficientEvidence: r.data.insufficientEvidence };
     return this.mock.checkRequirements(ticket);
   }
 
   async generateTicketBrief(ticket: TicketContextInput, today: string): Promise<TicketBriefResponse> {
-    const r = await this.call("generateTicketBrief", { ticket, today });
+    const r = await this.runTask("generateTicketBrief", { ticket, today });
     return r.ok ? r.data : this.mock.generateTicketBrief(ticket, today);
   }
 
   async triageNewItems(input: TaskInput<"triageNewItems">): Promise<TriageResponse["items"]> {
-    const r = await this.call("triageNewItems", input);
+    const r = await this.runTask("triageNewItems", input);
     return r.ok ? r.data.items : this.mock.triageNewItems(input);
   }
 
   async draftMentionReply(input: TaskInput<"draftMentionReply">): Promise<MentionReplyResponse> {
-    const r = await this.call("draftMentionReply", input);
+    const r = await this.runTask("draftMentionReply", input);
     return r.ok ? r.data : this.mock.draftMentionReply(input);
   }
 
   async rewriteReport(audience: TaskInput<"rewriteReport">["audience"], report: string): Promise<string> {
-    const r = await this.call("rewriteReport", { audience, report });
+    const r = await this.runTask("rewriteReport", { audience, report });
     return r.ok ? r.data.text : this.mock.rewriteReport(audience, report);
   }
 
   async baRequirementCheck(ticket: TicketContextInput): Promise<BaRequirementCheckResponse> {
-    const r = await this.call("baRequirementCheck", { ticket });
+    const r = await this.runTask("baRequirementCheck", { ticket });
     return r.ok ? r.data : this.mock.baRequirementCheck(ticket);
   }
 
   async draftBlockerFollowUps(input: TaskInput<"draftBlockerFollowUps">): Promise<FollowUpsResponse> {
-    const r = await this.call("draftBlockerFollowUps", input);
+    const r = await this.runTask("draftBlockerFollowUps", input);
     return r.ok ? r.data : this.mock.draftBlockerFollowUps(input);
   }
 
   async releaseGoNoGo(input: TaskInput<"releaseGoNoGo">): Promise<ReleaseBriefResponse> {
-    const r = await this.call("releaseGoNoGo", input);
+    const r = await this.runTask("releaseGoNoGo", input);
     return r.ok ? r.data : this.mock.releaseGoNoGo(input);
   }
 
   async extractMeetingActions(input: TaskInput<"extractMeetingActions">): Promise<MeetingActionsResponse> {
-    const r = await this.call("extractMeetingActions", input);
+    const r = await this.runTask("extractMeetingActions", input);
     return r.ok ? r.data : this.mock.extractMeetingActions(input);
   }
 
   async parseCommand(input: TaskInput<"parseCommand">): Promise<CommandResponse> {
-    const r = await this.call("parseCommand", input);
+    const r = await this.runTask("parseCommand", input);
     return r.ok ? r.data : this.mock.parseCommand(input);
   }
 
   async weeklyInsights(input: TaskInput<"weeklyInsights">): Promise<WeeklyInsightsResponse> {
-    const r = await this.call("weeklyInsights", input);
+    const r = await this.runTask("weeklyInsights", input);
     return r.ok ? r.data : this.mock.weeklyInsights(input);
   }
 }
