@@ -195,6 +195,7 @@ export function AiProviderPanel() {
               <span className="ml-2 text-xs text-text3">server hard cap {status.hardCap.toLocaleString("en-US")}{usage ? ` · today ${usage.today.totalTokens.toLocaleString("en-US")} used` : ""}</span>
             </label>
             {usage && status.cap > 0 && <div className="h-1.5 w-48 overflow-hidden rounded bg-surface2" aria-hidden><div className="h-full bg-accent" style={{ width: `${Math.min(100, Math.round((100 * usage.today.totalTokens) / status.cap))}%` }} /></div>}
+            {status.baseUrl && <p className="text-xs text-text3">Gateway in use: models are checked against its list. Clear all three model fields and save to let the app re-pick them.</p>}
             <label className="block" data-base-url-field>
               <span className="text-text">Base URL <span className="text-text3">(optional — for a compatible gateway)</span></span>
               <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={!status.customBaseUrlAllowed} placeholder="https://aiproviders.s3corp.com.vn/v1  (empty = api.anthropic.com)" spellCheck={false} className="mt-1 w-full rounded border border-border bg-surface2 px-2 py-1 font-mono text-sm disabled:opacity-60" aria-label="Custom base URL" />

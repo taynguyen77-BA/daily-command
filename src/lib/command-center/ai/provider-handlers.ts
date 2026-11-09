@@ -119,6 +119,8 @@ export async function putProvider(ctx: ProviderCtx, body: unknown): Promise<Hand
   const cap = validateCap(b.dailyTokenCap, hard);
   if (!cap.ok) return bad(400, cap.message, { field: cap.field });
   const clearBaseUrl = b.baseUrl === "" && customBaseUrlAllowed(ctx.env, ctx.principal); // an empty field removes a saved URL
+  // All three model fields sent empty = "reset": the next test re-picks from the gateway's list.
+  const clearModels = b.models !== null && typeof b.models === "object" && Object.keys(b.models as object).length > 0 && Object.keys(models.value).length === 0;
   const baseUrl = validateBaseUrl(b.baseUrl, customBaseUrlAllowed(ctx.env, ctx.principal));
   if (!baseUrl.ok) return bad(400, baseUrl.message, { field: baseUrl.field });
   let key: string | undefined;
@@ -142,6 +144,7 @@ export async function putProvider(ctx: ProviderCtx, body: unknown): Promise<Hand
     // A new key overwrites the old sealed value and resets verification; settings-only changes keep the stored key.
     const rec: AiProviderRecord = key ? sealRecord(key, enc, scope, common, now) : { ...existing!, ...common, savedAt: now.toISOString() };
     if (clearBaseUrl) delete rec.baseUrl;
+    if (clearModels) delete rec.models;
     await ctx.store.put(id, rec);
     await audit(ctx, "save", key ? "key saved" : "settings saved", id);
     return { status: 200, body: { ok: true, last4: rec.last4, fingerprint: rec.fingerprint, savedAt: rec.savedAt, scope: scope.kind } };

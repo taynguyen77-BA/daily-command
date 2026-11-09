@@ -70,7 +70,9 @@ import { RateLimiter, getProviderStatus, putProvider, testProvider, type Provide
   const r = resolveTierModels({ configured: cfg, userChosen: {}, available: list });
   ok(group, r.fast.model === "claude-haiku-4-5" && r.default.autoSelected && r.deep.model === "claude-opus-4-1", "unlisted default models are replaced from the list");
   const r2 = resolveTierModels({ configured: { ...cfg, default: "my-model" }, userChosen: { default: "my-model" }, available: list });
-  ok(group, r2.default.model === "my-model" && !r2.default.autoSelected, "a model the user chose is never silently replaced");
+  ok(group, r2.default.model !== "my-model" && r2.default.autoSelected, "a model that is not on the gateway's list is replaced (it would only 403) and reported");
+  const r2b = resolveTierModels({ configured: { ...cfg, default: "claude-sonnet-4-5" }, userChosen: { default: "claude-sonnet-4-5" }, available: list });
+  ok(group, r2b.default.model === "claude-sonnet-4-5" && !r2b.default.autoSelected, "a listed model the user chose is kept");
   const r3 = resolveTierModels({ configured: cfg, userChosen: {}, available: ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5"] });
   ok(group, Object.values(r3).every((x) => !x.autoSelected), "listed models are kept as they are");
   ok(group, validateModels({ default: "anthropic/claude-sonnet-4.5" }).ok && validateModels({ fast: "model:v1@x" }).ok && !validateModels({ fast: "has space" }).ok, "gateway-style ids (slash, colon, @) accepted; spaces rejected");
@@ -129,4 +131,30 @@ import { RateLimiter, getProviderStatus, putProvider, testProvider, type Provide
   ok(group, validateApiKey('  "Bearer gw-key-0123456789"  ', true).ok && (validateApiKey('Bearer gw-key-0123456789', true) as { value: string }).value === "gw-key-0123456789", "a pasted key with quotes / a Bearer prefix is cleaned");
   const plain = await resolveCredentials({ store: null, env: { ANTHROPIC_API_KEY: "sk-ant-x" }, scopes: [{ kind: "global" }] });
   ok(group, plain.creds?.authMode === undefined, "no gateway -> no auth mode, previous behaviour");
+}
+
+{
+  const group = "V2.48.4 non-Claude gateway list";
+  const { pickModelForTier } = await import("../../src/lib/command-center/ai/model-resolution");
+  const { putProvider, getProviderStatus, testProvider, RateLimiter } = await import("../../src/lib/command-center/ai/provider-handlers");
+  const list = ["ollamaplus", "nvidia/minimaxai/minimax-m3", "nvidia/z-ai/glm-5.2", "nvidia/moonshotai/kimi-k2.6", "nvidia/openai/gpt-oss-120b", "nvidia/stepfun-ai/step-3.7-flash", "cx/gpt-5.6-sol-review"];
+  ok(group, pickModelForTier("fast", list) === "nvidia/stepfun-ai/step-3.7-flash", "fast -> a flash/mini-style model");
+  const deep = pickModelForTier("deep", list);
+  ok(group, deep !== null && /glm|gpt|kimi|120b/.test(deep), `deep -> a large / reasoning model (${deep})`);
+  ok(group, pickModelForTier("deep", ["a-model", "b-model"]) === "a-model", "nothing recognisable -> the gateway's first model");
+
+  // the reported case: fast/default saved, deep = claude-opus-5-5 -> deep is replaced too
+  const recs = new Map<string, AiProviderRecord>();
+  const store: ProviderStore = { get: async (id) => (recs.has(id) ? JSON.parse(JSON.stringify(recs.get(id))) : null), put: async (id, x) => void recs.set(id, JSON.parse(JSON.stringify(x))), del: async (id) => void recs.delete(id), appendAudit: async () => {}, listAudit: async () => [] };
+  const sdk: ProviderSdk = { listModels: async () => list, ping: async (_k, m) => { if (!list.includes(m)) throw Object.assign(new Error("403"), { status: 403 }); } };
+  const c: ProviderCtx = { store, env: { APP_STATE_SECRET: "paired-secret-for-tests-0123456789" }, sdk, now: () => new Date("2026-11-06T09:00:00Z"), principal: { kind: "legacy" }, limiter: new RateLimiter() };
+  await putProvider(c, { apiKey: "gw-key-0123456789", baseUrl: "https://aiproviders.s3corp.com.vn/v1", models: { fast: "ollamaplus", default: "ollamaplus", deep: "claude-opus-5-5" } });
+  const t = await testProvider(c);
+  ok(group, t.body.ok === true && Object.values(t.body.tiers as Record<string, { ok: boolean }>).every((x) => x.ok), "a stale claude-opus-5-5 on a gateway that does not list it no longer fails the deep tier");
+  ok(group, ((await getProviderStatus(c)).body.savedModels as Record<string, string>).deep !== "claude-opus-5-5", "the replacement is saved");
+  await putProvider(c, { models: { fast: "", default: "", deep: "" } });
+  ok(group, Object.keys((await getProviderStatus(c)).body.savedModels as object).length === 0, "all three fields empty = reset the saved models");
+  const t2 = await testProvider({ ...c, limiter: new RateLimiter() });
+  const saved = (await getProviderStatus(c)).body.savedModels as Record<string, string>;
+  ok(group, t2.body.ok === true && saved.fast === "nvidia/stepfun-ai/step-3.7-flash", "after a reset the next test re-picks with the name hints");
 }
