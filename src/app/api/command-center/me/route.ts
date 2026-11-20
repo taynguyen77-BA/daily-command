@@ -4,18 +4,23 @@
 
 import { NextResponse } from "next/server";
 import { handleMeGet, handleMePatch } from "@/lib/command-center/auth/account-handlers";
+import { guardedRoute } from "@/lib/server/route-guard";
 import { accountRoute, authSettings, handlerResponse, readJson } from "@/lib/server/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
-  if (!authSettings().enabled) return NextResponse.json({ ok: true, authEnabled: false });
-  const r = await accountRoute(req, { mutating: false });
-  return "response" in r ? r.response : handlerResponse(await handleMeGet(r.ctx));
+export function GET(req: Request) {
+  return guardedRoute(async () => {
+    if (!authSettings().enabled) return NextResponse.json({ ok: true, authEnabled: false });
+    const r = await accountRoute(req, { mutating: false });
+    return "response" in r ? r.response : handlerResponse(await handleMeGet(r.ctx));
+  }, "GET /me");
 }
 
-export async function PATCH(req: Request) {
-  const r = await accountRoute(req, { mutating: true });
-  return "response" in r ? r.response : handlerResponse(await handleMePatch(r.ctx, await readJson(req)));
+export function PATCH(req: Request) {
+  return guardedRoute(async () => {
+    const r = await accountRoute(req, { mutating: true });
+    return "response" in r ? r.response : handlerResponse(await handleMePatch(r.ctx, await readJson(req)));
+  }, "PATCH /me");
 }
