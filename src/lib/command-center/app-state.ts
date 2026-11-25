@@ -107,6 +107,18 @@ export function createInMemoryAppStateStore(initial: SyncedAppState | null = nul
   };
 }
 
+/** V2.52.2 — `GET …/state?probe=1` answers "is sync configured and is this caller allowed" after the
+ *  usual auth check but WITHOUT reading the synced blob from KV (status checks used to download it
+ *  in full on every page load and exhausted the KV bandwidth quota). */
+export const STATUS_PROBE_QUERY = "probe=1";
+export function isStatusProbe(url: string): boolean {
+  try {
+    return new URL(url, "http://local").searchParams.get("probe") === "1";
+  } catch {
+    return false;
+  }
+}
+
 /** V2.15 §2 — pure auth decision for GET/POST /api/command-center/state, split out so it's
  *  directly testable (the route itself transitively imports "server-only" via
  *  app-state-store.ts, so it can never be imported into the offline test process — same

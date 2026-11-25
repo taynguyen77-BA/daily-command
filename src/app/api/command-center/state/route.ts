@@ -9,7 +9,7 @@
 // bundled at build time).
 
 import { NextResponse } from "next/server";
-import { checkAppStateAuth, syncedAppStateSchema, type SyncedAppState } from "@/lib/command-center/app-state";
+import { checkAppStateAuth, isStatusProbe, syncedAppStateSchema, type SyncedAppState } from "@/lib/command-center/app-state";
 import { createAppStateStore, isAppStateStoreConfigured } from "@/lib/server/app-state-store";
 import { principalError, requestPrincipal, scopeOf } from "@/lib/server/auth";
 
@@ -36,6 +36,8 @@ export async function GET(req: Request) {
   if (!isAppStateStoreConfigured()) {
     return NextResponse.json({ ok: false, error: "Vercel KV is not configured on this server." }, { status: 503 });
   }
+  // V2.52.2 — status checks need only the auth/config answer; never read the (large) blob for them.
+  if (isStatusProbe(req.url)) return NextResponse.json({ ok: true, probe: true, state: null });
   const state = await createAppStateStore(scopeOf(p)).get();
   return NextResponse.json({ ok: true, state });
 }

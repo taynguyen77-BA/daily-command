@@ -14,6 +14,7 @@
 import type { CommandCenterStore, StoreState } from "./store";
 import { mergeById } from "./store";
 import type { SyncedAppState } from "./app-state";
+import { STATUS_PROBE_QUERY } from "./app-state";
 import { mergeMentionReplies } from "./mention-replies";
 import { emptyTombstones, maxIso, mergeDailyCommandState, mergeReviewAcks, type DailyCommandState } from "./execution-state-merge";
 import { pairedAuthHeader, isDevicePaired } from "./device-pairing";
@@ -217,7 +218,7 @@ async function pushServerState(state: SyncedAppState): Promise<FetchOutcome<void
 export async function checkAppStateSyncStatus(): Promise<{ configured: boolean; paired: boolean }> {
   const paired = isDevicePaired();
   try {
-    const res = await fetch(STATE_ENDPOINT, { method: "GET", headers: pairedAuthHeader() });
+    const res = await fetch(`${STATE_ENDPOINT}?${STATUS_PROBE_QUERY}`, { method: "GET", headers: pairedAuthHeader() });
     if (res.status === 503) return { configured: false, paired };
     if (res.status === 401) return { configured: true, paired: false };
     if (res.ok) return { configured: true, paired: true };
