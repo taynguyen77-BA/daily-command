@@ -88,6 +88,8 @@ The very first cron run after this is configured for an install that already has
 
 **KV bandwidth metrics (V2.53, opt-in).** `KV_METRICS=1` logs one JSON line per KV call (`[kv-metrics] {op,key,bytesIn,bytesOut,ms}`; the user id in a key is hashed, values are never logged). Unset = the plain client, no overhead. Summarise a log with `npx tsx scripts/kv-metrics-report.mts <logfile>` (per key family: calls, bytes read/written, avg/max, share). Background and the bandwidth budget: `docs/KV-BANDWIDTH.md`.
 
+**Optional request parameters (V2.52.2 / V2.53, all additive — omit them and the response is exactly as before):** `GET /api/command-center/state?probe=1` (auth + configured check, never reads the blob), `GET /api/command-center/state?knownUpdatedAt=<ISO>` (`{ ok, unchanged: true }` without the blob when the caller is current), `GET /api/command-center/reports/server?since=YYYY-MM-DD` (days from that date, inclusive). Scheduler cadence vs. KV bandwidth: see the comment at the top of `.github/workflows/sync.yml`.
+
 **KV client (V2.42):** `@vercel/kv` (deprecated, a thin wrapper over Upstash Redis) was replaced by `@upstash/redis` behind the single `src/lib/server/kv-client.ts` seam. Key names, value shapes, TTLs and the "unconfigured = silent no-op" behaviour are unchanged, and the old `KV_REST_API_*` variable names keep working; a Redis integration's `UPSTASH_REDIS_REST_*` names work too.
 
 ### Cross-Device Sync (V2.15, optional)

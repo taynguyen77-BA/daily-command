@@ -56,9 +56,44 @@ Row 1 alone is the likeliest cause of a ~10 GB/month burn on a single member (�
 and it grows with team size and with the 60-day blob; several active members and open tabs account for the rest.
 **These are estimates; run the metrics before judging.**
 
-## What changes (this release, V2.53) — filled in as each fix lands
+## What changed (V2.53) — one commit per fix, each independently revertable
 
-See `docs/RELEASE-NOTES.md` (V2.53). Each fix is its own commit and is independently revertable.
+| Fix | Change | Revert |
+|---|---|---|
+| 0 | `KV_METRICS=1` call log, `scripts/kv-metrics-report.mts`, this doc | revert the phase-0 commit |
+| 1 | prefs read once per tick; notify state not rewritten when only its cursor moved (< 1 h old); optional `mget` on `KvLike`; `sync.yml` cadence note | revert fix 1 (the mget seam stays harmless) |
+| 2 | `server-reports` split per day (`…:v2:baseline`, `…:v2:<date>`, `…:v2:index`); legacy blob read as a fallback and migrated on the first write; cron writes only what changed; `GET reports/server?since=` | revert fix 2 — **but** once migrated, the reverted code would not see v2 keys: re-seed or accept that history restarts (legacy blob is deleted after migration). Prefer fixing forward. |
+| 3 | `GET state?knownUpdatedAt=` + `app-state-meta:v1`; focus pulls ≥ 60 s apart; no push when nothing is pending | revert fix 3 (the meta key is harmless and ignored) |
+| 4 | Briefing mirror skips an unchanged payload | revert fix 4 |
+
+## Before / after (MEASURED on the in-memory KV with the metrics wrapper; sizes are invented, see below)
+
+`npx tsx scripts/kv-bandwidth-sim.mts` — 3 members, one steady-state cron tick each (after the snapshot hour, nothing new),
+20 focus events over ~3 min, 10 state edits. BEFORE replays the pre-V2.53 access pattern, AFTER runs the real code.
+Seeded sizes: reports 60 days × 40 tickets (~0.6 MB/member), app-state ~100 KB, notify state ~15 KB, briefing ~20 KB.
+
+| Scenario | KV calls | Bytes before | Bytes after | Saved |
+|---|---|---|---|---|
+| Cron tick, 3 members (steady state) | 36 → 30 | 1.77 MB | 0.12 MB | ~93 % |
+| 20 focus events (device current) | 20 → 4 | 1.91 MB | 0.2 KB | ~100 % |
+| 10 state edits (reconcile + push) | 20 → 39 | 1.91 MB | 1.82 MB | ~5 % |
+| First tick after deploy (one-time legacy migration, 3 members) | — | — | 3.4 MB | one-off |
+
+Scaled to a day (96 ticks, ~28 of them after the snapshot hour on a workday) the report blob alone was ~25–40 MB per member;
+it is now a few MB. Real numbers will differ — **re-measure with `KV_METRICS=1` on the deployment.**
+
+## Remaining hotspots (not changed)
+
+- **`POST state` still writes the whole blob per edit** (the push itself): the sim shows it dominating once reads are gone.
+  Next step if the quota is still tight: a per-field or chunked state, or a longer debounce for non-critical fields.
+  Not done: it needs a data-model change and nothing showed which fields are lossless to drop.
+- **`app-state` and the other blobs are not trimmed** (`MAX_MEMORY_EVENTS`, decisions): no measurement says they are large.
+- The cron still does one KV read of ~6 small blobs per member per tick. Lowering the cadence in `.github/workflows/sync.yml`
+  (`*/30` or hourly; the default stays `*/15`) is the next lever, at the price of later notifications.
+- Snapshot ticks after the snapshot hour still re-query Jira every tick (Jira cost, not KV): a minimum interval between snapshot
+  runs would also cut that; not added because it changes when late mentions reach the day's report.
+- Not changed by design: gzip/compact JSON (no benefit at the Upstash REST layer), the Jira write log (already `lrange` of 50),
+  the health probe (already memoized 30 s), the reminders mirror (already skips an unchanged index).
 
 ## After deploy: what to check on the Upstash dashboard
 
