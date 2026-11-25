@@ -22,6 +22,7 @@ import { runRemindersTick, type RemindersTickResult } from "../reminders-tick";
 import { runBriefingTick, type BriefingStore, type BriefingTickResult } from "../briefing";
 import { fetchAssignedIssuesWith } from "./http";
 import { addDays } from "../reminder-schedule";
+import { memoizePrefsStore } from "../cron-read-savings";
 import type { JiraConnectionConfig } from "./types";
 
 export interface CronTickResult {
@@ -63,6 +64,8 @@ export async function runCronTick(
 ): Promise<CronTickResult> {
   // A failure in either step never fails the other, and never corrupts persisted state (both
   // modules only write after every fetch succeeded) — it is surfaced as a warning.
+  // V2.53 — the prefs record is read once per tick (notify, reminders and briefing all use it).
+  if (steps.smartNotify) steps = { ...steps, smartNotify: { ...steps.smartNotify, prefsStore: memoizePrefsStore(steps.smartNotify.prefsStore) } };
   const warnings: string[] = [];
   let notified = 0;
   let slack: CronTickResult["slack"];

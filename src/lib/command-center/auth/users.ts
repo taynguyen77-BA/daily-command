@@ -6,7 +6,7 @@
 // Secrets in a profile (Jira token, Slack webhook) are sealed with secret-box.ts and are never
 // part of anything returned to a browser — publicProfile() is the only browser-facing view.
 
-import type { KvLike } from "../kv/kv";
+import { kvMget, type KvLike } from "../kv/kv";
 import { isAdminEmail, isEmailAllowed, normalizeEmail, userIdForEmail, type AuthSettings } from "./auth-config";
 
 export type UserRole = "admin" | "member";
@@ -139,7 +139,11 @@ export function createUserDirectory(kv: KvLike): UserDirectory {
     await kv.set(USER_KEY(u.uid), u);
     await kv.sadd(USERS_SET, u.uid);
   };
-  const listUsers = async () => (await Promise.all((await kv.smembers(USERS_SET)).map(getUser))).filter((u): u is UserRecord => !!u).sort((a, b) => a.email.localeCompare(b.email));
+  const listUsers = async () => {
+    const uids = await kv.smembers(USERS_SET);
+    const raws = await kvMget(kv, uids.map(USER_KEY)); // V2.53 — one round trip instead of one get per member
+    return raws.map((raw, i) => asRecord(raw, uids[i])).filter((u): u is UserRecord => !!u).sort((a, b) => a.email.localeCompare(b.email));
+  };
   return {
     getUser,
     listUsers,

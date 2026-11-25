@@ -31,6 +31,7 @@ import type { TicketUrgencyFacts } from "./notify-severity";
 import { jiraConcurrency, mapWithConcurrency } from "./jira/concurrency";
 import { fifoUnion, keysToFetch, MAX_NOTIFIED_COMMENT_IDS, MAX_RETRY_ISSUE_KEYS, nextRetryKeys } from "./notify-baseline";
 import { applyDeliveryOutcomes, assignmentSignalId, DEFAULT_MAX_PER_RUN, mentionSignalId, type DeliveryOutcome } from "./notify-delivery";
+import { shouldWriteNotifyState } from "./cron-read-savings";
 
 export interface ServerNotifyCheckResult {
   notified: number;
@@ -324,7 +325,8 @@ export async function runServerSideNotifyCheck(
     ...learned,
     ...smartExtras,
   };
-  await store.set(nextState);
+  // V2.53 — a tick where only the cursor moved (and it is fresh) writes nothing.
+  if (shouldWriteNotifyState(previous, nextState, nowDate)) await store.set(nextState);
 
   return {
     notified: delivered,

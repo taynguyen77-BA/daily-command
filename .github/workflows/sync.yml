@@ -18,6 +18,10 @@ name: Jira sync (scheduled)
 #    it is still enabled and re-arms the 60-day window; if it has been disabled, enable it by
 #    hand in the Actions tab.
 
+# V2.53 — cadence vs. Upstash bandwidth: every tick reads (and sometimes writes) the member's KV blobs. The default stays
+# every 15 minutes. If the free plan's 10 GB/month bandwidth is a concern, a longer cadence is the simplest lever — e.g.
+#   - cron: "*/30 * * * *"    (half the reads)      - cron: "0 * * * *"    (a quarter)
+# at the price of notifications arriving up to that much later. See docs/KV-BANDWIDTH.md.
 on:
   schedule:
     - cron: "*/15 * * * *"

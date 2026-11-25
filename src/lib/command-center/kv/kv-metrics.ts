@@ -64,6 +64,7 @@ export function withKvMetrics(kv: KvLike, opts: { log?: (line: string) => void; 
     sadd: (key, member) => time("sadd", key, bytesOf(member), () => kv.sadd(key, member), none),
     srem: (key, member) => time("srem", key, bytesOf(member), () => kv.srem(key, member), none),
     smembers: (key) => time("smembers", key, 0, () => kv.smembers(key), bytesOf),
+    ...(kv.mget ? { mget: <T,>(keys: string[]) => time("mget", keys[0] ?? "", 0, () => kv.mget!<T>(keys), bytesOf) } : {}),
   };
 }
 

@@ -13,6 +13,17 @@ export interface KvLike {
   sadd(key: string, member: string): Promise<void>;
   srem(key: string, member: string): Promise<void>;
   smembers(key: string): Promise<string[]>;
+  /** V2.53 — optional batch read (one round trip, same bytes). Use kvMget(), which falls back to sequential gets. */
+  mget?<T = unknown>(keys: string[]): Promise<(T | null)[]>;
+}
+
+/** Read several keys: one mget when the store supports it, otherwise sequential get()s. Order is kept; missing = null. */
+export async function kvMget<T = unknown>(kv: KvLike, keys: string[]): Promise<(T | null)[]> {
+  if (keys.length === 0) return [];
+  if (kv.mget) return kv.mget<T>(keys);
+  const out: (T | null)[] = [];
+  for (const k of keys) out.push(await kv.get<T>(k));
+  return out;
 }
 
 /** Redis-style list index → array index (negative counts from the end). */
@@ -70,6 +81,9 @@ export function createInMemoryKv(): KvLike & { keys(): string[] } {
     },
     async smembers(key) {
       return Array.from(sets.get(key) ?? []);
+    },
+    async mget<T>(keys: string[]) {
+      return keys.map((k) => (values.has(k) ? clone(values.get(k) as T) : null));
     },
   };
 }

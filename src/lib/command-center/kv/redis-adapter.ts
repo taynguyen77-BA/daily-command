@@ -16,6 +16,7 @@ export interface RedisLike {
   sadd(key: string, member: string, ...members: string[]): Promise<unknown>;
   srem(key: string, ...members: string[]): Promise<unknown>;
   smembers(key: string): Promise<string[]>;
+  mget?<T = unknown[]>(...keys: string[]): Promise<T>;
 }
 
 export function kvFromRedis(redis: RedisLike): KvLike {
@@ -44,5 +45,7 @@ export function kvFromRedis(redis: RedisLike): KvLike {
       await redis.srem(key, member);
     },
     smembers: (key) => redis.smembers(key),
+    // V2.53 — one MGET round trip when the client has it (a missing key reads null, like get()).
+    ...(redis.mget ? { mget: <T,>(keys: string[]) => redis.mget!<(T | null)[]>(...keys) } : {}),
   };
 }

@@ -8,7 +8,7 @@
 
 import "server-only";
 import { Redis } from "@upstash/redis";
-import { createInMemoryKv, type KvLike } from "../command-center/kv/kv";
+import { createInMemoryKv, kvMget, type KvLike } from "../command-center/kv/kv";
 import { resolveKvCredentials } from "../command-center/kv/kv-credentials";
 import { withKvMetrics } from "../command-center/kv/kv-metrics";
 import { kvFromRedis, type RedisLike } from "../command-center/kv/redis-adapter";
@@ -42,6 +42,7 @@ export const vercelKv: KvLike = {
   sadd: (key, member) => realKv().sadd(key, member),
   srem: (key, member) => realKv().srem(key, member),
   smembers: (key) => realKv().smembers(key),
+  mget: <T,>(keys: string[]) => (realKv().mget ? realKv().mget!<T>(keys) : kvMget<T>(realKv(), keys)),
 };
 
 const devKv = globalThis as { __dailyCommandDevKv?: KvLike };
