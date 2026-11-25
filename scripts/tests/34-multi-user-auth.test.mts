@@ -310,7 +310,7 @@ const ctxFor = (email: string, over: Partial<AccountContext> = {}): AccountConte
   const usageRoute = read("src/app/api/command-center/ai/usage/route.ts");
   ok(group, /recordsOfUser\(records, p\.user\.uid\)/.test(usageRoute) && /p\.user\.role === "admin" \? \{ team \} : \{\}/.test(usageRoute), "the usage route serves 'you' to everyone and 'team' to admins only");
   const stateRoute = read("src/app/api/command-center/state/route.ts");
-  ok(group, /createAppStateStore\(scopeOf\(p\)\)\.get\(\)/.test(stateRoute) && /createAppStateStore\(scopeOf\(p\)\)\.set\(/.test(stateRoute) && /createServerReportStore\(scopeOf\(p\)\)/.test(read("src/app/api/command-center/reports/server/route.ts")), "the state and server-report routes read/write the caller's own scope");
+  ok(group, /const store = createAppStateStore\(scopeOf\(p\)\);[\s\S]*store\.get\(\)/.test(stateRoute) && /createAppStateStore\(scopeOf\(p\)\)\.set\(/.test(stateRoute) && /createServerReportStore\(scopeOf\(p\)\)/.test(read("src/app/api/command-center/reports/server/route.ts")), "the state and server-report routes read/write the caller's own scope");
 }
 
 // ===== L4 — Jira write per member =====

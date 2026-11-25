@@ -15,6 +15,7 @@ import type { CommandCenterStore, StoreState } from "./store";
 import { mergeById } from "./store";
 import type { SyncedAppState } from "./app-state";
 import { STATUS_PROBE_QUERY } from "./app-state";
+import { shouldPullNow } from "./app-state-pull-throttle";
 import { mergeMentionReplies } from "./mention-replies";
 import { emptyTombstones, maxIso, mergeDailyCommandState, mergeReviewAcks, type DailyCommandState } from "./execution-state-merge";
 import { pairedAuthHeader, isDevicePaired } from "./device-pairing";
@@ -183,19 +184,28 @@ type FetchOutcome<T> = { ok: true; value: T } | { ok: false; reason: "not-paired
 // Sign-in on: the session cookie authenticates and pairedAuthHeader() is deliberately empty, so
 // "paired" must be asked of isDevicePaired() — gating on the header alone silently disabled sync
 // for every signed-in member.
-async function getServerState(): Promise<FetchOutcome<SyncedAppState | null>> {
+async function fetchServerState(knownUpdatedAt?: string): Promise<FetchOutcome<SyncedAppState | null> | { ok: true; unchanged: true }> {
   if (!isDevicePaired()) return { ok: false, reason: "not-paired" };
   try {
-    const res = await fetch(STATE_ENDPOINT, { method: "GET", headers: { ...pairedAuthHeader() } });
+    // V2.53 — with a known time the server answers `unchanged` instead of sending the blob when we are current.
+    const url = knownUpdatedAt ? `${STATE_ENDPOINT}?knownUpdatedAt=${encodeURIComponent(knownUpdatedAt)}` : STATE_ENDPOINT;
+    const res = await fetch(url, { method: "GET", headers: { ...pairedAuthHeader() } });
     if (res.status === 401) return { ok: false, reason: "unauthorized" };
     if (res.status === 503) return { ok: false, reason: "unavailable" };
     if (!res.ok) return { ok: false, reason: "network" };
-    const json = (await res.json()) as { ok: boolean; state?: SyncedAppState | null };
+    const json = (await res.json()) as { ok: boolean; state?: SyncedAppState | null; unchanged?: boolean };
     if (!json.ok) return { ok: false, reason: "malformed" };
+    if (json.unchanged === true) return { ok: true, unchanged: true };
     return { ok: true, value: json.state ?? null };
   } catch {
     return { ok: false, reason: "network" };
   }
+}
+
+/** The full read (no known time): never "unchanged". */
+async function getServerState(): Promise<FetchOutcome<SyncedAppState | null>> {
+  const r = await fetchServerState();
+  return "unchanged" in r ? { ok: false, reason: "malformed" } : r;
 }
 
 async function pushServerState(state: SyncedAppState): Promise<FetchOutcome<void>> {
@@ -258,8 +268,9 @@ function comparableJson(state: StoreState): string {
  *  when the server is unreachable (the push itself will then fail and back off as before). */
 async function reconcileWithServer(store: CommandCenterStore, now: string): Promise<SyncedAppState> {
   const local = extractSyncedAppState(store.getSnapshot(), now);
-  const server = await getServerState();
-  if (!server.ok || server.value === null) return local;
+  const lastKnownIso = store.getSnapshot().lastAppStateSyncIso;
+  const server = await fetchServerState(lastKnownIso);
+  if (!server.ok || "unchanged" in server || server.value === null) return local;
   const lastKnown = store.getSnapshot().lastAppStateSyncIso ?? "";
   if (server.value.updatedAtIso <= lastKnown) return local;
   const merged = { ...mergeSyncedAppState(server.value, local), updatedAtIso: now };
@@ -269,6 +280,8 @@ async function reconcileWithServer(store: CommandCenterStore, now: string): Prom
 
 async function flushPendingPush(store: CommandCenterStore) {
   if (!isDevicePaired()) return;
+  // V2.53 — nothing pending (e.g. the `online` event with an already-synced slice): no GET, no POST.
+  if (comparableJson(store.getSnapshot()) === lastKnownSliceJson) return;
   const now = new Date().toISOString();
   const slice = await reconcileWithServer(store, now);
   const result = await pushServerState(slice);
@@ -302,8 +315,8 @@ async function flushPendingPush(store: CommandCenterStore) {
 
 async function pullIfServerNewer(store: CommandCenterStore) {
   if (!isDevicePaired()) return;
-  const server = await getServerState();
-  if (!server.ok || server.value === null) return;
+  const server = await fetchServerState(store.getSnapshot().lastAppStateSyncIso);
+  if (!server.ok || "unchanged" in server || server.value === null) return;
   if (server.value.updatedAtIso <= (store.getSnapshot().lastAppStateSyncIso ?? "")) return;
   const now = new Date().toISOString();
   const merged = { ...mergeSyncedAppState(extractSyncedAppState(store.getSnapshot(), now), server.value), updatedAtIso: now };
@@ -362,8 +375,12 @@ export async function initAppStateSync(store: CommandCenterStore): Promise<void>
     });
     // A1 — pick up records another device pushed mid-session (the on-load merge below only
     // runs once): a GET on return to the tab, merging + converging only when the server moved.
+    let lastPullAt: number | null = null;
     const pullOnReturn = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      // V2.53 — at most one pull a minute (focus + visibilitychange fire together and on every tab switch).
+      if (!shouldPullNow(lastPullAt, Date.now())) return;
+      lastPullAt = Date.now();
       void pullIfServerNewer(store);
     };
     window.addEventListener("focus", pullOnReturn);

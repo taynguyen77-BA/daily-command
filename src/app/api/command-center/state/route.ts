@@ -38,7 +38,15 @@ export async function GET(req: Request) {
   }
   // V2.52.2 — status checks need only the auth/config answer; never read the (large) blob for them.
   if (isStatusProbe(req.url)) return NextResponse.json({ ok: true, probe: true, state: null });
-  const state = await createAppStateStore(scopeOf(p)).get();
+  const store = createAppStateStore(scopeOf(p));
+  // V2.53 — `?knownUpdatedAt=<ISO>`: answer `{ ok, unchanged: true }` without the blob when the caller is current.
+  const known = new URL(req.url).searchParams.get("knownUpdatedAt") ?? undefined;
+  if (known && store.getIfChanged) {
+    const r = await store.getIfChanged(known);
+    if ("unchanged" in r) return NextResponse.json({ ok: true, unchanged: true });
+    return NextResponse.json({ ok: true, state: r.state });
+  }
+  const state = await store.get();
   return NextResponse.json({ ok: true, state });
 }
 

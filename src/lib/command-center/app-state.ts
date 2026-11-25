@@ -83,6 +83,9 @@ export interface SyncedAppState {
 export interface AppStateStore {
   get(): Promise<SyncedAppState | null>;
   set(state: SyncedAppState): Promise<void>;
+  /** V2.53 — conditional read: `{ unchanged: true }` (no blob read) when the caller already holds `knownUpdatedAt` or
+   *  newer; otherwise the blob. Optional: a store without it just serves get(). */
+  getIfChanged?(knownUpdatedAt: string | undefined): Promise<{ unchanged: true } | { state: SyncedAppState | null }>;
 }
 
 /** V2.15 §3 — a boolean-only presence check (never a secret value), same reasoning as

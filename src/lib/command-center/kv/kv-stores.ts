@@ -89,7 +89,43 @@ function blobStore<T>(kv: KvLike, key: string, isValid: (v: unknown) => v is T) 
   };
 }
 
-export const createKvAppStateStore = (kv: KvLike, uid?: string): AppStateStore => blobStore(kv, scopedKey(APP_STATE_KEY, uid), isValidAppState);
+export const APP_STATE_META_KEY = "daily-command:app-state-meta:v1";
+
+/** V2.53 — the blob plus a tiny sibling `{ updatedAtIso }` key so a conditional GET never reads the blob. The meta is
+ *  written BEFORE the blob (a crash in between only costs a client one redundant fetch, never a missed update) and is
+ *  created lazily from a legacy blob that has none. */
+export function createKvAppStateStore(kv: KvLike, uid?: string): AppStateStore {
+  const blobKey = scopedKey(APP_STATE_KEY, uid);
+  const metaKey = scopedKey(APP_STATE_META_KEY, uid);
+  const blob = blobStore(kv, blobKey, isValidAppState);
+  const readMeta = async (): Promise<string | null> => {
+    try {
+      const m = await kv.get<{ updatedAtIso?: unknown }>(metaKey);
+      return m && typeof m.updatedAtIso === "string" ? m.updatedAtIso : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    get: blob.get,
+    async set(state) {
+      try {
+        await kv.set(metaKey, { updatedAtIso: state.updatedAtIso });
+      } catch {
+        // best-effort: without meta a conditional GET falls back to reading the blob
+      }
+      await blob.set(state);
+    },
+    async getIfChanged(known) {
+      const meta = await readMeta();
+      if (known && meta && meta <= known) return { unchanged: true };
+      const state = await blob.get();
+      if (state && !meta) await kv.set(metaKey, { updatedAtIso: state.updatedAtIso }).catch(() => undefined);
+      if (known && state && state.updatedAtIso <= known) return { unchanged: true };
+      return { state };
+    },
+  };
+}
 export const createKvNotifyStore = (kv: KvLike, uid?: string): NotifyStateStore => blobStore(kv, scopedKey(NOTIFY_STATE_KEY, uid), isValidNotifyState);
 export const createKvHeartbeatStore = (kv: KvLike, uid?: string): HeartbeatStore => blobStore(kv, scopedKey(CRON_HEARTBEAT_KEY, uid), isValidHeartbeat);
 /** P2.3 — a member's last-processed time ({ at }), one small blob per member. */

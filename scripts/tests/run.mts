@@ -85,6 +85,7 @@ const FILES = [
   "./73-kv-metrics.test.mts",
   "./74-kv-fix1-cron-reads.test.mts",
   "./75-kv-fix2-server-reports.test.mts",
+  "./76-kv-fix3-app-state.test.mts",
 ];
 
 for (const file of FILES) await import(file);
