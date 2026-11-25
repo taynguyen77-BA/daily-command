@@ -4,6 +4,8 @@ Moved verbatim from README.md in V2.45.0 (C3): every `(V2.NN)` section, the page
 
 ## Round 4: AI call foundation, report narrative, honest labels, self-test coverage (V2.49 · V2.50 · V2.51 · V2.52)
 
+**V2.53 — KV bandwidth (Phase 0: measure).** The Upstash free plan's 10 GB/month bandwidth cap was exhausted, which made every KV call fail (including the sign-in gate). Phase 0 adds the opt-in `KV_METRICS=1` call log (`kv/kv-metrics.ts`, applied only in `kv-client.ts`), `scripts/kv-metrics-report.mts`, and `docs/KV-BANDWIDTH.md` (the ranked budget, ESTIMATE vs MEASURED). No behaviour change with the variable unset.
+
 **V2.52.2 — sync status check no longer downloads the synced blob.** `checkAppStateSyncStatus` (BackupReminder, SetupHealthBanner, Data & Settings) did a full `GET /api/command-center/state` on every page load just to read the status code, which can exhaust the KV (Upstash) bandwidth quota — after which every KV call, including the sign-in access check, fails. It now calls `GET …/state?probe=1`: same auth and "configured" answers, no KV read of the blob. A plain GET (the real sync pull) is unchanged, and an older server that ignores the parameter still answers correctly.
 
 **V2.52.1 — "Couldn't load your account" (HTTP 500).** An unexpected failure inside `/api/command-center/me` (KV unreachable, session/secret misconfiguration) escaped as Next's empty 500, so the sign-in gate could only print "HTTP 500". The route is now wrapped by `guardedRoute` (`lib/server/route-guard.ts`): it answers JSON with a plain, secret-free reason (check KV, NEXTAUTH_SECRET, NEXTAUTH_URL) and logs the real error redacted. No behaviour change when nothing throws.

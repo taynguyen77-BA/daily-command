@@ -82,6 +82,7 @@ const FILES = [
   "./70-ai-selftest-coverage.test.mts",
   "./71-route-guard.test.mts",
   "./72-sync-status-probe.test.mts",
+  "./73-kv-metrics.test.mts",
 ];
 
 for (const file of FILES) await import(file);

@@ -86,6 +86,8 @@ Both are required together for the server-side path to activate; either one miss
 
 The very first cron run after this is configured for an install that already has real assigned/mentioned tickets sitting in Jira establishes a baseline and sends **zero** Slack messages — the exact same cold-start discipline V2.10.1 already guarantees for the browser-tab path, now also true for the unattended one. A cron run's own connectivity failure (Jira unreachable, credentials rejected, etc.) never corrupts the persisted baseline — the next successful run still diffs correctly against the last known-good state.
 
+**KV bandwidth metrics (V2.53, opt-in).** `KV_METRICS=1` logs one JSON line per KV call (`[kv-metrics] {op,key,bytesIn,bytesOut,ms}`; the user id in a key is hashed, values are never logged). Unset = the plain client, no overhead. Summarise a log with `npx tsx scripts/kv-metrics-report.mts <logfile>` (per key family: calls, bytes read/written, avg/max, share). Background and the bandwidth budget: `docs/KV-BANDWIDTH.md`.
+
 **KV client (V2.42):** `@vercel/kv` (deprecated, a thin wrapper over Upstash Redis) was replaced by `@upstash/redis` behind the single `src/lib/server/kv-client.ts` seam. Key names, value shapes, TTLs and the "unconfigured = silent no-op" behaviour are unchanged, and the old `KV_REST_API_*` variable names keep working; a Redis integration's `UPSTASH_REDIS_REST_*` names work too.
 
 ### Cross-Device Sync (V2.15, optional)

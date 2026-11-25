@@ -10,6 +10,7 @@ import "server-only";
 import { Redis } from "@upstash/redis";
 import { createInMemoryKv, type KvLike } from "../command-center/kv/kv";
 import { resolveKvCredentials } from "../command-center/kv/kv-credentials";
+import { withKvMetrics } from "../command-center/kv/kv-metrics";
 import { kvFromRedis, type RedisLike } from "../command-center/kv/redis-adapter";
 
 let client: KvLike | null = null;
@@ -20,7 +21,9 @@ function realKv(): KvLike {
   if (!creds) throw new Error("KV is not configured.");
   const key = `${creds.url}|${creds.token}`;
   if (!client || clientKey !== key) {
-    client = kvFromRedis(new Redis({ url: creds.url, token: creds.token }) as unknown as RedisLike);
+    const base = kvFromRedis(new Redis({ url: creds.url, token: creds.token }) as unknown as RedisLike);
+    // V2.53 — opt-in bandwidth log; off = the unwrapped client, no overhead.
+    client = process.env.KV_METRICS === "1" ? withKvMetrics(base) : base;
     clientKey = key;
   }
   return client;
