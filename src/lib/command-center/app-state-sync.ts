@@ -423,12 +423,34 @@ const SERVER_REPORTS_ENDPOINT = "/api/command-center/reports/server";
 
 /** E4 — fetches the cron-written daily standup snapshots and merges them into dailyReports.
  *  Silent on any failure (unpaired, not configured, offline): reports just stay client-only. */
+const SERVER_REPORTS_SINCE_KEY = "daily-command:server-reports-since:v1";
+const readServerReportsSince = (): string | undefined => {
+  try {
+    const v = typeof localStorage === "undefined" ? null : localStorage.getItem(SERVER_REPORTS_SINCE_KEY);
+    return v && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
 export async function pullServerDailyReports(store: CommandCenterStore): Promise<void> {
   try {
-    const res = await fetch(SERVER_REPORTS_ENDPOINT, { method: "GET", headers: pairedAuthHeader() });
+    // V2.53 — ask only for days from the newest one this device already pulled (inclusive); the first pull gets all.
+    const since = readServerReportsSince();
+    const res = await fetch(since ? `${SERVER_REPORTS_ENDPOINT}?since=${since}` : SERVER_REPORTS_ENDPOINT, { method: "GET", headers: pairedAuthHeader() });
     if (!res.ok) return;
     const json = (await res.json()) as { ok?: boolean; reports?: unknown };
-    if (json.ok && json.reports && typeof json.reports === "object") store.mergeServerDailyReports(json.reports as Record<string, ServerDailyStandup>);
+    if (json.ok && json.reports && typeof json.reports === "object") {
+      store.mergeServerDailyReports(json.reports as Record<string, ServerDailyStandup>);
+      const newest = Object.keys(json.reports).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)).sort().pop();
+      if (newest) {
+        try {
+          if (typeof localStorage !== "undefined") localStorage.setItem(SERVER_REPORTS_SINCE_KEY, newest);
+        } catch {
+          // best-effort
+        }
+      }
+    }
   } catch {
     // best-effort
   }

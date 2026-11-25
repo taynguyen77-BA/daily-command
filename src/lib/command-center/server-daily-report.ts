@@ -43,6 +43,12 @@ export interface ServerReportState {
 export interface ServerReportStore {
   get(): Promise<ServerReportState | null>;
   set(state: ServerReportState): Promise<void>;
+  /** V2.53 — optional fine-grained access (the per-day KV layout). Stores without it (the in-memory one) use get()/set(). */
+  getSince?(since?: string): Promise<Record<string, ServerDailyStandup>>;
+  getBaseline?(): Promise<ServerReportBaseline | null>;
+  getDay?(date: string): Promise<ServerDailyStandup | null>;
+  putDay?(date: string, report: ServerDailyStandup): Promise<void>;
+  putBaseline?(baseline: ServerReportBaseline): Promise<void>;
 }
 
 export function createInMemoryServerReportStore(initial: ServerReportState | null = null): ServerReportStore {
@@ -126,8 +132,11 @@ export async function runServerDailySnapshot(
   // G3 — only at/after the end of the local workday (nothing is written, baseline untouched).
   if (options.snapshotHourLocal !== undefined && localHourFor(options.now, options.timezoneOffsetMinutes) < options.snapshotHourLocal) return { date, written: false, skipped: "too-early" };
 
-  const previous = await store.get();
-  const baseline = previous?.baseline ?? null;
+  // V2.53 — a store with per-day access reads only the baseline and today's day, and writes only what changed;
+  // any other store (in-memory, tests) keeps the whole-state read-modify-write below.
+  const fine = store.getBaseline && store.getDay && store.putDay && store.putBaseline ? { getBaseline: store.getBaseline.bind(store), getDay: store.getDay.bind(store), putDay: store.putDay.bind(store), putBaseline: store.putBaseline.bind(store) } : null;
+  const previous = fine ? null : await store.get();
+  const baseline = (fine ? await fine.getBaseline() : previous?.baseline) ?? null;
 
   // Open issues + issues that turned Done in the last 14 days (so "closed in Jira" is still seen);
   // never the account's whole history.
@@ -166,7 +175,7 @@ export async function runServerDailySnapshot(
   };
 
   // A second run on the same day adds to that day's report rather than replacing it.
-  const sameDay = previous?.reports[date];
+  const sameDay = fine ? await fine.getDay(date) : previous?.reports[date];
   const merged: ServerDailyStandup = sameDay
     ? {
         ...report,
@@ -178,18 +187,27 @@ export async function runServerDailySnapshot(
     : report;
   if (merged.coldStart === undefined) delete merged.coldStart;
 
+  const nextBaseline: ServerReportBaseline = {
+    assignedOpenKeys: openKeys,
+    assignedAllKeys: workItems.map((w) => w.key),
+    seenMentionCommentIds: Array.from(new Set([...(baseline?.seenMentionCommentIds ?? []), ...mentions.map((m) => m.commentId)])).slice(-MAX_SEEN_MENTIONS),
+    lastRunIso: options.now.toISOString(),
+    ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
+  };
+
+  if (fine) {
+    // Today's day: skipped when only `generatedAt` differs. Baseline: skipped when only `lastRunIso` moved and the
+    // stored one is under an hour old (a slightly older cursor only widens the next mention query).
+    const same = (a: unknown, b: unknown, ignore: string) => JSON.stringify({ ...(a as object), [ignore]: "" }) === JSON.stringify({ ...(b as object), [ignore]: "" });
+    if (!sameDay || !same(sameDay, merged, "generatedAt")) await fine.putDay(date, merged);
+    const age = baseline ? options.now.getTime() - Date.parse(baseline.lastRunIso) : Infinity;
+    if (!baseline || !Number.isFinite(age) || age < 0 || age >= 60 * 60 * 1000 || !same(baseline, nextBaseline, "lastRunIso")) await fine.putBaseline(nextBaseline);
+    return { date, written: true };
+  }
+
   const reports = { ...(previous?.reports ?? {}), [date]: merged };
   for (const old of Object.keys(reports).sort().slice(0, Math.max(0, Object.keys(reports).length - MAX_SERVER_REPORT_DAYS))) delete reports[old];
 
-  await store.set({
-    baseline: {
-      assignedOpenKeys: openKeys,
-      assignedAllKeys: workItems.map((w) => w.key),
-      seenMentionCommentIds: Array.from(new Set([...(baseline?.seenMentionCommentIds ?? []), ...mentions.map((m) => m.commentId)])).slice(-MAX_SEEN_MENTIONS),
-      lastRunIso: options.now.toISOString(),
-      ...(retryIssueKeys.length > 0 ? { retryIssueKeys } : {}),
-    },
-    reports,
-  });
+  await store.set({ baseline: nextBaseline, reports });
   return { date, written: true };
 }

@@ -16,6 +16,7 @@ import { scopedKey } from "../auth/auth-config";
 import { asBriefingRecord, type BriefingRecord, type BriefingStore } from "../briefing";
 import { asReminderIndex, type ReminderIndex, type ReminderIndexStore } from "../reminder-index";
 import type { KvLike } from "./kv";
+import { createKvServerReportStoreV2 } from "./server-report-kv";
 
 export const APP_STATE_KEY = "daily-command:app-state:v1";
 export const NOTIFY_STATE_KEY = "daily-command:personal-notify-state:v1";
@@ -107,7 +108,8 @@ export function createKvDigestStore(kv: KvLike, uid?: string): DigestStore {
   const inner = digestBlob(kv, uid);
   return { get: async () => (await inner.get()) ?? { items: [] }, set: (s) => inner.set(s) };
 }
-export const createKvServerReportStore = (kv: KvLike, uid?: string): ServerReportStore => blobStore(kv, scopedKey(SERVER_REPORTS_KEY, uid), isValidReportState);
+// V2.53 — per-day layout with a legacy-blob fallback (kv/server-report-kv.ts); same get()/set() contract.
+export const createKvServerReportStore = (kv: KvLike, uid?: string): ServerReportStore => createKvServerReportStoreV2(kv, uid, SERVER_REPORTS_KEY, isValidReportState);
 
 /** Append-only (rpush, trimmed to the newest entries, never edited). */
 export function createKvJiraWriteLogStore(kv: KvLike, uid?: string): JiraWriteLogStore {
