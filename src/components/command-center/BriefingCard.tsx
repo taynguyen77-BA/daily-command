@@ -13,7 +13,9 @@ import { nbaInputFrom } from "@/lib/command-center/nba-inputs";
 import { pairedAuthHeader } from "@/lib/command-center/device-pairing";
 import { Panel, SectionHeading } from "./ui";
 import { useCommandCenter } from "./use-command-center";
+import { briefingMirrorSignature, shouldPostBriefing } from "@/lib/command-center/briefing-mirror";
 
+const MIRROR_SIG_KEY = "daily-command:briefing-mirror-sig:v1";
 export function BriefingCard() {
   const { state, today, derived, forecast, scoring, filteredData } = useCommandCenter();
   const prefs = asBriefingPrefs(state.briefingPrefs);
@@ -35,7 +37,15 @@ export function BriefingCard() {
   useEffect(() => {
     if (!content) return;
     const t = setTimeout(() => {
-      void fetch("/api/command-center/briefing", { method: "POST", headers: { "Content-Type": "application/json", ...pairedAuthHeader() }, body: JSON.stringify({ prefs, snapshot: content.snapshot, links: content.record.links }) }).catch(() => undefined);
+      // V2.53 — an unchanged briefing (same prefs, Next Best Actions, slips, waits, links) is not POSTed again; the last
+      // mirrored signature survives a reload in localStorage (best effort).
+      const sig = briefingMirrorSignature(prefs, content.snapshot, content.record.links);
+      let last: string | null = null;
+      try { last = localStorage.getItem(MIRROR_SIG_KEY); } catch { last = null; }
+      if (!shouldPostBriefing(last, sig)) return;
+      void fetch("/api/command-center/briefing", { method: "POST", headers: { "Content-Type": "application/json", ...pairedAuthHeader() }, body: JSON.stringify({ prefs, snapshot: content.snapshot, links: content.record.links }) })
+        .then((res) => { if (res.ok) { try { localStorage.setItem(MIRROR_SIG_KEY, sig); } catch { /* best effort */ } } })
+        .catch(() => undefined);
     }, 4000);
     return () => clearTimeout(t);
   }, [content, prefs]);
